@@ -1,4 +1,4 @@
-# WindowsAdminMCP v0.3.0: single native stdio server, bounded async commands.
+# WindowsAdminMCP v0.4.0: single native stdio server, bounded async commands.
 $ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
@@ -10,6 +10,7 @@ Add-Type -TypeDefinition @'
 using System;
 using System.IO;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -20,12 +21,35 @@ using System.Threading.Tasks;
 using System.Diagnostics;
 using System.Linq;
 
-public static class WindowsAdminMcpServerV03 {
+public static class WindowsAdminMcpServerV04 {
     static readonly object WriteLock = new object();
     static readonly object AuditLock = new object();
     static readonly SemaphoreSlim ExecGate = new SemaphoreSlim(1,1);
     static readonly List<Task> Pending = new List<Task>();
     static int Outstanding = 0;
+    static readonly ConcurrentDictionary<string,Job> Jobs=new ConcurrentDictionary<string,Job>();
+    sealed class Job : IDisposable {
+        public CancellationTokenSource Deadline;
+        public bool CancelledByUser;
+        public readonly Stopwatch Elapsed=Stopwatch.StartNew();
+        public string ProgressToken;
+        public Job(int seconds,string progressToken){Deadline=new CancellationTokenSource(TimeSpan.FromSeconds(seconds));ProgressToken=progressToken;}
+        public void Dispose(){Deadline.Dispose();}
+    }
+    static void Progress(Job job,int value,string message){
+        if(job.ProgressToken==null)return;
+        Send("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":"+job.ProgressToken+",\"progress\":"+value+",\"total\":1,\"message\":"+JsonSerializer.Serialize(message)+"}}");
+    }
+    static void Cancel(JsonElement root){
+        if(!Property(root,"params",out var p)||!Property(p,"requestId",out var id))return;
+        if(Jobs.TryGetValue(id.GetRawText(),out var job)){
+            job.CancelledByUser=true;
+            try{job.Deadline.Cancel();}catch(ObjectDisposedException){}
+        }
+    }
+    static string QueueResult(Job job){
+        return job.CancelledByUser?"CANCELLED_BEFORE_EXECUTION":"TIMEOUT_BEFORE_EXECUTION";
+    }
     static string LogPath = "";
     static string User = "";
     static string PsVersion = "";
@@ -77,10 +101,13 @@ public static class WindowsAdminMcpServerV03 {
             string idJson=hasId?id.GetRawText():"null";
             if(hasId && id.ValueKind!=JsonValueKind.String && id.ValueKind!=JsonValueKind.Number && id.ValueKind!=JsonValueKind.Null){Error("null",-32600,"Invalid id");return;}
             if(!Property(root,"jsonrpc",out var protocol)||protocol.ValueKind!=JsonValueKind.String||protocol.GetString()!="2.0"||!Property(root,"method",out var method)||method.ValueKind!=JsonValueKind.String){Error(idJson,-32600,"Invalid Request");return;}
-            if(!hasId)return; // JSON-RPC notification, no response.
+            if(!hasId){
+                if(method.GetString()=="notifications/cancelled")Cancel(root);
+                return; // No response to notifications.
+            }
             switch(method.GetString()){
                 case "initialize":
-                    Result(idJson,"{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"windows-admin-mcp\",\"version\":\"0.3.0\"}}");break;
+                    Result(idJson,"{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"windows-admin-mcp\",\"version\":\"0.4.0\"}}");break;
                 case "ping":Result(idJson,"{}");break;
                 case "tools/list":Result(idJson,ToolsJson);break;
                 case "resources/list":Result(idJson,"{\"resources\":[]}");break;
@@ -119,18 +146,45 @@ public static class WindowsAdminMcpServerV03 {
         if(!Elevated){ToolResult(id,new Dictionary<string,object>{{"status","BLOCKED"},{"reason","NOT_ELEVATED"}},true);return;}
         if(!Directory.Exists(workingDir)){ToolResult(id,new Dictionary<string,object>{{"status","BLOCKED"},{"reason","WORKING_DIRECTORY_NOT_FOUND"}},true);return;}
         if(Interlocked.Increment(ref Outstanding)>MaxQueue){Interlocked.Decrement(ref Outstanding);ToolResult(id,new Dictionary<string,object>{{"status","BLOCKED"},{"reason","EXEC_QUEUE_FULL"}},true);return;}
-        Task job=Task.Run(async()=>{
+        string token=null;
+        if(Property(param,"_meta",out var meta) && Property(meta,"progressToken",out var progressToken) &&
+           (progressToken.ValueKind==JsonValueKind.String || progressToken.ValueKind==JsonValueKind.Number))
+           token=progressToken.GetRawText();
+        var job=new Job(seconds,token);
+        if(!Jobs.TryAdd(id,job)){
+            job.Dispose();Interlocked.Decrement(ref Outstanding);Error(id,-32600,"Duplicate outstanding request id");return;
+        }
+        Progress(job,0,"queued");
+        Task running=Task.Run(async()=>{
             try{
-                await ExecGate.WaitAsync().ConfigureAwait(false);
                 try{
-                    var result=await Execute(command,seconds,workingDir).ConfigureAwait(false);
-                    bool fail=!String.Equals((string)result["status"],"COMPLETED",StringComparison.Ordinal) || !(result.TryGetValue("exit_code",out var exit) && exit is int code && code==0);
+                    await ExecGate.WaitAsync(job.Deadline.Token).ConfigureAwait(false);
+                }catch(OperationCanceledException){
+                    var state=QueueResult(job);
+                    try{Audit(new Dictionary<string,object>{{"event","queue_finish"},{"request_id",id},{"status",state},{"elapsed_ms",job.Elapsed.ElapsedMilliseconds}});}
+                    catch{state="AUDIT_WRITE_FAILED_BEFORE_EXECUTION";}
+                    ToolResult(id,new Dictionary<string,object>{{"status",state},{"elapsed_ms",job.Elapsed.ElapsedMilliseconds},{"exit_code",null},{"audit_persisted",state!="AUDIT_WRITE_FAILED_BEFORE_EXECUTION"}},true);
+                    return;
+                }
+                try{
+                    if(job.Deadline.IsCancellationRequested){
+                        ToolResult(id,new Dictionary<string,object>{{"status",QueueResult(job)},{"exit_code",null}},true);
+                        return;
+                    }
+                    Progress(job,0,"running");
+                    var result=await Execute(command,seconds,workingDir,job).ConfigureAwait(false);
+                    result["total_elapsed_ms"]=job.Elapsed.ElapsedMilliseconds;
+                    bool fail=!String.Equals((string)result["status"],"COMPLETED",StringComparison.Ordinal) ||
+                        !(result.TryGetValue("exit_code",out var exit) && exit is int code && code==0);
                     ToolResult(id,result,fail);
+                    Progress(job,1,"finished");
                 }finally{ExecGate.Release();}
             }catch(Exception){ToolResult(id,new Dictionary<string,object>{{"status","EXECUTION_FAILED"},{"reason","INTERNAL_EXECUTION_ERROR"}},true);}
-            finally{Interlocked.Decrement(ref Outstanding);}
+            finally{
+                Jobs.TryRemove(id,out _);job.Dispose();Interlocked.Decrement(ref Outstanding);
+            }
         });
-        lock(Pending){Pending.Add(job);Pending.RemoveAll(t=>t.IsCompleted);}
+        lock(Pending){Pending.Add(running);Pending.RemoveAll(t=>t.IsCompleted);}
     }
     static Dictionary<string,object> Status(){
         return new Dictionary<string,object>{
@@ -152,7 +206,7 @@ public static class WindowsAdminMcpServerV03 {
             File.AppendAllText(LogPath,JsonSerializer.Serialize(data)+"\n",new UTF8Encoding(false));
         }
     }
-    static async Task<Dictionary<string,object>> Execute(string cmd,int timeout,string cwd){
+    static async Task<Dictionary<string,object>> Execute(string cmd,int timeout,string cwd,Job job){
         string corr=Guid.NewGuid().ToString("N");
         string hash=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(cmd))).ToLowerInvariant();
         try{Audit(new Dictionary<string,object>{{"event","admit"},{"correlation_id",corr},{"command_sha256",hash},{"host",Environment.MachineName},{"user",User},{"timeout_seconds",timeout}});}
@@ -164,10 +218,19 @@ public static class WindowsAdminMcpServerV03 {
         };
         try{
             string wrapper="$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';"+
+                "$WarningPreference='Continue';$PSNativeCommandUseErrorActionPreference=$true;"+
                 "[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);"+
-                "$OutputEncoding=[Text.UTF8Encoding]::new($false);$global:Error.Clear();"+
-                "try { & { "+cmd+" }; if ($global:Error.Count -gt 0) {[Console]::Error.WriteLine('POWERSHELL_ERROR_RECORDED'); exit 1} }"+
-                " catch { [Console]::Error.WriteLine($_.ToString()); exit 1 }";
+                "$OutputEncoding=[Text.UTF8Encoding]::new($false);$global:LASTEXITCODE=$null;"+
+                "try { $script:unhandledMcpError=$false; & { "+cmd+" } 2>&1 3>&1 | ForEach-Object { "+
+                "if($_ -is [System.Management.Automation.WarningRecord]){[Console]::Error.WriteLine('MCP_WARNING:'+ $_.Message)} "+
+                "elseif($_ -is [System.Management.Automation.ErrorRecord]){ "+
+                "if($_.FullyQualifiedErrorId -eq 'NativeCommandError'){[Console]::Error.WriteLine($_.ToString())} "+
+                "else {$script:unhandledMcpError=$true;[Console]::Error.WriteLine($_.ToString())} } "+
+                "else {$_} };"+
+                " if($script:unhandledMcpError){ exit 1 };"+
+                " if($null -ne $global:LASTEXITCODE -and $global:LASTEXITCODE -ne 0){ exit $global:LASTEXITCODE } }"+
+                " catch { [Console]::Error.WriteLine($_.ToString());"+
+                " if($null -ne $global:LASTEXITCODE -and $global:LASTEXITCODE -ne 0){exit $global:LASTEXITCODE}; exit 1 }";
             var psi=new ProcessStartInfo(Path.Combine(Environment.GetEnvironmentVariable("PSHOME")??Path.GetDirectoryName(Environment.ProcessPath),"pwsh.exe")){
                 UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,
                 StandardOutputEncoding=new UTF8Encoding(false),StandardErrorEncoding=new UTF8Encoding(false),WorkingDirectory=cwd
@@ -178,12 +241,13 @@ public static class WindowsAdminMcpServerV03 {
             psi.ArgumentList.Add("-EncodedCommand");
             psi.ArgumentList.Add(Convert.ToBase64String(Encoding.Unicode.GetBytes(wrapper)));
             using(var process=new Process{StartInfo=psi}){
+                if(job.Deadline.IsCancellationRequested)throw new OperationCanceledException(job.Deadline.Token);
                 if(!process.Start())throw new InvalidOperationException();
                 var output=Drain(process.StandardOutput,MaxOutput);
                 var errors=Drain(process.StandardError,MaxOutput);
                 bool timedOut=false;
-                using(var cts=new CancellationTokenSource(TimeSpan.FromSeconds(timeout))){
-                    try{await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);}
+                {
+                    try{await process.WaitForExitAsync(job.Deadline.Token).ConfigureAwait(false);}
                     catch(OperationCanceledException){
                         timedOut=true;
                         try{process.Kill(true);}catch{}
@@ -194,14 +258,22 @@ public static class WindowsAdminMcpServerV03 {
                 }
                 var capture=await Task.WhenAll(output,errors).WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
                 var stderr=CleanStderr(capture[1].Text);
-                bool errorFound=!String.IsNullOrWhiteSpace(stderr);
+                var warnings=new List<string>();
+                var diagnostic=new StringBuilder();
+                foreach(var ln in stderr.Split(new[]{'\n'},StringSplitOptions.None)){
+                    if(ln.StartsWith("MCP_WARNING:",StringComparison.Ordinal))warnings.Add(ln.Substring(12).TrimEnd('\r'));
+                    else if(ln.Length>0){if(diagnostic.Length>0)diagnostic.Append('\n');diagnostic.Append(ln);}
+                }
                 int? code=timedOut||!process.HasExited?(int?)null:process.ExitCode;
-                string state=timedOut?"TIMEOUT_UNKNOWN_EFFECT":(!code.HasValue?"OUTPUT_INCOMPLETE":(code.Value!=0||errorFound?"COMMAND_ERROR":"COMPLETED"));
+                string state=timedOut?(job.CancelledByUser?"CANCELLED_UNKNOWN_EFFECT":"TIMEOUT_UNKNOWN_EFFECT"):
+                    (!code.HasValue?"OUTPUT_INCOMPLETE":(code.Value!=0?"COMMAND_ERROR":"COMPLETED"));
                 result["status"]=state;result.Remove("reason");
-                result["exit_code"]=code;result["stdout"]=capture[0].Text;result["stderr"]=stderr;
+                result["exit_code"]=code;result["stdout"]=capture[0].Text;result["stderr"]=diagnostic.ToString();
+                result["warnings"]=warnings;
                 result["output_truncated"]=capture[0].Truncated||capture[1].Truncated;
             }
-        }catch(Exception){result["status"]="EXECUTION_FAILED";result["reason"]="PROCESS_OR_CAPTURE_FAILURE";}
+        }catch(OperationCanceledException){result["status"]=job.CancelledByUser?"CANCELLED_BEFORE_EXECUTION":"TIMEOUT_BEFORE_EXECUTION";result["reason"]="CANCELLED_BEFORE_START";result["exit_code"]=null;}
+        catch(Exception){result["status"]="EXECUTION_FAILED";result["reason"]="PROCESS_OR_CAPTURE_FAILURE";}
         finally{clock.Stop();}
         result["elapsed_ms"]=clock.ElapsedMilliseconds;
         try{
@@ -238,4 +310,4 @@ public static class WindowsAdminMcpServerV03 {
     }
 }
 '@ -ErrorAction Stop
-[WindowsAdminMcpServerV03]::Run($elevated,$identity.Name,$PSVersionTable.PSVersion.ToString(),$PID,$PSScriptRoot)
+[WindowsAdminMcpServerV04]::Run($elevated,$identity.Name,$PSVersionTable.PSVersion.ToString(),$PID,$PSScriptRoot)

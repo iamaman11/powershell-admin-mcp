@@ -12,7 +12,7 @@ if([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [Runtime.Int
 
 $installRoot=Join-Path $env:ProgramFiles 'WindowsAdminMCP'
 $sourceRoot=$PSScriptRoot
-$expectedServer='C2E730FD51526758D9659BD1E5F92051AB313304BDFB0ADA4D873D49E6FB82C7'
+$expectedServer='0587F6C0DC7CFA1D589FC57EC29C72213F4A080ABF5034EC4A078FE5F11C5AF7'
 $expectedExe='CB3B2AB34A77096750561B8D46319AF282096A169A90B9C8E36567DD4FE06837'
 $expectedZip='E8962891696BCCC05F27C47CF0F383FED127E955C1B0F4866471E3D0851F2FDD'
 $runtimeUrl='https://github.com/openai/tunnel-client/releases/download/v0.0.19/tunnel-client-runtime-v0.0.19-windows-amd64.zip'

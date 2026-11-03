@@ -2,7 +2,7 @@
 
 This repository is the **canonical source** of the Windows PowerShell 7 MCP server used with the official OpenAI secure MCP tunnel.
 
-**Current:** WindowsAdminMCP `0.3.0`. Official external transport: `openai/tunnel-client v0.0.19` (the vendor-maintained EXE is **not** copied into this repository).
+**Current:** WindowsAdminMCP `0.4.0`. Official external transport: `openai/tunnel-client v0.0.19` (the vendor-maintained EXE is **not** copied into this repository).
 
 ## Components
 
@@ -10,7 +10,7 @@ This repository is the **canonical source** of the Windows PowerShell 7 MCP serv
 | --- | --- |
 | `windows-admin-mcp.ps1` | MCP stdio server with JSON-RPC validation, bounded output, Unicode support, execution error handling and fail-closed audit |
 | `start-windows-admin-mcp.ps1` | Explicit elevated session consent, hash checks, prompt for tunnel credentials and localhost health binding |
-| `Test-WindowsAdminMCP.ps1` | Offline Windows acceptance suite (31 scenarios) |
+| `Test-WindowsAdminMCP.ps1` | Offline Windows acceptance suite (41 scenarios) |
 | `Install-WindowsAdminMCP.ps1` | Deploy source and verified vendor runtime into protected `Program Files` directory |
 | `.github/workflows/windows-acceptance.yml` | Windows CI using the same protected installation and offline acceptance suite |
 
@@ -43,7 +43,16 @@ API keys, actual tunnel IDs, `CONTROL_PLANE_API_KEY`, `OPENAI_API_KEY`, `logs/`,
 
 ### Verification and release readiness
 
-The offline acceptance suite includes error codes for unknown methods/tools, malformed requests, Unicode output, nonterminating/terminating PowerShell errors, plaintext stderr, output of 2 million characters, timeout behavior, concurrent status/ping, and audit fail-closed behavior. **Passing local tests does not prove full cloud-path parallelism, reboot recovery, or non-admin ACL denial tests.** Those are separate physical acceptance gates.
+The offline acceptance suite includes error codes for unknown methods/tools, malformed requests, Unicode output, nonterminating\/terminating PowerShell errors, native exit status, handled exceptions, structured warnings, plain diagnostic stderr, output of 2 million characters, timeout behavior, concurrent status\/ping, active and queued cancellation, queue-inclusive timeouts, progress notifications, and audit fail-closed behavior. **Passing local tests does not prove full cloud-path parallelism, reboot recovery, or non-admin ACL denial tests.** Those are separate physical acceptance gates.
 
 The installed OpenAI tunnel runtime may be kept running independently of the source upload. Switching the transport EXE path requires restarting the runtime and re-entering the credential, not moving a live EXE.
 
+
+## v0.4.0 behavior
+
+- Nonzero native process exits are considered tool failures even when PowerShell continues afterward. Caught/handled PowerShell errors do not automatically fail the request.
+- Warnings are returned in `structuredContent.warnings`. Diagnostic `stderr` text is retained but does not alone mark a successful command as failed; check `status`, `isError` and `exit_code`.
+- `notifications/cancelled` cancels queued or running commands. A command already started reports `CANCELLED_UNKNOWN_EFFECT`: cancellation cannot undo effects already produced.
+- `timeout_seconds` is counted from request admission, including queue time. A queued timeout reports `TIMEOUT_BEFORE_EXECUTION`.
+- Optional MCP `_meta.progressToken` receives `notifications/progress` on queue, start and finish. Progress is not a reliable substitute for a durable job record.
+- The server still does **not** persist a resumable job database or enforce OS-level protection against dangerous administrative commands. Treat autonomous destructive operations as outside this release's acceptance scope.

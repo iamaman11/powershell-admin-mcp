@@ -8,7 +8,7 @@ foreach ($f in @($exe, $server)) {
     if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { throw "FILE_NOT_FOUND: $f" }
 }
 $expectedExe = 'CB3B2AB34A77096750561B8D46319AF282096A169A90B9C8E36567DD4FE06837'
-$expectedServer = 'C2E730FD51526758D9659BD1E5F92051AB313304BDFB0ADA4D873D49E6FB82C7'
+$expectedServer = '0587F6C0DC7CFA1D589FC57EC29C72213F4A080ABF5034EC4A078FE5F11C5AF7'
 if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -cne $expectedExe) {
     throw 'TUNNEL_BINARY_INTEGRITY_FAILED'
 }
