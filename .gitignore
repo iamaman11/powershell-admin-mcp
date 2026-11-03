@@ -1,0 +1,15 @@
+# Never commit credentials or machine-specific state.
+.env
+.env.*
+!.env.example
+*.local.ps1
+config.local.*
+logs/
+client/
+client.zip
+*.zip
+*.exe
+*.log
+*.jsonl
+*secret*
+*token*

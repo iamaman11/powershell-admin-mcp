@@ -1,0 +1,22 @@
+name: Windows offline acceptance
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify official runtime, protect installation and run acceptance
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./Install-WindowsAdminMCP.ps1
+          if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { throw "INSTALL_FAILED" }
+          & 'C:\Program Files\WindowsAdminMCP\Test-WindowsAdminMCP.ps1'
+          if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { throw "ACCEPTANCE_FAILED" }

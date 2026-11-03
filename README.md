@@ -1,33 +1,49 @@
 # WindowsAdminMCP
 
-Windows PowerShell 7 MCP stdio server for **explicitly authorized elevated administrator sessions** via the official OpenAI secure MCP tunnel.
+This repository is the **canonical source** of the Windows PowerShell 7 MCP server used with the official OpenAI secure MCP tunnel.
 
-## Source of truth
+**Current:** WindowsAdminMCP `0.3.0`. Official external transport: `openai/tunnel-client v0.0.19` (the vendor-maintained EXE is **not** copied into this repository).
 
-- Repository: `iamaman11/powershell-admin-mcp`
-- MCP server: `windows-admin-mcp.ps1` (v0.3.0)
-- Launcher: `start-windows-admin-mcp.ps1`
-- Offline acceptance: `Test-WindowsAdminMCP.ps1`
-- Official tunnel runtime (external dependency): `openai/tunnel-client` v0.0.19, Windows x64.
-- Do **not** commit or publish API keys, private tunnel IDs, logs, private configuration or the runtime binary.
+## Components
 
-## Security
+| File | Purpose |
+| --- | --- |
+| `windows-admin-mcp.ps1` | MCP stdio server with JSON-RPC validation, bounded output, Unicode support, execution error handling and fail-closed audit |
+| `start-windows-admin-mcp.ps1` | Explicit elevated session consent, hash checks, prompt for tunnel credentials and localhost health binding |
+| `Test-WindowsAdminMCP.ps1` | Offline Windows acceptance suite (31 scenarios) |
+| `Install-WindowsAdminMCP.ps1` | Deploy source and verified vendor runtime into protected `Program Files` directory |
+| `.github/workflows/windows-acceptance.yml` | Windows CI using the same protected installation and offline acceptance suite |
 
-`powershell_exec` can execute arbitrary PowerShell under the **Windows administrator token**. The launcher requires an intentionally elevated PowerShell 7 process, local `ENABLE` consent and the OpenAI tunnel credential. Consent enables the session, **not approval of every command**. Only use with trusted users, trusted connectors and an appropriate OpenAI account/workspace access policy.
+## Installation
 
-The installation directory must be writable **only by Administrators and SYSTEM**. Verify effective write access for sandbox/non-admin users, not only ACL text. Production logs contain command hashes, status, duration and correlation IDs, not commands. Command output may itself contain sensitive material and is returned to the MCP caller.
+On **Windows 11 / PowerShell 7**, from an intentionally elevated PowerShell terminal:
 
-## Installation and test
+```powershell
+& .\Install-WindowsAdminMCP.ps1
+& 'C:\Program Files\WindowsAdminMCP\Test-WindowsAdminMCP.ps1'
+& 'C:\Program Files\WindowsAdminMCP\start-windows-admin-mcp.ps1'
+```
 
-Follow `README.md` and the protected installation script after the initial source commit. Do **not** run the MCP server from a user-writable directory. The supplied launcher expects the official runtime EXE in `client/tunnel-client-runtime.exe` and checks both the EXE and server SHA-256.
+The installer checks its own elevation, installs the upstream v0.0.19 Windows x64 runtime with vendor-published archive and EXE SHA-256 verification, and restricts installation directory ACLs to Administrators/SYSTEM. If the exact verified executable already exists, it is reused. It never writes tunnel secrets to disk.
 
-The launcher asks for `CONTROL_PLANE_TUNNEL_ID` when it is not supplied in the environment, and asks for the tunnel API key securely at startup. Credentials are not kept in the repository. The local installed launcher may use a locally customized tunnel ID, and is intentionally **not byte-for-byte identical** to the public portable launcher.
+The launcher requires `ENABLE` **for this session** and a securely entered tunnel runtime API key. Set `CONTROL_PLANE_TUNNEL_ID` in the launching shell or supply the ID when prompted. The launcher validates the exact SHA-256 of the installed MCP server and official runtime. The tunnel ID is intentionally **not stored in this public repository**.
 
-## Acceptance scope
+### Safety properties and limitations
 
-The included tests check protocol errors, Unicode, stdout/stderr bounds, execution errors, timeout, status/ping responsiveness and audit fail-closed behavior. A successful offline test is **not** proof that all OpenAI control-plane authorization and network security controls are correctly configured.
+- The `powershell_exec` tool executes **arbitrary elevated Windows PowerShell**. `ENABLE` approves the *session*, not each command.
+- Only trust clients and accounts authorized to access the control plane. These scripts are **not** a replacement for OpenAI account/workspace security.
+- Only Administrators and SYSTEM may write code, launcher, executable and logs. Verify effective sandbox user access after deployment.
+- Writes to `logs/commands.jsonl` record a hashed command, a correlation ID and status; a failed admission log write blocks execution. **Command output returned to callers can contain secrets.**
+- PowerShell processes execute serially; `ping` and `powershell_status` can respond during a long command at the local stdio layer. A remote tunnel/client may serialize requests independently.
+- A bounded output buffer prevents full-output accumulation; a timeout is reported as `TIMEOUT_UNKNOWN_EFFECT` because prior effects cannot be undone by terminating the process.
 
-## Restore and operations
+### Do not commit
 
-Run `Test-WindowsAdminMCP.ps1` in the protected installation. Restart the **runtime** from the protected launcher when you can re-enter the tunnel key. Never embed the key in a scheduled task or committed source file. Validate `127.0.0.1:8080/readyz` and confirm the running runtime EXE path is under Program Files.
+API keys, actual tunnel IDs, `CONTROL_PLANE_API_KEY`, `OPENAI_API_KEY`, `logs/`, `client/`, downloaded zip files, local configuration, or backup files.
+
+### Verification and release readiness
+
+The offline acceptance suite includes error codes for unknown methods/tools, malformed requests, Unicode output, nonterminating/terminating PowerShell errors, plaintext stderr, output of 2 million characters, timeout behavior, concurrent status/ping, and audit fail-closed behavior. **Passing local tests does not prove full cloud-path parallelism, reboot recovery, or non-admin ACL denial tests.** Those are separate physical acceptance gates.
+
+The installed OpenAI tunnel runtime may be kept running independently of the source upload. Switching the transport EXE path requires restarting the runtime and re-entering the credential, not moving a live EXE.
 
