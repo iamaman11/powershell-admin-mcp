@@ -1,4 +1,4 @@
-# WindowsAdminMCP v0.4.0: single native stdio server, bounded async commands.
+# WindowsAdminMCP v0.5.0: single native stdio server, bounded async commands.
 $ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
@@ -21,7 +21,7 @@ using System.Threading.Tasks;
 using System.Diagnostics;
 using System.Linq;
 
-public static class WindowsAdminMcpServerV04 {
+public static class WindowsAdminMcpServerV05 {
     static readonly object WriteLock = new object();
     static readonly object AuditLock = new object();
     static readonly SemaphoreSlim ExecGate = new SemaphoreSlim(1,1);
@@ -56,6 +56,26 @@ public static class WindowsAdminMcpServerV04 {
     static int Pid;
     static bool Elevated;
     static bool Enabled;
+    static string Mode="safe";
+    static string Root="";
+    static string Sha256(string cmd){
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(cmd))).ToLowerInvariant();
+    }
+    static bool ConsumePermit(string hash){
+        var dir=Path.Combine(Root,"approvals");
+        var permit=Path.Combine(dir,hash+".permit");
+        if(!File.Exists(permit))return false;
+        var claimed=Path.Combine(dir,hash+"."+Guid.NewGuid().ToString("N")+".claimed");
+        try{File.Move(permit,claimed);}catch(IOException){return false;}
+        try{
+            if(new FileInfo(claimed).Length>256)return false;
+            var parts=File.ReadAllLines(claimed);
+            if(parts.Length!=2 || !String.Equals(parts[0],hash,StringComparison.Ordinal))return false;
+            if(!long.TryParse(parts[1],out var expiry))return false;
+            var now=DateTime.UtcNow.Ticks;
+            return expiry>now && expiry<=DateTime.UtcNow.AddMinutes(10).Ticks;
+        }finally{try{File.Delete(claimed);}catch{}}
+    }
     const int MaxOutput = 16000;
     const int MaxInput = 131072;
     const int MaxQueue = 8;
@@ -63,6 +83,9 @@ public static class WindowsAdminMcpServerV04 {
     public static void Run(bool elevated,string user,string psVersion,int pid,string installDir) {
         Elevated=elevated;User=user;PsVersion=psVersion;Pid=pid;
         Enabled=String.Equals(Environment.GetEnvironmentVariable("WINDOWS_ADMIN_MCP_EXEC"),"1",StringComparison.Ordinal);
+        Root=installDir;
+        Mode=(Environment.GetEnvironmentVariable("WINDOWS_ADMIN_MCP_EXEC_MODE")??"safe").ToLowerInvariant();
+        if(Mode!="safe" && Mode!="approval" && Mode!="supervised")Mode="safe";
         LogPath=Path.Combine(installDir,"logs","commands.jsonl");
         while(true){
             var line=ReadBoundedLine();
@@ -107,7 +130,7 @@ public static class WindowsAdminMcpServerV04 {
             }
             switch(method.GetString()){
                 case "initialize":
-                    Result(idJson,"{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"windows-admin-mcp\",\"version\":\"0.4.0\"}}");break;
+                    Result(idJson,"{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"windows-admin-mcp\",\"version\":\"0.5.0\"}}");break;
                 case "ping":Result(idJson,"{}");break;
                 case "tools/list":Result(idJson,ToolsJson);break;
                 case "resources/list":Result(idJson,"{\"resources\":[]}");break;
@@ -142,7 +165,7 @@ public static class WindowsAdminMcpServerV04 {
             }else{Error(id,-32602,"Unknown argument");return;}
         }
         if(String.IsNullOrWhiteSpace(command)||command.Length>12000){Error(id,-32602,"Invalid command length");return;}
-        if(!Enabled){ToolResult(id,new Dictionary<string,object>{{"status","BLOCKED"},{"reason","ADMIN_EXEC_NOT_ENABLED_LOCALLY"}},true);return;}
+        if(!Enabled || Mode=="safe"){ToolResult(id,new Dictionary<string,object>{{"status","BLOCKED"},{"reason","ADMIN_EXEC_NOT_ENABLED_LOCALLY"},{"exec_mode",Mode}},true);return;}
         if(!Elevated){ToolResult(id,new Dictionary<string,object>{{"status","BLOCKED"},{"reason","NOT_ELEVATED"}},true);return;}
         if(!Directory.Exists(workingDir)){ToolResult(id,new Dictionary<string,object>{{"status","BLOCKED"},{"reason","WORKING_DIRECTORY_NOT_FOUND"}},true);return;}
         if(Interlocked.Increment(ref Outstanding)>MaxQueue){Interlocked.Decrement(ref Outstanding);ToolResult(id,new Dictionary<string,object>{{"status","BLOCKED"},{"reason","EXEC_QUEUE_FULL"}},true);return;}
@@ -171,6 +194,14 @@ public static class WindowsAdminMcpServerV04 {
                         ToolResult(id,new Dictionary<string,object>{{"status",QueueResult(job)},{"exit_code",null}},true);
                         return;
                     }
+                    if(Mode=="approval"){
+                        var hash=Sha256(command);
+                        if(!ConsumePermit(hash)){
+                            try{Audit(new Dictionary<string,object>{{"event","approval_required"},{"command_sha256",hash},{"request_id",id}});}catch{}
+                            ToolResult(id,new Dictionary<string,object>{{"status","BLOCKED"},{"reason","APPROVAL_REQUIRED"},{"command_sha256",hash},{"exec_mode",Mode}},true);
+                            return;
+                        }
+                    }
                     Progress(job,0,"running");
                     var result=await Execute(command,seconds,workingDir,job).ConfigureAwait(false);
                     result["total_elapsed_ms"]=job.Elapsed.ElapsedMilliseconds;
@@ -188,7 +219,7 @@ public static class WindowsAdminMcpServerV04 {
     }
     static Dictionary<string,object> Status(){
         return new Dictionary<string,object>{
-            {"host",Environment.MachineName},{"user",User},{"elevated",Elevated},{"powershell",PsVersion},{"process_id",Pid},{"timestamp_utc",DateTime.UtcNow.ToString("O")}
+            {"host",Environment.MachineName},{"user",User},{"elevated",Elevated},{"powershell",PsVersion},{"process_id",Pid},{"exec_mode",Mode},{"raw_exec_enabled",Enabled && Mode!="safe"},{"timestamp_utc",DateTime.UtcNow.ToString("O")}
         };
     }
     static void ToolResult(string id,Dictionary<string,object> data,bool fail){
@@ -310,4 +341,4 @@ public static class WindowsAdminMcpServerV04 {
     }
 }
 '@ -ErrorAction Stop
-[WindowsAdminMcpServerV04]::Run($elevated,$identity.Name,$PSVersionTable.PSVersion.ToString(),$PID,$PSScriptRoot)
+[WindowsAdminMcpServerV05]::Run($elevated,$identity.Name,$PSVersionTable.PSVersion.ToString(),$PID,$PSScriptRoot)

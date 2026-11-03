@@ -1,4 +1,4 @@
-# WindowsAdminMCP v0.4.0 standalone acceptance. Does not restart production tunnel.
+# WindowsAdminMCP v0.5.0 standalone acceptance. Does not restart production tunnel.
 $ErrorActionPreference='Stop'
 $root=$PSScriptRoot
 $server=Join-Path $root 'windows-admin-mcp.ps1'
@@ -14,7 +14,7 @@ function Request([int]$id,[string]$method,$params){
 function ExecRequest([int]$id,[string]$command,[int]$seconds=10){
  return Request $id 'tools/call' @{name='powershell_exec';arguments=@{command=$command;timeout_seconds=$seconds}}
 }
-function Session([string[]]$requests,[string]$enabled='0',[string]$path=$server){
+function Session([string[]]$requests,[string]$enabled='0',[string]$path=$server,[string]$mode=''){
  $si=[Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME 'pwsh.exe'))
  $si.UseShellExecute=$false;$si.CreateNoWindow=$true
  $si.RedirectStandardInput=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
@@ -22,6 +22,7 @@ function Session([string[]]$requests,[string]$enabled='0',[string]$path=$server)
  $si.StandardErrorEncoding=[Text.UTF8Encoding]::new($false)
  foreach($a in @('-NoLogo','-NoProfile','-NonInteractive','-File',$path)){[void]$si.ArgumentList.Add($a)}
  $si.Environment['WINDOWS_ADMIN_MCP_EXEC']=$enabled
+ if($mode){$si.Environment['WINDOWS_ADMIN_MCP_EXEC_MODE']=$mode}elseif($enabled -eq '1'){$si.Environment['WINDOWS_ADMIN_MCP_EXEC_MODE']='supervised'}else{[void]$si.Environment.Remove('WINDOWS_ADMIN_MCP_EXEC_MODE')}
  [void]$si.Environment.Remove('CONTROL_PLANE_API_KEY')
  [void]$si.Environment.Remove('OPENAI_API_KEY')
  $p=[Diagnostics.Process]::Start($si)
@@ -49,7 +50,7 @@ $base=Session @($init,(Request 9 'ping' $null),(Request 11 'tools/list' $null),$
  '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"powershell_exec","arguments":{"command":"Write-Output YES","timeout_seconds":1.7}}}',
  '{"id":7,"method":"ping"}','{"jsonrpc":"2.0","method":"notifications/initialized"}','not-json') '0'
 Assert 'base.response.count' ($base.Count -eq 10)
-Assert 'initialize.0.4.0' (($base|Where-Object id -eq 1).result.serverInfo.version -eq '0.4.0')
+Assert 'initialize.0.5.0' (($base|Where-Object id -eq 1).result.serverInfo.version -eq '0.5.0')
 Assert 'ping.pass' (@($base|Where-Object id -eq 9).Count -eq 1)
 Assert 'tools.list.two' (@(($base|Where-Object id -eq 11).result.tools).Count -eq 2)
 Assert 'unknown.tool.protocol.error' ((($base|Where-Object id -eq 2).error.code -eq -32602) -and -not (($base|Where-Object id -eq 2).Contains('result')))
@@ -136,6 +137,7 @@ $si.StandardOutputEncoding=[Text.UTF8Encoding]::new($false)
 $si.StandardErrorEncoding=[Text.UTF8Encoding]::new($false)
 foreach($arg in @('-NoLogo','-NoProfile','-NonInteractive','-File',$server)){[void]$si.ArgumentList.Add($arg)}
 $si.Environment['WINDOWS_ADMIN_MCP_EXEC']='1'
+$si.Environment['WINDOWS_ADMIN_MCP_EXEC_MODE']='supervised'
 [void]$si.Environment.Remove('CONTROL_PLANE_API_KEY')
 [void]$si.Environment.Remove('OPENAI_API_KEY')
 $p=[Diagnostics.Process]::Start($si)
@@ -162,6 +164,33 @@ try {
     Assert 'cancel.ping.independent' (@($responses|Where-Object id -eq 103).Count -eq 1)
     Assert 'progress.opt.in.notifications' (@($responses|Where-Object {$_.method -eq 'notifications/progress'}).Count -ge 2)
 } finally {$p.Dispose()}
+
+
+# v0.5 safety: SAFE by default, exact one-use approval in APPROVAL mode.
+$sample="Write-Output 'ALLOWED_05'"
+$sha=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($sample))).ToLowerInvariant()
+$safe=Session @((ExecRequest 201 $sample)) '1' $server 'safe'
+Assert 'safe.mode.blocks.exec' ($safe[0].result.isError -and $safe[0].result.structuredContent.exec_mode -eq 'safe')
+$unknown=Session @((ExecRequest 202 $sample)) '1' $server 'mistyped'
+Assert 'unknown.mode.fail.closed' ($unknown[0].result.isError -and $unknown[0].result.structuredContent.exec_mode -eq 'safe')
+$noPermit=Session @((ExecRequest 203 $sample)) '1' $server 'approval'
+Assert 'approval.required.exact.sha' (($noPermit[0].result.structuredContent.reason -eq 'APPROVAL_REQUIRED') -and ($noPermit[0].result.structuredContent.command_sha256 -eq $sha))
+$approvalDir=Join-Path $root 'approvals'
+[void][IO.Directory]::CreateDirectory($approvalDir)
+$permit=Join-Path $approvalDir ($sha+'.permit')
+try{
+    if(Test-Path -LiteralPath $permit){throw 'UNEXPECTED_EXISTING_APPROVAL'}
+    [IO.File]::WriteAllText($permit,($sha+[Environment]::NewLine+([DateTime]::UtcNow.AddMinutes(3).Ticks)+[Environment]::NewLine),[Text.UTF8Encoding]::new($false))
+    $yes=Session @((ExecRequest 204 $sample)) '1' $server 'approval'
+    Assert 'approval.single.success' (($yes[0].result.structuredContent.status -eq 'COMPLETED') -and ($yes[0].result.structuredContent.stdout -match 'ALLOWED_05'))
+    $replay=Session @((ExecRequest 205 $sample)) '1' $server 'approval'
+    Assert 'approval.replay.blocked' ($replay[0].result.structuredContent.reason -eq 'APPROVAL_REQUIRED')
+    [IO.File]::WriteAllText($permit,($sha+[Environment]::NewLine+([DateTime]::UtcNow.AddMinutes(-1).Ticks)+[Environment]::NewLine),[Text.UTF8Encoding]::new($false))
+    $expired=Session @((ExecRequest 206 $sample)) '1' $server 'approval'
+    Assert 'approval.expired.blocked' ($expired[0].result.structuredContent.reason -eq 'APPROVAL_REQUIRED')
+} finally {Remove-Item -LiteralPath $permit -Force -ErrorAction SilentlyContinue}
+$modeStatus=Session @((Request 207 'tools/call' @{name='powershell_status';arguments=@{}})) '1' $server 'approval'
+Assert 'status.mode.displayed' ($modeStatus[0].result.structuredContent.exec_mode -eq 'approval')
 
 "SUMMARY PASS=$ok FAIL=$fail"
 if($fail){exit 1}

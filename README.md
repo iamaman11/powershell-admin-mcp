@@ -2,7 +2,7 @@
 
 This repository is the **canonical source** of the Windows PowerShell 7 MCP server used with the official OpenAI secure MCP tunnel.
 
-**Current:** WindowsAdminMCP `0.4.0`. Official external transport: `openai/tunnel-client v0.0.19` (the vendor-maintained EXE is **not** copied into this repository).
+**Current:** WindowsAdminMCP `0.5.0`. Official external transport: `openai/tunnel-client v0.0.19` (the vendor-maintained EXE is **not** copied into this repository).
 
 ## Components
 
@@ -48,7 +48,7 @@ The offline acceptance suite includes error codes for unknown methods/tools, mal
 The installed OpenAI tunnel runtime may be kept running independently of the source upload. Switching the transport EXE path requires restarting the runtime and re-entering the credential, not moving a live EXE.
 
 
-## v0.4.0 behavior
+## v0.5.0 behavior
 
 - Nonzero native process exits are considered tool failures even when PowerShell continues afterward. Caught/handled PowerShell errors do not automatically fail the request.
 - Warnings are returned in `structuredContent.warnings`. Diagnostic `stderr` text is retained but does not alone mark a successful command as failed; check `status`, `isError` and `exit_code`.
@@ -56,3 +56,20 @@ The installed OpenAI tunnel runtime may be kept running independently of the sou
 - `timeout_seconds` is counted from request admission, including queue time. A queued timeout reports `TIMEOUT_BEFORE_EXECUTION`.
 - Optional MCP `_meta.progressToken` receives `notifications/progress` on queue, start and finish. Progress is not a reliable substitute for a durable job record.
 - The server still does **not** persist a resumable job database or enforce OS-level protection against dangerous administrative commands. Treat autonomous destructive operations as outside this release's acceptance scope.
+
+## Simple local operation (v0.5.0)
+
+Run from an elevated Windows PowerShell 7 console:
+
+    & 'C:\Program Files\WindowsAdminMCP\WindowsAdminMCP.ps1' status
+    & 'C:\Program Files\WindowsAdminMCP\WindowsAdminMCP.ps1' test
+    & 'C:\Program Files\WindowsAdminMCP\WindowsAdminMCP.ps1' start
+    & 'C:\Program Files\WindowsAdminMCP\WindowsAdminMCP.ps1' stop
+
+For installation/update run `WindowsAdminMCP.ps1 -Action install` from a trusted source checkout, not the installed folder. The installer checks pinned SHA-256 of the MCP server and official OpenAI runtime. The `status` action prints JSON. The `stop` action is intentionally interactive and disconnects the cloud tunnel.
+
+At startup the local operator chooses `SAFE` (default; elevated raw execution denied), `APPROVAL` (one local approval per exact command SHA-256), or `SUPERVISED` (unrestricted remote administrative PowerShell, requiring the operator to type UNSAFE). The server defaults to SAFE even if a legacy launcher only sets `WINDOWS_ADMIN_MCP_EXEC=1`.
+
+In APPROVAL mode the agent receives `APPROVAL_REQUIRED` and a command hash. The operator inspects the **exact** command text, saves it as UTF-8, then runs `WindowsAdminMCP.ps1 -Action approve -CommandFile <path>` locally. The one-use approval expires within 10 minutes and cannot be replayed. The operator should compare the printed SHA-256 with the hash from MCP. Never provide this approval through the same privileged remote tool.
+
+**Security limits:** SUPERVISED is a consciously unrestricted admin mode, not autonomous production. APPROVAL is not an OS sandbox. Durable resumable jobs and reboot/power-loss recovery remain `NOT_TESTED` until Issue #1 acceptance. Modes are local startup choices, not a remote agent setting.
