@@ -1,0 +1,9 @@
+# Preserve source bytes on Windows: launcher and installer verify SHA-256 of LF source.
+*.ps1 text eol=lf
+*.psm1 text eol=lf
+*.psd1 text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
