@@ -1,4 +1,4 @@
-# Deploy WindowsAdminMCP v0.5.0 without embedding tunnel credentials.
+# Deploy WindowsAdminMCP v0.6.0 without embedding tunnel credentials.
 # Run in an explicitly elevated PowerShell 7 shell on Windows x64.
 # The OpenAI runtime is downloaded only from the official tagged release.
 $ErrorActionPreference='Stop'
@@ -12,7 +12,7 @@ if([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [Runtime.Int
 
 $installRoot=Join-Path $env:ProgramFiles 'WindowsAdminMCP'
 $sourceRoot=$PSScriptRoot
-$expectedServer='CB0907D77A598DDD703C0395A7A4EFA3C43EA4936A4A2B5360656472163873B8'
+$expectedServer='8A62AFA79D829D91D88C3F06D8F69004FEAE8C6286A6BE59F19EC7AF672AF0B9'
 $expectedExe='CB3B2AB34A77096750561B8D46319AF282096A169A90B9C8E36567DD4FE06837'
 $expectedZip='E8962891696BCCC05F27C47CF0F383FED127E955C1B0F4866471E3D0851F2FDD'
 $runtimeUrl='https://github.com/openai/tunnel-client/releases/download/v0.0.19/tunnel-client-runtime-v0.0.19-windows-amd64.zip'
@@ -20,8 +20,7 @@ $srcServer=Join-Path $sourceRoot 'windows-admin-mcp.ps1'
 $srcLauncher=Join-Path $sourceRoot 'start-windows-admin-mcp.ps1'
 $srcTest=Join-Path $sourceRoot 'Test-WindowsAdminMCP.ps1'
 $srcController=Join-Path $sourceRoot 'WindowsAdminMCP.ps1'
-$srcApproval=Join-Path $sourceRoot 'Approve-WindowsAdminMCP.ps1'
-foreach($file in @($srcServer,$srcLauncher,$srcTest,$srcController,$srcApproval)){
+foreach($file in @($srcServer,$srcLauncher,$srcTest,$srcController)){
  if(-not(Test-Path -LiteralPath $file -PathType Leaf)){throw "REQUIRED_SOURCE_MISSING: $file"}
 }
 if((Get-FileHash -LiteralPath $srcServer -Algorithm SHA256).Hash -cne $expectedServer){throw 'SOURCE_MCP_INTEGRITY_FAILED'}
@@ -46,7 +45,6 @@ Set-Acl -LiteralPath $installRoot -AclObject $acl
 $clientDir=Join-Path $installRoot 'client'
 [void][IO.Directory]::CreateDirectory($clientDir)
 [void][IO.Directory]::CreateDirectory((Join-Path $installRoot 'logs'))
-[void][IO.Directory]::CreateDirectory((Join-Path $installRoot 'approvals'))
 $exe=Join-Path $clientDir 'tunnel-client-runtime.exe'
 if(Test-Path -LiteralPath $exe -PathType Leaf){
  if((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -cne $expectedExe){
@@ -76,18 +74,20 @@ if(Test-Path -LiteralPath $exe -PathType Leaf){
      Remove-Item -LiteralPath $zipPath,$stageExe -Force -ErrorAction SilentlyContinue
  }
 }
-# Always pin both executable and server checksums in the launcher.
-$launch=[IO.File]::ReadAllText($srcLauncher,[Text.Encoding]::UTF8)
-if(-not $launch.Contains($expectedExe) -or -not $launch.Contains($expectedServer)){
- throw 'LAUNCHER_HASH_PIN_MISSING'
+# The single operator entrypoint pins official runtime and MCP server.
+$control=[IO.File]::ReadAllText($srcController,[Text.Encoding]::UTF8)
+if(-not $control.Contains($expectedExe) -or -not $control.Contains($expectedServer)){
+ throw 'CONTROLLER_HASH_PIN_MISSING'
 }
-if($launch -match 'tunnel_[a-f0-9]{32}'){throw 'LAUNCHER_HAS_MACHINE_TUNNEL_ID'}
+if($control -match 'tunnel_[a-f0-9]{32}' -or
+   [IO.File]::ReadAllText($srcLauncher,[Text.Encoding]::UTF8) -match 'tunnel_[a-f0-9]{32}'){
+ throw 'SOURCE_HAS_MACHINE_TUNNEL_ID'
+}
 foreach($pair in @(
   @($srcServer,(Join-Path $installRoot 'windows-admin-mcp.ps1')),
   @($srcLauncher,(Join-Path $installRoot 'start-windows-admin-mcp.ps1')),
   @($srcTest,(Join-Path $installRoot 'Test-WindowsAdminMCP.ps1')),
-  @($srcController,(Join-Path $installRoot 'WindowsAdminMCP.ps1')),
-  @($srcApproval,(Join-Path $installRoot 'Approve-WindowsAdminMCP.ps1')))){
+  @($srcController,(Join-Path $installRoot 'WindowsAdminMCP.ps1')))){
  Copy-Item -LiteralPath $pair[0] -Destination $pair[1] -Force
 }
 if((Get-FileHash (Join-Path $installRoot 'windows-admin-mcp.ps1') -Algorithm SHA256).Hash -cne $expectedServer){

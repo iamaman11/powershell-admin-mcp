@@ -22,5 +22,5 @@ jobs:
           if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { throw "ACCEPTANCE_FAILED" }
           $raw = & 'C:\Program Files\WindowsAdminMCP\WindowsAdminMCP.ps1' status
           $check = ($raw | Select-Object -Last 1 | ConvertFrom-Json)
-          if (-not $check.installed -or -not $check.launcher_pin_matches) { throw "STATUS_INCOMPLETE" }
+          if (-not $check.installed -or -not $check.integrity_ok) { throw "STATUS_INCOMPLETE" }
           Write-Host "OPERATOR_STATUS=PASS"
