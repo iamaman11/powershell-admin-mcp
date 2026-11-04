@@ -180,5 +180,18 @@ Assert 'admin.status.enabled' ($info.result.structuredContent.admin_exec_enabled
 $disabledStatus=Session @((Request 204 'tools/call' @{name='powershell_status';arguments=@{}})) '0'
 Assert 'admin.disabled.status' ($disabledStatus[0].result.structuredContent.admin_exec_enabled -eq $false)
 
+# Multiple legacy client sessions, each with initialize + initialized notification.
+# Offline tests cover the local server protocol only; the vendor tunnel shim is verified by CI configuration + physical probes.
+$legacyInit=Request 301 'initialize' @{protocolVersion='2025-06-18';capabilities=@{};clientInfo=@{name='mcp-reconnect-test';version='1'}}
+$legacyNotif='{"jsonrpc":"2.0","method":"notifications/initialized"}'
+$legacyStatus=Request 302 'tools/call' @{name='powershell_status';arguments=@{}}
+$legacyExec=ExecRequest 303 'Write-Output HANDSHAKE_OK'
+$legacyFirst=Session @($legacyInit,$legacyNotif,$legacyStatus,$legacyExec) '1'
+Assert 'legacy.session1.initialized.then.status' ((ById $legacyFirst 301).result.serverInfo.version -eq '0.6.0' -and (ById $legacyFirst 302).result.structuredContent.elevated)
+Assert 'legacy.session1.initialized.then.exec' ((ById $legacyFirst 303).result.structuredContent.stdout -match 'HANDSHAKE_OK')
+$legacyAgain=Session @($legacyInit,$legacyNotif,$legacyStatus,$legacyExec) '1'
+Assert 'legacy.session2.reinitialized.status' ((ById $legacyAgain 302).result.structuredContent.elevated)
+Assert 'legacy.session2.reinitialized.exec' ((ById $legacyAgain 303).result.structuredContent.stdout -match 'HANDSHAKE_OK')
+
 "SUMMARY PASS=$ok FAIL=$fail"
 if($fail){exit 1}

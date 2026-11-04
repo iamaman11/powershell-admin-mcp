@@ -38,3 +38,9 @@ Use `install` on the same entrypoint from an authorized checkout to install or u
 - No one-shot approval files, SAFE / APPROVAL / SUPERVISED modes, interactive ENABLE step, or persisted raw secrets.
 - DPAPI LocalMachine keeps credentials tied to Windows. Backup/restore onto a different computer requires configuring again.
 - Persisted resumable jobs, power-loss recovery, effective non-admin ACL denial and end-to-end tunnel concurrency remain unaccepted; see Issue #1. CI passing does not prove these.
+
+## Intermittent initialization conflict (409)
+
+The official OpenAI tunnel-client **v0.0.19** rejects legacy `tools/call` when the stdio child has not completed both `initialize` and `notifications/initialized`, returning HTTP 409 `mcp_initialization_required` **before the PowerShell MCP server receives the call**. The standard `start` launcher enables the vendor-supported `MCP_STDIO_SEND_INITIALIZED_NOTIFICATION=true` shim: after a successful `initialize`, the runtime sends the initialized notification, suppressing a duplicate from the remote caller. This requires restarting the single tunnel-client process to take effect; updating files without restarting does not change the current runtime process.
+
+Check `http://127.0.0.1:8080/metrics` for `command_end_to_end_latency_milliseconds_count` with `request_method="tools/call"` and `tunnel_service_status="409"`. A 409 is a **tunnel/client lifecycle rejection**, not a Windows command failure. `/readyz` = 200 checks runtime readiness, not the readiness of every legacy MCP client session. If a 409 recurs after the shim is active, the caller must complete `initialize` before retrying; **never automatically re-run a side-effecting `powershell_exec` whose outcome is unknown**. No extra process, scheduler, or second tunnel is required.

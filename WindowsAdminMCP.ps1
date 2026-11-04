@@ -148,6 +148,9 @@ switch($Action){
   }
   $env:CONTROL_PLANE_API_KEY=[string]$config.runtime_key
   $env:WINDOWS_ADMIN_MCP_EXEC='1'
+  # Official tunnel-client v0.0.19: finish the legacy stdio handshake after initialize.
+  # Duplicate caller notifications are suppressed by the vendor runtime.
+  $env:MCP_STDIO_SEND_INITIALIZED_NOTIFICATION='true'
   $binding='command=pwsh -NoLogo -NoProfile -NonInteractive -File "' + $server.Replace('\','/') + '",channel=main'
   Write-Host 'Starting tunnel and WindowsAdminMCP (full administrator access).'
   try{
@@ -155,6 +158,7 @@ switch($Action){
   }finally{
    Remove-Item Env:CONTROL_PLANE_API_KEY -ErrorAction SilentlyContinue
    Remove-Item Env:WINDOWS_ADMIN_MCP_EXEC -ErrorAction SilentlyContinue
+   Remove-Item Env:MCP_STDIO_SEND_INITIALIZED_NOTIFICATION -ErrorAction SilentlyContinue
    $config=$null
   }
   break
