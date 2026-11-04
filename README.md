@@ -27,7 +27,7 @@ This starts **both tunnel and MCP** with full administrator PowerShell access. *
 & "$env:ProgramFiles\WindowsAdminMCP\WindowsAdminMCP.ps1" configure
 ```
 
-Enter the runtime API key **once**. The tunnel ID is reused from an already-running tunnel or local environment if available; otherwise enter it once. The complete credential is encrypted with **Windows DPAPI LocalMachine** in `%ProgramData%\WindowsAdminMCP\tunnel-credential.dpapi`, a directory restricted to Administrators and SYSTEM. It is never committed to GitHub or echoed. **If this encrypted configuration is absent, start fails explicitly and does not ask for a key.** Rotation: rerun `configure`.
+Enter the runtime API key **once**. The tunnel ID is discovered automatically from the active tunnel, current environment, or a protected v0.4/v0.5 launcher backup on this Windows installation; it is never requested interactively. If it cannot be recovered, `configure` reports `TUNNEL_ID_AUTODISCOVERY_FAILED` without modifying credentials. After configuration, the identifier is stored with the encrypted runtime key and is never requested again. The complete credential is encrypted with **Windows DPAPI LocalMachine** in `%ProgramData%\WindowsAdminMCP\tunnel-credential.dpapi`, a directory restricted to Administrators and SYSTEM. It is never committed to GitHub or echoed. **If this encrypted configuration is absent, start fails explicitly and does not ask for a key.** Rotation: rerun `configure`.
 
 Use `install` on the same entrypoint from an authorized checkout to install or update. The installer checks fixed SHA-256 of the MCP server and the official OpenAI tunnel executable.
 

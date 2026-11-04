@@ -24,3 +24,14 @@ jobs:
           $check = ($raw | Select-Object -Last 1 | ConvertFrom-Json)
           if (-not $check.installed -or -not $check.integrity_ok) { throw "STATUS_INCOMPLETE" }
           Write-Host "OPERATOR_STATUS=PASS"
+          # Verify tunnel ID auto-discovery without using or logging real identifiers.
+          . 'C:\Program Files\WindowsAdminMCP\WindowsAdminMCP.ps1' -Action status | Out-Null
+          $dummyId = 'tunnel_' + ('a' * 32)
+          $argEquals = '--control-plane.tunnel-id=' + $dummyId + ' --other-flag'
+          $argSpaced = '--control-plane.tunnel-id ' + $dummyId + ' --other-flag'
+          $oldLine = 'if ($env:CONTROL_PLANE_TUNNEL_ID) { $env:CONTROL_PLANE_TUNNEL_ID = "' + $dummyId + '" }'
+          if ((Get-TunnelIdFromText $argEquals) -cne $dummyId) { throw 'AUTO_ID_EQUALS_FAILED' }
+          if ((Get-TunnelIdFromText $argSpaced) -cne $dummyId) { throw 'AUTO_ID_SPACED_FAILED' }
+          if ((Get-TunnelIdFromText $oldLine) -cne $dummyId) { throw 'AUTO_ID_ROLLBACK_FAILED' }
+          if ($null -ne (Get-TunnelIdFromText 'invalid without any ID')) { throw 'AUTO_ID_INVALID_ACCEPTED' }
+          Write-Host "TUNNEL_ID_AUTODISCOVERY_TESTS=4/4_PASS"

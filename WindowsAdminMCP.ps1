@@ -47,11 +47,36 @@ function Protect-ConfigRoot {
  }
  Set-Acl -LiteralPath $secretRoot -AclObject $acl
 }
+function Get-TunnelIdFromText([string]$text) {
+ if([string]::IsNullOrEmpty($text)){return $null}
+ # Accept both --control-plane.tunnel-id=... and --control-plane.tunnel-id <value>.
+ $cmd=[regex]::Match($text,'(?i)--control-plane\.tunnel-id(?:\s+|=)["'']?(tunnel_[a-f0-9]{32})(?=$|[\s"'';])')
+ if($cmd.Success){return $cmd.Groups[1].Value.ToLowerInvariant()}
+ # Recover the local machine-specific ID from earlier privileged launchers.
+ $assignment=[regex]::Match($text,'(?i)\$env:CONTROL_PLANE_TUNNEL_ID\s*=\s*["''](tunnel_[a-f0-9]{32})["'']')
+ if($assignment.Success){return $assignment.Groups[1].Value.ToLowerInvariant()}
+ return $null
+}
 function Get-ExistingTunnelId {
- if($env:CONTROL_PLANE_TUNNEL_ID -match '^tunnel_[0-9a-f]{32}$'){return $env:CONTROL_PLANE_TUNNEL_ID}
+ if($env:CONTROL_PLANE_TUNNEL_ID -match '^tunnel_[a-f0-9]{32}$'){return $env:CONTROL_PLANE_TUNNEL_ID.ToLowerInvariant()}
  foreach($proc in @(Get-TunnelRuntime)){
-  $m=[regex]::Match([string]$proc.CommandLine,'--control-plane\.tunnel-id\s+(tunnel_[0-9a-f]{32})')
-  if($m.Success){return $m.Groups[1].Value}
+  $id=Get-TunnelIdFromText ([string]$proc.CommandLine)
+  if($id){return $id}
+ }
+ # v0.4/v0.5 backups were saved in this administrator-only ProgramData directory.
+ # This is a migration fallback, not a new runtime dependency.
+ if(Test-Path -LiteralPath $secretRoot -PathType Container){
+  $dirAcl=Get-Acl -LiteralPath $secretRoot
+  if(-not $dirAcl.AreAccessRulesProtected){throw 'CONFIG_ARCHIVE_ACL_UNPROTECTED'}
+  $dirs=@(Get-ChildItem -LiteralPath $secretRoot -Directory -Filter 'rollback-*' -ErrorAction Stop |
+   Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 20)
+  foreach($dir in $dirs){
+   $path=Join-Path $dir.FullName 'start-windows-admin-mcp.ps1'
+   if(-not(Test-Path -LiteralPath $path -PathType Leaf)){continue}
+   if((Get-Item -LiteralPath $path).Length -gt 16384){continue}
+   $id=Get-TunnelIdFromText ([IO.File]::ReadAllText($path))
+   if($id){return $id}
+  }
  }
  return $null
 }
@@ -79,7 +104,7 @@ switch($Action){
   Assert-Administrator
   if([Console]::IsInputRedirected){throw 'LOCAL_CONSOLE_REQUIRED_FOR_ONE_TIME_CONFIGURATION'}
   $tunnel=Get-ExistingTunnelId
-  if(-not $tunnel){$tunnel=Read-Host 'Tunnel ID (tunnel_...)'}
+  if(-not $tunnel){throw 'TUNNEL_ID_AUTODISCOVERY_FAILED: no running tunnel or protected backup containing a usable ID'}
   if($tunnel -cnotmatch '^tunnel_[0-9a-f]{32}$'){throw 'INVALID_TUNNEL_ID'}
   $secure=Read-Host 'Runtime API key (only for one-time encrypted storage)' -AsSecureString
   $credentialObj=[pscredential]::new('runtime',$secure)
