@@ -1,4 +1,4 @@
-# WindowsAdminMCP v0.6.0 standalone acceptance. Does not restart production tunnel.
+# WindowsAdminMCP v0.7.0 standalone acceptance. Does not restart production tunnel.
 $ErrorActionPreference='Stop'
 $root=$PSScriptRoot
 $server=Join-Path $root 'windows-admin-mcp.ps1'
@@ -50,9 +50,9 @@ $base=Session @($init,(Request 9 'ping' $null),(Request 11 'tools/list' $null),$
  '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"powershell_exec","arguments":{"command":"Write-Output YES","timeout_seconds":1.7}}}',
  '{"id":7,"method":"ping"}','{"jsonrpc":"2.0","method":"notifications/initialized"}','not-json') '0'
 Assert 'base.response.count' ($base.Count -eq 10)
-Assert 'initialize.0.6.0' (($base|Where-Object id -eq 1).result.serverInfo.version -eq '0.6.0')
+Assert 'initialize.0.7.0' (($base|Where-Object id -eq 1).result.serverInfo.version -eq '0.7.0')
 Assert 'ping.pass' (@($base|Where-Object id -eq 9).Count -eq 1)
-Assert 'tools.list.two' (@(($base|Where-Object id -eq 11).result.tools).Count -eq 2)
+Assert 'tools.list.three' (@(($base|Where-Object id -eq 11).result.tools).Count -eq 3)
 Assert 'unknown.tool.protocol.error' ((($base|Where-Object id -eq 2).error.code -eq -32602) -and -not (($base|Where-Object id -eq 2).Contains('result')))
 Assert 'disabled.exec.isError' ((($base|Where-Object id -eq 3).result.isError -eq $true) -and (($base|Where-Object id -eq 3).result.structuredContent.reason -eq 'ADMIN_EXEC_NOT_ENABLED_LOCALLY'))
 Assert 'unknown.method.-32601' (($base|Where-Object id -eq 4).error.code -eq -32601)
@@ -150,7 +150,7 @@ try {
     $p.StandardInput.WriteLine(($waiting|ConvertTo-Json -Compress -Depth 12))
     $p.StandardInput.WriteLine((Request 103 'ping' $null))
     $p.StandardInput.WriteLine('{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":102,"reason":"offline queued cancellation"}}')
-    Start-Sleep -Milliseconds 1750
+    Start-Sleep -Seconds 5  # Allow cold WindowsDesktop C# compilation and actual active process start before cancellation
     $p.StandardInput.WriteLine('{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":101,"reason":"offline active cancellation"}}')
     $p.StandardInput.Close()
     if(-not $p.WaitForExit(30000)){$p.Kill($true);throw 'CANCEL_TEST_HUNG'}
@@ -166,7 +166,7 @@ try {
 } finally {$p.Dispose()}
 
 
-# v0.6.0: one full administrator session, no per-command approval or mode selection.
+# v0.7.0: one full administrator session, no per-command approval or mode selection.
 $commandOne="Write-Output 'ADMIN_RUN_ONE'"
 $commandTwo="Write-Output 'ADMIN_RUN_TWO'"
 $full=Session @((ExecRequest 201 $commandOne),(ExecRequest 202 $commandTwo),
@@ -187,11 +187,69 @@ $legacyNotif='{"jsonrpc":"2.0","method":"notifications/initialized"}'
 $legacyStatus=Request 302 'tools/call' @{name='powershell_status';arguments=@{}}
 $legacyExec=ExecRequest 303 'Write-Output HANDSHAKE_OK'
 $legacyFirst=Session @($legacyInit,$legacyNotif,$legacyStatus,$legacyExec) '1'
-Assert 'legacy.session1.initialized.then.status' ((ById $legacyFirst 301).result.serverInfo.version -eq '0.6.0' -and (ById $legacyFirst 302).result.structuredContent.elevated)
+Assert 'legacy.session1.initialized.then.status' ((ById $legacyFirst 301).result.serverInfo.version -eq '0.7.0' -and (ById $legacyFirst 302).result.structuredContent.elevated)
 Assert 'legacy.session1.initialized.then.exec' ((ById $legacyFirst 303).result.structuredContent.stdout -match 'HANDSHAKE_OK')
 $legacyAgain=Session @($legacyInit,$legacyNotif,$legacyStatus,$legacyExec) '1'
 Assert 'legacy.session2.reinitialized.status' ((ById $legacyAgain 302).result.structuredContent.elevated)
 Assert 'legacy.session2.reinitialized.exec' ((ById $legacyAgain 303).result.structuredContent.stdout -match 'HANDSHAKE_OK')
+
+
+# Dual-era MCP 2026-07-28: stateless metadata, discovery, image block and legacy compatibility.
+$modernMeta=@{
+ 'io.modelcontextprotocol/protocolVersion'='2026-07-28'
+ 'io.modelcontextprotocol/clientCapabilities'=@{}
+ 'io.modelcontextprotocol/clientInfo'=@{name='offline-acceptance';version='1'}
+}
+function ModernRequest([int]$id,[string]$method,[hashtable]$values){
+ $payload=@{};if($values){foreach($key in $values.Keys){$payload[$key]=$values[$key]}}
+ $payload['_meta']=$modernMeta
+ return Request $id $method $payload
+}
+$modern=Session @(
+ (ModernRequest 401 'server/discover' @{}),
+ (ModernRequest 402 'tools/list' @{}),
+ (ModernRequest 403 'tools/call' @{name='powershell_status';arguments=@{}}),
+ (ModernRequest 404 'tools/call' @{name='powershell_screenshot';arguments=@{monitor=0;x=0;y=0;width=320;height=180;max_width=320}}),
+ (Request 405 'tools/call' @{name='powershell_status';arguments=@{};_meta=@{
+     'io.modelcontextprotocol/protocolVersion'='1900-01-01'
+     'io.modelcontextprotocol/clientCapabilities'=@{}
+ }}),
+ (Request 406 'tools/call' @{name='powershell_status';arguments=@{};_meta=@{
+     'io.modelcontextprotocol/protocolVersion'='2026-07-28'
+ }}),
+ (ModernRequest 407 'tools/call' @{name='powershell_screenshot';arguments=@{monitor=99}}),
+ (ModernRequest 408 'tools/call' @{name='powershell_screenshot';arguments=@{bad_argument=1}}),
+ (Request 409 'initialize' @{protocolVersion='2025-06-18';capabilities=@{};clientInfo=@{name='legacy-after-modern';version='1'}}),
+ (Request 410 'tools/list' $null)
+) '1'
+$mDisc=ById $modern 401
+$mList=ById $modern 402
+$mStatus=ById $modern 403
+$mShot=ById $modern 404
+$mBad=ById $modern 405
+$mMissing=ById $modern 406
+$mScreen=ById $modern 407
+$mParam=ById $modern 408
+$mLegacy=ById $modern 409
+$mLegacyTools=ById $modern 410
+Assert 'modern.discovery' ($mDisc.result.resultType -eq 'complete' -and $mDisc.result.supportedVersions -contains '2026-07-28')
+Assert 'modern.tools.image.advertised' ($mList.result.resultType -eq 'complete' -and @($mList.result.tools|Where-Object name -eq 'powershell_screenshot').Count -eq 1)
+Assert 'modern.status.result_type' ($mStatus.result.resultType -eq 'complete' -and $mStatus.result.structuredContent.elevated)
+Assert 'modern.version.unsupported.32022' ($mBad.error.code -eq -32022 -and $mBad.error.data.requested -eq '1900-01-01')
+Assert 'modern.client.capabilities.required' ($mMissing.error.code -eq -32602)
+Assert 'screenshot.invalid.monitor.rejected' ($mScreen.result.isError -and $mScreen.result.structuredContent.reason -eq 'MONITOR_NOT_FOUND')
+Assert 'screenshot.unknown.argument.rejected' ($mParam.error.code -eq -32602)
+Assert 'legacy.initialize.after.modern' ($mLegacy.result.protocolVersion -eq '2025-06-18')
+Assert 'legacy.tools.after.modern' ($null -eq $mLegacyTools.result.resultType -and @($mLegacyTools.result.tools).Count -eq 3)
+if(-not $mShot.result.isError){
+ $image=$mShot.result.content[0]
+ $bytes=[Convert]::FromBase64String($image.data)
+ Assert 'screenshot.image.content.png' ($image.type -eq 'image' -and $image.mimeType -eq 'image/png' -and $bytes.Length -ge 100 -and $bytes[0] -eq 137 -and $bytes[1] -eq 80)
+ Assert 'screenshot.bounded.dimensions' ($mShot.result.structuredContent.width -eq 320 -and $mShot.result.structuredContent.height -eq 180)
+}else{
+ # CI virtual desktops may be noninteractive: return an exact actionable error, never fake a PNG.
+ Assert 'screenshot.headless.fail.closed' ($mShot.result.structuredContent.reason -in @('INTERACTIVE_DESKTOP_UNAVAILABLE','SCREEN_CAPTURE_FAILED_OR_DESKTOP_LOCKED'))
+}
 
 "SUMMARY PASS=$ok FAIL=$fail"
 if($fail){exit 1}

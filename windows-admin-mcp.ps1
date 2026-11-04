@@ -1,4 +1,4 @@
-# WindowsAdminMCP v0.6.0: single native stdio server, bounded async commands.
+# WindowsAdminMCP v0.7.0: single native stdio server, bounded async commands.
 $ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
@@ -6,7 +6,13 @@ Remove-Item Env:CONTROL_PLANE_API_KEY -ErrorAction SilentlyContinue
 Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $elevated = [Security.Principal.WindowsPrincipal]::new($identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-Add-Type -TypeDefinition @'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$refs=@(Get-ChildItem -LiteralPath (Join-Path $PSHOME 'ref') -Filter '*.dll'|ForEach-Object {$_.FullName})
+$refs+=([System.Windows.Forms.Screen].Assembly.Location)
+$refs+=([System.Drawing.Bitmap].Assembly.Location)
+$refs+=@(Get-ChildItem -LiteralPath $PSHOME -Filter 'System.Private.Windows.*.dll'|ForEach-Object {$_.FullName})
+Add-Type -ReferencedAssemblies $refs -TypeDefinition @'
 using System;
 using System.IO;
 using System.Collections.Generic;
@@ -20,8 +26,11 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Diagnostics;
 using System.Linq;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Windows.Forms;
 
-public static class WindowsAdminMcpServerV06 {
+public static class WindowsAdminMcpServerV07 {
     static readonly object WriteLock = new object();
     static readonly object AuditLock = new object();
     static readonly SemaphoreSlim ExecGate = new SemaphoreSlim(1,1);
@@ -59,7 +68,7 @@ public static class WindowsAdminMcpServerV06 {
     const int MaxOutput = 16000;
     const int MaxInput = 131072;
     const int MaxQueue = 8;
-    const string ToolsJson = @"{""tools"":[{""name"":""powershell_status"",""description"":""Read-only Windows host, PowerShell version and privilege check."",""inputSchema"":{""type"":""object"",""properties"":{},""additionalProperties"":false},""annotations"":{""readOnlyHint"":true,""destructiveHint"":false}},{""name"":""powershell_exec"",""description"":""Execute elevated PowerShell; serial execution with independent responsive status and ping, audit, bounded UTF-8 output and timeout."",""inputSchema"":{""type"":""object"",""properties"":{""command"":{""type"":""string"",""minLength"":1,""maxLength"":12000},""timeout_seconds"":{""type"":""integer"",""minimum"":1,""maximum"":120,""default"":30},""working_directory"":{""type"":""string""}},""required"":[""command""],""additionalProperties"":false},""annotations"":{""readOnlyHint"":false,""destructiveHint"":true,""idempotentHint"":false,""openWorldHint"":true}}]}";
+    const string ToolsJson = @"{""tools"":[{""name"":""powershell_status"",""description"":""Read-only Windows host, PowerShell version and privilege check."",""inputSchema"":{""type"":""object"",""properties"":{},""additionalProperties"":false},""annotations"":{""readOnlyHint"":true,""destructiveHint"":false}},{""name"":""powershell_exec"",""description"":""Execute elevated PowerShell; serial execution with independent responsive status and ping, audit, bounded UTF-8 output and timeout."",""inputSchema"":{""type"":""object"",""properties"":{""command"":{""type"":""string"",""minLength"":1,""maxLength"":12000},""timeout_seconds"":{""type"":""integer"",""minimum"":1,""maximum"":120,""default"":30},""working_directory"":{""type"":""string""}},""required"":[""command""],""additionalProperties"":false},""annotations"":{""readOnlyHint"":false,""destructiveHint"":true,""idempotentHint"":false,""openWorldHint"":true}},{""name"":""powershell_screenshot"",""description"":""Capture Windows interactive desktop monitor or selected region. Returns the PNG directly as MCP ImageContent; screen may contain sensitive data."",""inputSchema"":{""type"":""object"",""properties"":{""monitor"":{""type"":""integer"",""minimum"":0},""x"":{""type"":""integer"",""minimum"":0},""y"":{""type"":""integer"",""minimum"":0},""width"":{""type"":""integer"",""minimum"":1},""height"":{""type"":""integer"",""minimum"":1},""max_width"":{""type"":""integer"",""minimum"":256,""maximum"":1920}},""additionalProperties"":false},""annotations"":{""readOnlyHint"":true,""destructiveHint"":false,""openWorldHint"":true}}]}";
     public static void Run(bool elevated,string user,string psVersion,int pid,string installDir) {
         Elevated=elevated;User=user;PsVersion=psVersion;Pid=pid;
         Enabled=String.Equals(Environment.GetEnvironmentVariable("WINDOWS_ADMIN_MCP_EXEC"),"1",StringComparison.Ordinal);
@@ -91,6 +100,10 @@ public static class WindowsAdminMcpServerV06 {
     static void Send(string s){lock(WriteLock){Console.Out.WriteLine(s);Console.Out.Flush();}}
     static void Result(string id,string resultJson){Send("{\"jsonrpc\":\"2.0\",\"id\":"+id+",\"result\":"+resultJson+"}");}
     static void Error(string id,int code,string msg){Send("{\"jsonrpc\":\"2.0\",\"id\":"+id+",\"error\":{\"code\":"+code+",\"message\":"+JsonSerializer.Serialize(msg)+"}}");}
+    static void Unsupported(string id,string version){
+        Send("{\"jsonrpc\":\"2.0\",\"id\":"+id+",\"error\":{\"code\":-32022,\"message\":\"Unsupported protocol version\",\"data\":{\"supported\":[\"2026-07-28\"],\"requested\":"+JsonSerializer.Serialize(version)+"}}}");
+    }
+    static readonly string DiscoverJson="{\"resultType\":\"complete\",\"supportedVersions\":[\"2026-07-28\"],\"capabilities\":{\"tools\":{}},\"_meta\":{\"io.modelcontextprotocol/serverInfo\":{\"name\":\"windows-admin-mcp\",\"version\":\"0.7.0\"}}}";
     static bool Property(JsonElement root,string name,out JsonElement value){if(root.ValueKind==JsonValueKind.Object)return root.TryGetProperty(name,out value);value=default;return false;}
     static void Handle(string raw){
         JsonDocument doc;
@@ -102,32 +115,47 @@ public static class WindowsAdminMcpServerV06 {
             string idJson=hasId?id.GetRawText():"null";
             if(hasId && id.ValueKind!=JsonValueKind.String && id.ValueKind!=JsonValueKind.Number && id.ValueKind!=JsonValueKind.Null){Error("null",-32600,"Invalid id");return;}
             if(!Property(root,"jsonrpc",out var protocol)||protocol.ValueKind!=JsonValueKind.String||protocol.GetString()!="2.0"||!Property(root,"method",out var method)||method.ValueKind!=JsonValueKind.String){Error(idJson,-32600,"Invalid Request");return;}
+            bool modern=false;
+            if(Property(root,"params",out var requestParams) && Property(requestParams,"_meta",out var requestMeta) &&
+                Property(requestMeta,"io.modelcontextprotocol/protocolVersion",out var requestedVersion)){
+                if(requestedVersion.ValueKind!=JsonValueKind.String){Error(idJson,-32602,"INVALID_PROTOCOL_VERSION");return;}
+                var version=requestedVersion.GetString();
+                if(version!="2026-07-28"){Unsupported(idJson,version);return;}
+                if(!Property(requestMeta,"io.modelcontextprotocol/clientCapabilities",out var caps) || caps.ValueKind!=JsonValueKind.Object){
+                    Error(idJson,-32602,"MISSING_CLIENT_CAPABILITIES: object required in params._meta");return;
+                }
+                modern=true;
+            }else if(method.GetString()=="server/discover"){
+                Error(idJson,-32602,"MISSING_MODERN_METADATA: protocolVersion and clientCapabilities required");return;
+            }
             if(!hasId){
                 if(method.GetString()=="notifications/cancelled")Cancel(root);
                 return; // No response to notifications.
             }
             switch(method.GetString()){
+                case "server/discover":Result(idJson,DiscoverJson);break;
                 case "initialize":
-                    Result(idJson,"{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"windows-admin-mcp\",\"version\":\"0.6.0\"}}");break;
-                case "ping":Result(idJson,"{}");break;
-                case "tools/list":Result(idJson,ToolsJson);break;
-                case "resources/list":Result(idJson,"{\"resources\":[]}");break;
-                case "prompts/list":Result(idJson,"{\"prompts\":[]}");break;
-                case "tools/call":CallTool(root,idJson);break;
+                    Result(idJson,"{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"windows-admin-mcp\",\"version\":\"0.7.0\"}}");break;
+                case "ping":Result(idJson,modern?"{\"resultType\":\"complete\"}":"{}");break;
+                case "tools/list":Result(idJson,modern?"{\"resultType\":\"complete\","+ToolsJson.Substring(1):ToolsJson);break;
+                case "resources/list":Result(idJson,modern?"{\"resultType\":\"complete\",\"resources\":[]}":"{\"resources\":[]}");break;
+                case "prompts/list":Result(idJson,modern?"{\"resultType\":\"complete\",\"prompts\":[]}":"{\"prompts\":[]}");break;
+                case "tools/call":CallTool(root,idJson,modern);break;
                 default:Error(idJson,-32601,"Method not found");break;
             }
         }
     }
-    static void CallTool(JsonElement root,string id){
+    static void CallTool(JsonElement root,string id,bool modern){
         if(!Property(root,"params",out var param)||param.ValueKind!=JsonValueKind.Object||!Property(param,"name",out var n)||n.ValueKind!=JsonValueKind.String||String.IsNullOrWhiteSpace(n.GetString())){Error(id,-32602,"Invalid params");return;}
         string name=n.GetString();
-        if(name!="powershell_exec"&&name!="powershell_status"){Error(id,-32602,"Unknown tool");return;}
+        if(name!="powershell_exec"&&name!="powershell_status"&&name!="powershell_screenshot"){Error(id,-32602,"Unknown tool");return;}
         JsonElement args=default;
         if(Property(param,"arguments",out args)&&args.ValueKind!=JsonValueKind.Object){Error(id,-32602,"Invalid arguments");return;}
         if(name=="powershell_status"){
             if(args.ValueKind==JsonValueKind.Object && args.EnumerateObject().Any()){Error(id,-32602,"Unexpected arguments");return;}
-            ToolResult(id,Status(),false);return;
+            ToolResult(id,Status(),false,modern);return;
         }
+        if(name=="powershell_screenshot"){Screenshot(id,args,modern);return;}
         string command=null,workingDir=Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         int seconds=30;
         if(args.ValueKind!=JsonValueKind.Object){Error(id,-32602,"Missing arguments");return;}
@@ -143,10 +171,10 @@ public static class WindowsAdminMcpServerV06 {
             }else{Error(id,-32602,"Unknown argument");return;}
         }
         if(String.IsNullOrWhiteSpace(command)||command.Length>12000){Error(id,-32602,"Invalid command length");return;}
-        if(!Enabled){ToolResult(id,new Dictionary<string,object>{{"status","BLOCKED"},{"reason","ADMIN_EXEC_NOT_ENABLED_LOCALLY"}},true);return;}
-        if(!Elevated){ToolResult(id,new Dictionary<string,object>{{"status","BLOCKED"},{"reason","NOT_ELEVATED"}},true);return;}
-        if(!Directory.Exists(workingDir)){ToolResult(id,new Dictionary<string,object>{{"status","BLOCKED"},{"reason","WORKING_DIRECTORY_NOT_FOUND"}},true);return;}
-        if(Interlocked.Increment(ref Outstanding)>MaxQueue){Interlocked.Decrement(ref Outstanding);ToolResult(id,new Dictionary<string,object>{{"status","BLOCKED"},{"reason","EXEC_QUEUE_FULL"}},true);return;}
+        if(!Enabled){ToolResult(id,new Dictionary<string,object>{{"status","BLOCKED"},{"reason","ADMIN_EXEC_NOT_ENABLED_LOCALLY"}},true,modern);return;}
+        if(!Elevated){ToolResult(id,new Dictionary<string,object>{{"status","BLOCKED"},{"reason","NOT_ELEVATED"}},true,modern);return;}
+        if(!Directory.Exists(workingDir)){ToolResult(id,new Dictionary<string,object>{{"status","BLOCKED"},{"reason","WORKING_DIRECTORY_NOT_FOUND"}},true,modern);return;}
+        if(Interlocked.Increment(ref Outstanding)>MaxQueue){Interlocked.Decrement(ref Outstanding);ToolResult(id,new Dictionary<string,object>{{"status","BLOCKED"},{"reason","EXEC_QUEUE_FULL"}},true,modern);return;}
         string token=null;
         if(Property(param,"_meta",out var meta) && Property(meta,"progressToken",out var progressToken) &&
            (progressToken.ValueKind==JsonValueKind.String || progressToken.ValueKind==JsonValueKind.Number))
@@ -164,12 +192,12 @@ public static class WindowsAdminMcpServerV06 {
                     var state=QueueResult(job);
                     try{Audit(new Dictionary<string,object>{{"event","queue_finish"},{"request_id",id},{"status",state},{"elapsed_ms",job.Elapsed.ElapsedMilliseconds}});}
                     catch{state="AUDIT_WRITE_FAILED_BEFORE_EXECUTION";}
-                    ToolResult(id,new Dictionary<string,object>{{"status",state},{"elapsed_ms",job.Elapsed.ElapsedMilliseconds},{"exit_code",null},{"audit_persisted",state!="AUDIT_WRITE_FAILED_BEFORE_EXECUTION"}},true);
+                    ToolResult(id,new Dictionary<string,object>{{"status",state},{"elapsed_ms",job.Elapsed.ElapsedMilliseconds},{"exit_code",null},{"audit_persisted",state!="AUDIT_WRITE_FAILED_BEFORE_EXECUTION"}},true,modern);
                     return;
                 }
                 try{
                     if(job.Deadline.IsCancellationRequested){
-                        ToolResult(id,new Dictionary<string,object>{{"status",QueueResult(job)},{"exit_code",null}},true);
+                        ToolResult(id,new Dictionary<string,object>{{"status",QueueResult(job)},{"exit_code",null}},true,modern);
                         return;
                     }
                     Progress(job,0,"running");
@@ -177,10 +205,10 @@ public static class WindowsAdminMcpServerV06 {
                     result["total_elapsed_ms"]=job.Elapsed.ElapsedMilliseconds;
                     bool fail=!String.Equals((string)result["status"],"COMPLETED",StringComparison.Ordinal) ||
                         !(result.TryGetValue("exit_code",out var exit) && exit is int code && code==0);
-                    ToolResult(id,result,fail);
+                    ToolResult(id,result,fail,modern);
                     Progress(job,1,"finished");
                 }finally{ExecGate.Release();}
-            }catch(Exception){ToolResult(id,new Dictionary<string,object>{{"status","EXECUTION_FAILED"},{"reason","INTERNAL_EXECUTION_ERROR"}},true);}
+            }catch(Exception){ToolResult(id,new Dictionary<string,object>{{"status","EXECUTION_FAILED"},{"reason","INTERNAL_EXECUTION_ERROR"}},true,modern);}
             finally{
                 Jobs.TryRemove(id,out _);job.Dispose();Interlocked.Decrement(ref Outstanding);
             }
@@ -192,10 +220,81 @@ public static class WindowsAdminMcpServerV06 {
             {"host",Environment.MachineName},{"user",User},{"elevated",Elevated},{"powershell",PsVersion},{"process_id",Pid},{"admin_exec_enabled",Enabled && Elevated},{"timestamp_utc",DateTime.UtcNow.ToString("O")}
         };
     }
-    static void ToolResult(string id,Dictionary<string,object> data,bool fail){
+    static void ToolResult(string id,Dictionary<string,object> data,bool fail,bool modern){
         string content=JsonSerializer.Serialize(data);
-        string result="{\"content\":[{\"type\":\"text\",\"text\":"+JsonSerializer.Serialize(content)+"}],\"structuredContent\":"+content+",\"isError\":"+(fail?"true":"false")+"}";
+        string result="{"+(modern?"\"resultType\":\"complete\",":"")+"\"content\":[{\"type\":\"text\",\"text\":"+JsonSerializer.Serialize(content)+"}],\"structuredContent\":"+content+",\"isError\":"+(fail?"true":"false")+"}";
         Result(id,result);
+    }
+
+    // The screen is returned directly in the JSON-RPC image block. No PNG is saved to disk.
+    static void Screenshot(string id,JsonElement args,bool modern){
+        if(!Elevated){ToolResult(id,new Dictionary<string,object>{{"status","BLOCKED"},{"reason","NOT_ELEVATED"}},true,modern);return;}
+        int monitor=0,x=0,y=0,width=0,height=0,maxWidth=1280;
+        bool hasWidth=false,hasHeight=false;
+        if(args.ValueKind!=JsonValueKind.Undefined){
+            if(args.ValueKind!=JsonValueKind.Object){Error(id,-32602,"SCREENSHOT_ARGUMENTS_MUST_BE_OBJECT");return;}
+            foreach(var p in args.EnumerateObject()){
+                if(p.Value.ValueKind!=JsonValueKind.Number||!p.Value.TryGetInt32(out int n)){
+                    Error(id,-32602,"SCREENSHOT_PARAM_MUST_BE_INTEGER");return;
+                }
+                switch(p.Name){
+                    case "monitor":monitor=n;break;
+                    case "x":x=n;break;
+                    case "y":y=n;break;
+                    case "width":width=n;hasWidth=true;break;
+                    case "height":height=n;hasHeight=true;break;
+                    case "max_width":maxWidth=n;break;
+                    default:Error(id,-32602,"UNKNOWN_SCREENSHOT_PARAM");return;
+                }
+            }
+        }
+        if(monitor<0||x<0||y<0||maxWidth<256||maxWidth>1920||hasWidth!=hasHeight){
+            Error(id,-32602,"INVALID_SCREENSHOT_REGION_OR_SCALE");return;
+        }
+        try{
+            if(!Environment.UserInteractive)throw new InvalidOperationException("INTERACTIVE_DESKTOP_UNAVAILABLE");
+            var screens=Screen.AllScreens;
+            if(monitor>=screens.Length)throw new InvalidOperationException("MONITOR_NOT_FOUND");
+            var bounds=screens[monitor].Bounds;
+            if(!hasWidth){width=bounds.Width-x;height=bounds.Height-y;}
+            if(width<1||height<1||x>bounds.Width-width||y>bounds.Height-height){
+                throw new InvalidOperationException("REGION_OUTSIDE_MONITOR");
+            }
+            if((long)width*height>16000000L)throw new InvalidOperationException("REGION_PIXEL_LIMIT_EXCEEDED");
+            using(var source=new Bitmap(width,height,PixelFormat.Format24bppRgb)){
+                using(var drawing=Graphics.FromImage(source)){
+                    drawing.CopyFromScreen(bounds.Left+x,bounds.Top+y,0,0,new Size(width,height));
+                }
+                int outWidth=Math.Min(width,maxWidth);
+                int outHeight=Math.Max(1,(int)Math.Round((double)height*outWidth/width));
+                if(outHeight>1080){outWidth=Math.Max(1,(int)Math.Floor((double)outWidth*1080/outHeight));outHeight=1080;}
+                byte[] png=null;
+                for(int attempt=0;attempt<5;attempt++){
+                    using(var scaled=new Bitmap(outWidth,outHeight,PixelFormat.Format24bppRgb)){
+                        using(var graphics=Graphics.FromImage(scaled)){
+                            graphics.InterpolationMode=System.Drawing.Drawing2D.InterpolationMode.HighQualityBilinear;
+                            graphics.DrawImage(source,0,0,outWidth,outHeight);
+                        }
+                        using(var stream=new MemoryStream()){scaled.Save(stream,ImageFormat.Png);png=stream.ToArray();}
+                    }
+                    if(png.Length<=2000000)break;
+                    outWidth=Math.Max(1,(int)Math.Floor(outWidth*0.7));
+                    outHeight=Math.Max(1,(int)Math.Floor(outHeight*0.7));
+                }
+                if(png.Length>2000000)throw new InvalidOperationException("SCREENSHOT_EXCEEDS_2MB");
+                var descriptor=JsonSerializer.Serialize(new Dictionary<string,object>{
+                    {"status","COMPLETED"},{"monitor",monitor},{"width",outWidth},{"height",outHeight},
+                    {"mimeType","image/png"},{"bytes",png.Length}
+                });
+                var response="{"+(modern?"\"resultType\":\"complete\",":"")+"\"content\":[{\"type\":\"image\",\"mimeType\":\"image/png\",\"data\":"+
+                    JsonSerializer.Serialize(Convert.ToBase64String(png))+"}],\"structuredContent\":"+descriptor+",\"isError\":false}";
+                Result(id,response);
+            }
+        }catch(Exception exception){
+            string reason=exception is InvalidOperationException?exception.Message:"SCREEN_CAPTURE_FAILED_OR_DESKTOP_LOCKED";
+            ToolResult(id,new Dictionary<string,object>{{"status","BLOCKED"},{"reason",reason},{"component","WINDOWS_INTERACTIVE_DESKTOP"},
+               {"next_action","Unlock the interactive Windows desktop, verify monitor, and retry."}},true,modern);
+        }
     }
     static void Audit(Dictionary<string,object> data){
         lock(AuditLock){
@@ -311,4 +410,4 @@ public static class WindowsAdminMcpServerV06 {
     }
 }
 '@ -ErrorAction Stop
-[WindowsAdminMcpServerV06]::Run($elevated,$identity.Name,$PSVersionTable.PSVersion.ToString(),$PID,$PSScriptRoot)
+[WindowsAdminMcpServerV07]::Run($elevated,$identity.Name,$PSVersionTable.PSVersion.ToString(),$PID,$PSScriptRoot)

@@ -24,6 +24,10 @@ jobs:
           $check = ($raw | Select-Object -Last 1 | ConvertFrom-Json)
           if (-not $check.installed -or -not $check.integrity_ok) { throw "STATUS_INCOMPLETE" }
           Write-Host "OPERATOR_STATUS=PASS"
+          # Confirm all three tools and modern protocol after clean installation.
+          $modern = [IO.File]::ReadAllText('C:\Program Files\WindowsAdminMCP\windows-admin-mcp.ps1')
+          if ($modern -notmatch '2026-07-28' -or $modern -notmatch 'powershell_screenshot') { throw 'MODERN_PROTOCOL_OR_IMAGE_MISSING' }
+          Write-Host "MCP_MODERN_AND_SCREENSHOT_SOURCE=PASS"
           # Vendor v0.0.19 supports this flag; the single operator launcher must set it.
           $launcher=[IO.File]::ReadAllText('C:\Program Files\WindowsAdminMCP\WindowsAdminMCP.ps1')
           if($launcher -notmatch "MCP_STDIO_SEND_INITIALIZED_NOTIFICATION='true'"){

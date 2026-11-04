@@ -9,7 +9,7 @@ $server=Join-Path $root 'windows-admin-mcp.ps1'
 $exe=Join-Path $root 'client\tunnel-client-runtime.exe'
 $secretRoot=Join-Path $env:ProgramData 'WindowsAdminMCP'
 $credential=Join-Path $secretRoot 'tunnel-credential.dpapi'
-$serverSha='8A62AFA79D829D91D88C3F06D8F69004FEAE8C6286A6BE59F19EC7AF672AF0B9'
+$serverSha='8889FBF509E2364808070397B0A39FC54E91E201A4384A9AB2F0A9EA47ED47B5'
 $exeSha='CB3B2AB34A77096750561B8D46319AF282096A169A90B9C8E36567DD4FE06837'
 
 function Assert-Administrator {
