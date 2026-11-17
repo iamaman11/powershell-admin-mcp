@@ -70,9 +70,26 @@ try{
     $null=& $installer -PackagePath $Package -ExpectedSha256 $Sha256
     $after=@(Get-ChildItem -LiteralPath $env:ProgramFiles -Directory -Filter 'WindowsAdminMCP.incoming-*').Count
     Check ($before -eq $after) 'r6.verify_cleans_temporary_tree'
+    $blocked=$false
+    try{& $installer -Action Accept -ExpectedCommit $result.commit|Out-Null}catch{if($_.Exception.Message -eq 'REMOTE_ACCEPTANCE_REQUIRED'){$blocked=$true}else{throw}}
+    Check $blocked 'r6.accept_requires_explicit_remote_confirmation'
+    $prepare=& $installer -Action Prepare -ExpectedCommit $result.commit|ConvertFrom-Json
+    $task=Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel'
+    Check ($prepare.status -eq 'TRIAL_PREPARED' -and -not $prepare.logon_enabled -and -not $task.Triggers[0].Enabled -and $task.State.ToString() -ne 'Running' -and $prepare.service_start -eq 'Manual') 'r6.actual_task_demand_only'
+    $repeatPrepare=& $installer -Action Prepare -ExpectedCommit $result.commit|ConvertFrom-Json
+    Check ($repeatPrepare.status -eq 'TRIAL_PREPARED' -and -not $repeatPrepare.logon_enabled) 'r6.prepare_idempotent'
+    $blocked=$false
+    try{& $installer -Action Accept -ExpectedCommit $result.commit -RemoteAcceptanceConfirmed|Out-Null}catch{if($_.Exception.Message -eq 'TRIAL_TASK_NOT_RUNNING'){$blocked=$true}else{throw}}
+    Check ($blocked -and (Test-Path (Join-Path $root '.rollback')) -and -not (Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel').Triggers[0].Enabled) 'r6.operator_attestation_alone_cannot_accept'
+    $native=Join-Path $root 'native\WindowsAdminMCP.exe'
+    $startup=Join-Path $root 'native\NativeStartup.ps1'
+    & $startup -Action RemoveTrial -ExpectedNativeSha256 (Get-FileHash -LiteralPath $native).Hash|Out-Null
+    Check (-not(Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel' -ErrorAction SilentlyContinue)) 'r6.remove_quiescent_trial'
     $rollback=& $installer -Action Rollback|ConvertFrom-Json
     Check ($rollback.status -eq 'ROLLED_BACK_OFFLINE' -and -not(Test-Path (Join-Path $root 'native')) -and -not(Test-Path (Join-Path $root 'client')) -and -not(Test-Path (Join-Path $root '.rollback'))) 'r6.explicit_clean_install_rollback'
 }finally{
+    $task=Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel' -ErrorAction SilentlyContinue
+    if($task -and $task.State.ToString() -ne 'Running'){Unregister-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel' -Confirm:$false}
     if(Get-Service WindowsAdminMCP -ErrorAction SilentlyContinue){& sc.exe delete WindowsAdminMCP|Out-Host}
     if(Test-Path -LiteralPath $root){Remove-Item -LiteralPath $root -Recurse -Force}
 }
