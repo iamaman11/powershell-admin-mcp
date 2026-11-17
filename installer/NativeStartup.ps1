@@ -97,30 +97,69 @@ function Assert-RemoteEvidence {
 switch($Action){
     'Plan'{
         $d=New-Definition
-        [pscustomobject]@{service=$svcName;service_start='Automatic';task=$name;trigger=$d.Triggers[0].CimClass.CimClassName;user=$d.Principal.UserId;logon=$d.Principal.LogonType.ToString();run_level=$d.Principal.RunLevel.ToString();execute=$d.Actions[0].Execute;arguments=$d.Actions[0].Arguments;multiple_instances=$d.Settings.MultipleInstances.ToString();restart_count=$d.Settings.RestartCount;mutated=$false}|ConvertTo-Json -Compress
+        [pscustomobject]@{service=$svcName;service_start='Automatic';task=$name;trigger=$d.Triggers[0].CimClass.CimClassName;user=$d.Principal.UserId;logon=$d.Principal.LogonType.ToString();run_level=$d.Principal.RunLevel.ToString();execute=$d.Actions[0].Execute;arguments=$d.Actions[0].Arguments;multiple_instances=$d.Settings.MultipleInstances.ToString();restart_count=$d.Settings.RestartCount;trial_logon_enabled=[bool]$d.Triggers[0].Enabled;mutated=$false}|ConvertTo-Json -Compress
     }
     'Status'{Get-State|ConvertTo-Json -Depth 4 -Compress}
-    'Register'{
-        if(-not $Accepted){throw 'PHYSICAL_ACCEPTANCE_REQUIRED'}
+    'Prepare'{
         $svc=Assert-Installed
         $task=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-        if($task){Assert-Task $task}
-        else{
-            if(@(Get-CimInstance Win32_Process -Filter "Name='tunnel-client-runtime.exe'").Count -ne 0){throw 'EXISTING_TUNNEL_MUST_BE_STOPPED_BY_INSTALLER'}
+        if($task){
+            Assert-Task $task
+            if($task.Triggers[0].Enabled){throw 'ALREADY_ACCEPTED'}
+        }else{
+            if($svc.StartMode -ne 'Manual'){throw 'MANUAL_SERVICE_REQUIRED'}
+            if(@(Get-Process -Name 'tunnel-client-runtime' -ErrorAction SilentlyContinue).Count){throw 'ACTIVE_TUNNEL_MAINTENANCE_REQUIRED'}
             if(@(Get-ScheduledTask|Where-Object {$_.TaskName -like 'WindowsAdminMCP-R6-*' -and $_.State.ToString() -eq 'Running'}).Count){throw 'ACTIVE_TRIAL_TASK'}
+            Register-ScheduledTask -TaskName $name -InputObject (New-Definition)|Out-Null
+            try{
+                $task=Get-ScheduledTask -TaskName $name
+                Assert-Task $task
+                if($task.Triggers[0].Enabled -or $task.State.ToString() -eq 'Running'){throw 'TRIAL_TASK_NOT_DEMAND_ONLY'}
+            }catch{
+                Unregister-ScheduledTask -TaskName $name -Confirm:$false
+                throw
+            }
         }
-        $created=$false;$oldMode=$svc.StartMode
+        Get-State|ConvertTo-Json -Depth 4 -Compress
+    }
+    'Accept'{
+        if(-not $RemoteAcceptanceConfirmed){throw 'REMOTE_ACCEPTANCE_REQUIRED'}
+        $receipt=Assert-RemoteEvidence
+        $task=Get-ScheduledTask -TaskName $name
+        $svc=Assert-Installed
+        if($svc.StartMode -notin @('Manual','Auto')){throw 'SCM_STARTUP_UNEXPECTED'}
+        $wasEnabled=[bool]$task.Triggers[0].Enabled
+        $oldMode=$svc.StartMode
         try{
-            if(-not $task){Register-ScheduledTask -TaskName $name -InputObject (New-Definition)|Out-Null;$created=$true}
-            Assert-Task (Get-ScheduledTask -TaskName $name)
+            if(-not $wasEnabled){
+                $t=New-ScheduledTaskTrigger -AtLogOn -User $user.Name
+                $t.Enabled=$true
+                Set-ScheduledTask -TaskName $name -Trigger $t|Out-Null
+            }
+            $registered=Get-ScheduledTask -TaskName $name
+            Assert-Task $registered
+            if(-not $registered.Triggers[0].Enabled){throw 'LOGON_READBACK_FAILED'}
             Set-Service -Name $svcName -StartupType Automatic
             if((Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'").StartMode -ne 'Auto'){throw 'SCM_STARTUP_READBACK_FAILED'}
+            $after=Assert-RemoteEvidence
+            if($after.pid -ne $receipt.pid -or $after.generation -ne $receipt.generation){throw 'TRIAL_CHANGED_DURING_ACCEPTANCE'}
         }catch{
-            if($created){Unregister-ScheduledTask -TaskName $name -Confirm:$false}
+            if(-not $wasEnabled){
+                $t=New-ScheduledTaskTrigger -AtLogOn -User $user.Name
+                $t.Enabled=$false
+                Set-ScheduledTask -TaskName $name -Trigger $t|Out-Null
+            }
             if($oldMode -eq 'Manual'){Set-Service -Name $svcName -StartupType Manual}
-            elseif($oldMode -eq 'Disabled'){Set-Service -Name $svcName -StartupType Disabled}
-            elseif($oldMode -eq 'Auto'){Set-Service -Name $svcName -StartupType Automatic}
             throw
+        }
+        [pscustomobject]@{status='AUTOSTART_ACCEPTED';pid=$receipt.pid;generation=$receipt.generation;accepted_responses=$receipt.accepted_responses}|ConvertTo-Json -Compress
+    }
+    'RemoveTrial'{
+        $task=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        if($task){
+            Assert-Task $task
+            if($task.Triggers[0].Enabled -or $task.State.ToString() -eq 'Running'){throw 'TRIAL_NOT_QUIESCENT'}
+            Unregister-ScheduledTask -TaskName $name -Confirm:$false
         }
         Get-State|ConvertTo-Json -Depth 4 -Compress
     }
