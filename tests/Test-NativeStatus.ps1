@@ -199,6 +199,36 @@ try{
     $bad=Job $b 46 @{action='submit';operation_key='r4-invalid';command='Write-Output 1';steps=$steps}
     Assert ($bad.status -eq 'INVALID_ARGUMENT') 'r4.mixed_payload_rejected'
     Write-Host 'R4_CHECKPOINT_PLAN=PASS (explicit resume after SCM restart; OS reboot proof pending)'
+
+    # External reboot boundary: no physical reboot in CI. A real SCM restart
+    # must not release it; completed effects and outputs remain durable.
+    $bootMarker=Join-Path $data 'boot-marker.txt'
+    $bootPath=$bootMarker.Replace("'","''")
+    $bootSteps=@(
+        @{command="[IO.File]::AppendAllText('$bootPath','A'); Write-Output 'boot-step-A'";timeout_seconds=10;reboot_after=$true},
+        @{command="if([IO.File]::ReadAllText('$bootPath') -cne 'A'){throw 'POSTCONDITION_FAILED'}; Write-Output 'verified'";timeout_seconds=10;verify_after_reboot=$true},
+        @{command="[IO.File]::AppendAllText('$bootPath','B'); Write-Output 'boot-step-B'";timeout_seconds=10}
+    )
+    $missingCheck=@(@{command='Write-Output 1';reboot_after=$true},@{command='Write-Output 2'})
+    $invalidBoot=Job $b 81 @{action='submit';operation_key='r4-boot-invalid';steps=$missingCheck}
+    Assert ($invalidBoot.status -eq 'INVALID_ARGUMENT') 'r4.reboot_requires_declared_postcondition'
+    $boot=Job $b 82 @{action='submit';operation_key='r4-boot-boundary';steps=$bootSteps}
+    Assert ($boot.status -eq 'OK') 'r4.reboot_plan_admitted'
+    $waiting=Wait-JobState $b $boot.job.job_id 'WAITING_FOR_REBOOT'
+    Assert ($waiting.completed_steps -eq 1 -and $waiting.execution.stdout.Trim() -ceq 'boot-step-A' -and [IO.File]::ReadAllText($bootMarker) -ceq 'A') 'r4.reboot_checkpoint_committed'
+    $deny=Job $c 83 @{action='resume';job_id=$boot.job.job_id;expected_completed_steps=1}
+    Assert ($deny.status -eq 'NOT_RESUMABLE') 'r4.manual_resume_cannot_bypass_reboot'
+    Stop-Service $name
+    Start-Service $name
+    $null=Wait-Status $b 'OK'
+    $waiting=Wait-JobState $c $boot.job.job_id 'WAITING_FOR_REBOOT'
+    Assert ($waiting.completed_steps -eq 1 -and $waiting.reboot_evidence -eq 'SAME_BOOT' -and [IO.File]::ReadAllText($bootMarker) -ceq 'A') 'r4.scm_restart_does_not_release_reboot'
+    $same=Job $b 84 @{action='submit';operation_key='r4-boot-boundary';steps=$bootSteps}
+    Assert ($same.job.job_id -eq $boot.job.job_id -and $same.job.state -eq 'WAITING_FOR_REBOOT') 'r4.reboot_checkpoint_idempotent'
+    $cancelBoot=Job $c 85 @{action='cancel';job_id=$boot.job.job_id}
+    Assert ($cancelBoot.status -eq 'OK' -and $cancelBoot.job.state -eq 'CANCELLED' -and [IO.File]::ReadAllText($bootMarker) -ceq 'A') 'r4.cancel_waiting_reboot'
+    Write-Host 'R4_DURABLE_REBOOT_BOUNDARY=PASS (same kernel session; positive actual reboot still NOT_TESTED)'
+
     Send $b 70 'tools/call' @{name='powershell_screenshot';arguments=@{width=1};_meta=$meta}
     # This is a tool-level error, not a JSON-RPC failure.
     $line=$b.StandardOutput.ReadLineAsync().WaitAsync([TimeSpan]::FromSeconds(10)).GetAwaiter().GetResult()

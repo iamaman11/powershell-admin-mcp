@@ -48,7 +48,7 @@ public sealed class AdminTools
     }
 
     [McpServerTool(Name="powershell_job",UseStructuredContent=true),
-        Description("Durably submit one script OR 1-8 sequential steps (each command, timeout_seconds, pause_after). Inspect status, list recent jobs, read a step's bounded logs, cancel, or resume a paused checkpoint with expected_completed_steps. Submit requires stable operation_key; retry only same key and payload. Resume never replays an interrupted step. A manual pause does not verify an OS reboot.")]
+        Description("Durably submit one script OR 1-8 sequential steps (each command, timeout_seconds, pause_after, reboot_after, verify_after_reboot). A reboot_after step must finish successfully before an external restart; the next step must explicitly declare verify_after_reboot and fail if the postcondition is absent. A verified new full boot releases only the next step; the tool never restarts Windows itself. Inspect status, list recent jobs, read a step's bounded logs, cancel, or resume a paused checkpoint with expected_completed_steps. Submit requires stable operation_key; retry only same key and payload. Resume never replays an interrupted step. A manual pause does not verify an OS reboot.")]
     public static async Task<JobReply> Job(JobAction action,string? operation_key=null,string? job_id=null,
         string? command=null,int timeout_seconds=30,string? working_directory=null,JobStep[]? steps=null,
         int? step_index=null,int? expected_completed_steps=null,CancellationToken cancellationToken=default)

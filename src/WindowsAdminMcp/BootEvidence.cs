@@ -8,7 +8,7 @@ using System.Xml.Linq;
 // service start time, or a reboot request. Missing/cleared/rolled-over evidence
 // must never authorize execution. Physical reboot validation is still required.
 [JsonConverter(typeof(JsonStringEnumConverter<BootEvidenceCode>))]
-internal enum BootEvidenceCode { FULL_BOOT_OBSERVED, EVIDENCE_UNAVAILABLE, AMBIGUOUS, SAME_BOOT, NEW_FULL_BOOT_OBSERVED }
+public enum BootEvidenceCode { FULL_BOOT_OBSERVED, EVIDENCE_UNAVAILABLE, AMBIGUOUS, SAME_BOOT, NEW_FULL_BOOT_OBSERVED }
 internal sealed record BootStamp(
     [property:JsonPropertyName("start_record_id")] long StartRecordId,
     [property:JsonPropertyName("start_utc")] DateTimeOffset StartUtc,

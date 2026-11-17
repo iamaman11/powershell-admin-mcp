@@ -3,12 +3,14 @@ using System.Text.Json.Serialization;
 [JsonConverter(typeof(JsonStringEnumConverter<JobAction>))]
 public enum JobAction { submit, status, list, logs, cancel, resume }
 [JsonConverter(typeof(JsonStringEnumConverter<JobState>))]
-public enum JobState { QUEUED, RUNNING, CANCEL_REQUESTED, WAITING_FOR_RESUME, COMPLETED, FAILED, CANCELLED, NEEDS_RECONCILIATION }
+public enum JobState { QUEUED, RUNNING, CANCEL_REQUESTED, WAITING_FOR_RESUME, WAITING_FOR_REBOOT, COMPLETED, FAILED, CANCELLED, NEEDS_RECONCILIATION }
 
 public sealed record JobStep(
     [property:JsonPropertyName("command")] string Command,
     [property:JsonPropertyName("timeout_seconds")] int TimeoutSeconds=30,
-    [property:JsonPropertyName("pause_after")] bool PauseAfter=false);
+    [property:JsonPropertyName("pause_after")] bool PauseAfter=false,
+    [property:JsonPropertyName("reboot_after"), JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingDefault)] bool RebootAfter=false,
+    [property:JsonPropertyName("verify_after_reboot"), JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingDefault)] bool VerifyAfterReboot=false);
 
 public sealed record JobInfo(
     [property:JsonPropertyName("job_id")] string JobId,
@@ -20,7 +22,8 @@ public sealed record JobInfo(
     [property:JsonPropertyName("execution")] ExecutionResult? Execution = null,
     [property:JsonPropertyName("completed_steps")] int CompletedSteps = 0,
     [property:JsonPropertyName("total_steps")] int TotalSteps = 1,
-    [property:JsonPropertyName("result_step")] int? ResultStep = null);
+    [property:JsonPropertyName("result_step")] int? ResultStep = null,
+    [property:JsonPropertyName("reboot_evidence")] BootEvidenceCode? RebootEvidence = null);
 
 public sealed record JobReply(
     [property:JsonPropertyName("status")] StatusCode Status,
