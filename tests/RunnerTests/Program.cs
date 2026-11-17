@@ -198,6 +198,11 @@ try
         var counts=store.Summary();
         Check(counts.SchemaVersion==3 && counts.Total==1 && counts.Completed==1,"r4.migration_store_counts");
     }
+    Check(StoreSchema.ObserveFile(database) is {Status:StoreSchemaCode.OBSERVED,Version:3},"r6.offline_store_schema_v3");
+    Check(StoreSchema.ObserveFile(Path.Combine(migrationRoot,"missing.db")).Status==StoreSchemaCode.ABSENT,"r6.offline_store_absent");
+    var orphan=Path.Combine(migrationRoot,"orphan.db");
+    File.WriteAllText(orphan+"-wal","fixture");
+    Check(StoreSchema.ObserveFile(orphan).Status==StoreSchemaCode.READBACK_FAILED,"r6.offline_store_orphan_wal_rejected");
     var backups=Directory.GetFiles(migrationRoot,"jobs.db.schema2-*.backup");
     Check(backups.Length==1,"r4.v2_backup_retained");
     using(var db=new Microsoft.Data.Sqlite.SqliteConnection("Data Source="+backups[0]+";Mode=ReadOnly;Pooling=False"))

@@ -31,7 +31,7 @@ try{
         $relative=[IO.Path]::GetRelativePath($stage,$file.FullName).Replace('\','/')
         $files[$relative]=(Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
     }
-    $metadata=[ordered]@{schema=1;commit=$Commit;vendor_version='0.0.21';files=$files}
+    $metadata=[ordered]@{schema=1;commit=$Commit;vendor_version='0.0.21';store_schema=3;files=$files}
     [IO.File]::WriteAllText((Join-Path $stage 'manifest.json'),($metadata|ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
     [IO.Compression.ZipFile]::CreateFromDirectory($stage,$Output,[IO.Compression.CompressionLevel]::Optimal,$false)
     [pscustomobject]@{package=$Output;sha256=(Get-FileHash -LiteralPath $Output).Hash;files=$files.Count;commit=$Commit}|ConvertTo-Json -Compress

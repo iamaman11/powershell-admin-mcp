@@ -9,15 +9,30 @@ internal static class ServiceIdentity
 
     internal static uint RunningProcessId()
     {
+        var status=ReadStatus();
+        if(status is not {} s || s.CurrentState!=4 || s.ProcessId==0)throw new Win32Exception(1062);
+        return s.ProcessId;
+    }
+    internal static void RequireStoppedOrAbsent()
+    {
+        var status=ReadStatus();
+        if(status is {} s && (s.CurrentState!=1 || s.ProcessId!=0))
+            throw new InvalidOperationException("Offline maintenance requires stopped SCM service.");
+    }
+    private static ServiceStatus? ReadStatus()
+    {
         using var manager = OpenSCManagerW(null, null, 1);
         if (manager.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
         using var service = OpenServiceW(manager, Name, 4);
-        if (service.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (service.IsInvalid)
+        {
+            int error=Marshal.GetLastWin32Error();
+            if(error==1060)return null;
+            throw new Win32Exception(error);
+        }
         if (!QueryServiceStatusEx(service, 0, out var status, (uint)Marshal.SizeOf<ServiceStatus>(), out _))
             throw new Win32Exception(Marshal.GetLastWin32Error());
-        if (status.CurrentState != 4 || status.ProcessId == 0)
-            throw new Win32Exception(1062);
-        return status.ProcessId;
+        return status;
     }
 
     [StructLayout(LayoutKind.Sequential)]

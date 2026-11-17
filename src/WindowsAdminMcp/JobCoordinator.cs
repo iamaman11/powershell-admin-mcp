@@ -141,7 +141,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
             using var row=cmd.ExecuteReader();
             if(!row.Read())throw new InvalidOperationException("Store count unavailable.");
             return new(row.GetInt64(0),row.GetInt64(1),row.GetInt64(2),row.GetInt64(3),row.GetInt64(4),
-                row.GetInt64(5),row.GetInt64(6),row.GetInt64(7),row.GetInt64(8),row.GetInt64(9),3,16,10000);
+                row.GetInt64(5),row.GetInt64(6),row.GetInt64(7),row.GetInt64(8),row.GetInt64(9),StoreSchema.Current,16,10000);
         }
     }
 

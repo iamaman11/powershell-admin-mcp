@@ -45,6 +45,7 @@ function Read-Manifest($dir){
     Assert-Protected $p
     $m=Get-Content -LiteralPath $p -Raw|ConvertFrom-Json -AsHashtable
     if($m.schema -ne 1 -or $m.vendor_version -ne '0.0.21' -or $m.commit -cnotmatch '^[a-f0-9]{40}$' -or $m.files -isnot [Collections.IDictionary]){throw 'MANIFEST_INVALID'}
+    if($m.Contains('store_schema') -and $m.store_schema -notin @(2,3)){throw 'MANIFEST_STORE_SCHEMA_INVALID'}
     if($m.files.Count -lt 3 -or $m.files.Count -gt 2000){throw 'MANIFEST_SIZE_INVALID'}
     $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach($name in $m.files.Keys){
@@ -87,6 +88,28 @@ function Assert-Quiescent {
 
 
     return $service
+}
+function Assert-StoreCompatible($reader,$target){
+    # The fixed offline reader belongs to an already verified package. Never
+    # restore an old database or use a file header while a WAL may be present.
+    $si=[Diagnostics.ProcessStartInfo]::new($reader)
+    $si.UseShellExecute=$false;$si.CreateNoWindow=$true
+    $si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
+    $si.ArgumentList.Add('maintenance');$si.ArgumentList.Add('store-schema')
+    $null=$si.Environment.Remove('CONTROL_PLANE_API_KEY')
+    $null=$si.Environment.Remove('OPENAI_API_KEY')
+    $p=[Diagnostics.Process]::Start($si)
+    try{
+        $out=$p.StandardOutput.ReadToEndAsync();$err=$p.StandardError.ReadToEndAsync()
+        if(-not $p.WaitForExit(10000)){throw 'STORE_SCHEMA_READBACK_TIMEOUT'}
+        if($p.ExitCode -ne 0){throw 'STORE_SCHEMA_READBACK_FAILED'}
+        $receipt=$out.GetAwaiter().GetResult()|ConvertFrom-Json -AsHashtable
+        if($receipt.status -eq 'ABSENT'){return}
+        if($receipt.status -ne 'OBSERVED' -or $receipt.version -isnot [long] -and $receipt.version -isnot [int]){throw 'STORE_SCHEMA_READBACK_FAILED'}
+        if($null -eq $target){throw 'ROLLBACK_TARGET_SCHEMA_UNPROVEN'}
+        if($target -lt $receipt.version){throw 'STORE_SCHEMA_DOWNGRADE_FORBIDDEN'}
+        if($receipt.version -lt 2){throw 'STORE_SCHEMA_UNSUPPORTED'}
+    }finally{if(-not $p.HasExited){$p.Kill($true);$p.WaitForExit()};$p.Dispose()}
 }
 function Enter-Maintenance {
     $path=Join-Path $root '.install.lock'
@@ -153,6 +176,20 @@ if($Action -eq 'Rollback'){
             $existing=Join-Path $root $name
             if(Test-Path -LiteralPath $existing){Assert-Protected $existing}
         }
+        # No DB at all is the only case where legacy/absent previous manifests
+        # can be restored without a compatibility decision.
+        $dbRoot=Join-Path $env:ProgramData 'WindowsAdminMCP.Data'
+        if(Test-Path -LiteralPath $dbRoot){
+            Assert-Protected $dbRoot
+            $current=Read-Manifest $root
+            if(-not $current.Contains('store_schema') -or $current.store_schema -ne 3){throw 'ROLLBACK_READER_UNPROVEN'}
+            $targetSchema=$null
+            if(Test-Path -LiteralPath (Join-Path $backup 'manifest.json')){
+                $old=Read-Manifest $backup
+                $targetSchema=if($old.Contains('store_schema')){[int]$old.store_schema}else{2}
+            }
+            Assert-StoreCompatible $exe $targetSchema
+        }
         Restore-NativeFileSwap -Root $root -BeforeRestore {param($j) Restore-ServiceRegistration $j}
         [pscustomobject]@{status='ROLLED_BACK_OFFLINE';autostart=$false;remote_accepted=$false}|ConvertTo-Json -Compress
     }finally{$lock.Dispose()}
@@ -216,6 +253,8 @@ try{
         }
     }
     if(Test-Path -LiteralPath (Join-Path $root '.rollback')){throw 'UNACCEPTED_PREVIOUS_INSTALLATION'}
+    if(-not $m.Contains('store_schema') -or $m.store_schema -ne 3){throw 'PACKAGE_STORE_SCHEMA_REQUIRED'}
+    Assert-StoreCompatible (Join-Path $incoming 'native\WindowsAdminMCP.exe') ([int]$m.store_schema)
     $swapAttempted=$true
     Invoke-NativeFileSwap -Root $root -Incoming $incoming -ServiceExisted ([bool]$service) -BeforeRestore {param($j) Restore-ServiceRegistration $j} -Validate {
         $null=Read-Manifest $root

@@ -101,6 +101,9 @@ try{
     $unexpected=Join-Path $root 'native\unexpected-fixture.txt'
     try{
         [IO.File]::WriteAllText($unexpected,'fixture')
+        $acl=Get-Acl -LiteralPath $unexpected
+        $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+        Set-Acl -LiteralPath $unexpected -AclObject $acl
         $doctor=Read-Doctor
         Check ($doctor.package.status -eq 'FILE_SET_MISMATCH' -and $null -eq $doctor.startup) 'r6.doctor_unexpected_file_blocks_script'
     }finally{Remove-Item -LiteralPath $unexpected -Force}

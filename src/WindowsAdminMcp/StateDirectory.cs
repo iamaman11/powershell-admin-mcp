@@ -3,7 +3,7 @@ using System.Security.Principal;
 
 internal static class StateDirectory
 {
-    internal static string DatabasePath()
+    internal static string DatabasePath(bool create=true)
     {
         var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WindowsAdminMCP.Data");
         var directory = new DirectoryInfo(path);
@@ -15,7 +15,11 @@ internal static class StateDirectory
         foreach (var sid in new[] { system, admins })
             acl.AddAccessRule(new FileSystemAccessRule(sid, FileSystemRights.FullControl,
                 InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
-        if (!directory.Exists) directory.Create(acl);
+        if (!directory.Exists)
+        {
+            if (!create) return Path.Combine(path,"jobs.db");
+            directory.Create(acl);
+        }
         directory.Refresh();
         if ((directory.Attributes & FileAttributes.ReparsePoint) != 0)
             throw new UnauthorizedAccessException("State directory is a reparse point.");
