@@ -1,9 +1,9 @@
 # Native offline install. No credential access, network calls, live shutdown,
 # TUN changes, or logon task activation. Existing active installs fail closed.
 [CmdletBinding()]
-param([ValidateSet('Verify','Install')][string]$Action='Verify',
-      [Parameter(Mandatory)][string]$PackagePath,
-      [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedSha256)
+param([ValidateSet('Verify','Install','Rollback')][string]$Action='Verify',
+      [string]$PackagePath,
+      [ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedSha256)
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'NativeFileSwap.ps1')
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
@@ -63,11 +63,69 @@ function Read-Manifest($dir){
     }
     return $m
 }
+$exe=Join-Path $root 'native\WindowsAdminMCP.exe'
+$binding='"'+$exe+'" service'
+function Assert-Quiescent {
+    # Do not ever stop an active connection or replace a running service here.
+    if(@(Get-Process -Name 'tunnel-client-runtime' -ErrorAction SilentlyContinue).Count){throw 'ACTIVE_TUNNEL_MAINTENANCE_REQUIRED'}
+    if(Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel' -ErrorAction SilentlyContinue){throw 'AUTOSTART_MAINTENANCE_REQUIRED'}
+    if(@(Get-ScheduledTask|Where-Object {$_.TaskName -like 'WindowsAdminMCP-R6-*' -and $_.State.ToString() -eq 'Running'}).Count){throw 'ACTIVE_TRIAL_TASK'}
+    $service=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
+    $exe=Join-Path $root 'native\WindowsAdminMCP.exe'
+    $binding='"'+$exe+'" service'
+    if($service -and ($service.State -ne 'Stopped' -or $service.PathName -ine $binding -or $service.StartName -ne 'LocalSystem')){throw 'SCM_MAINTENANCE_REQUIRED'}
+    if(-not(Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'))){throw 'MACHINE_POWERSHELL_REQUIRED'}
+
+
+    return $service
+}
+function Enter-Maintenance {
+    $path=Join-Path $root '.install.lock'
+    # The root is protected; never follow a preexisting reparse point.
+    if(Test-Path -LiteralPath $path){
+        $item=Get-Item -LiteralPath $path -Force
+        if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'LOCK_REPARSE_POINT'}
+    }
+    # The protected parent prevents unprivileged creation or replacement.
+    return [IO.File]::Open($path,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+}
+function Restore-ServiceRegistration($journal){
+    $actual=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
+    if($journal.service_existed){
+        if(-not $actual){throw 'ORIGINAL_SERVICE_MISSING'}
+    }elseif($actual){
+        if($actual.PathName -ine $binding -or $actual.StartName -ne 'LocalSystem' -or $actual.State -ne 'Stopped' -or $actual.StartMode -ne 'Manual'){throw 'SCM_ROLLBACK_IDENTITY_MISMATCH'}
+        & sc.exe delete WindowsAdminMCP|Out-Null
+        if($LASTEXITCODE -ne 0){throw 'SCM_ROLLBACK_FAILED'}
+    }
+}
+if($Action -eq 'Rollback'){
+    $null=Assert-Quiescent
+    Assert-Protected $root
+    $lock=Enter-Maintenance
+    try{
+        $null=Assert-Quiescent
+        $backup=Join-Path $root '.rollback'
+        Assert-Protected $backup
+        Assert-NativeSwapTree $backup
+        foreach($item in Get-ChildItem -LiteralPath $backup -Recurse -Force){Assert-Protected $item.FullName}
+        foreach($name in @('native','client','manifest.json')){
+            $existing=Join-Path $root $name
+            if(Test-Path -LiteralPath $existing){Assert-Protected $existing}
+        }
+        Restore-NativeFileSwap -Root $root -BeforeRestore {param($j) Restore-ServiceRegistration $j}
+        [pscustomobject]@{status='ROLLED_BACK_OFFLINE';autostart=$false;remote_accepted=$false}|ConvertTo-Json -Compress
+    }finally{$lock.Dispose()}
+    return
+}
+if(-not $PackagePath -or -not $ExpectedSha256){throw 'PACKAGE_AND_DIGEST_REQUIRED'}
+
 # Keep the archive open without write sharing from hashing to extraction.
 $archivePath=(Resolve-Path -LiteralPath $PackagePath).Path
 $stream=[IO.File]::Open($archivePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
 $incoming=$null
 $swapAttempted=$false
+$lock=$null
 try{
     if([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stream)) -ne $ExpectedSha256){throw 'PACKAGE_SHA256_MISMATCH'}
     $stream.Position=0
@@ -101,16 +159,10 @@ try{
         [pscustomobject]@{status='VERIFIED';commit=$m.commit;files=$m.files.Count;installed=$false}|ConvertTo-Json -Compress
         return
     }
-    # Do not ever stop an active connection or replace a running service here.
-    if(@(Get-Process -Name 'tunnel-client-runtime' -ErrorAction SilentlyContinue).Count){throw 'ACTIVE_TUNNEL_MAINTENANCE_REQUIRED'}
-    if(Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel' -ErrorAction SilentlyContinue){throw 'AUTOSTART_MAINTENANCE_REQUIRED'}
-    if(@(Get-ScheduledTask|Where-Object {$_.TaskName -like 'WindowsAdminMCP-R6-*' -and $_.State.ToString() -eq 'Running'}).Count){throw 'ACTIVE_TRIAL_TASK'}
-    $service=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
-    $exe=Join-Path $root 'native\WindowsAdminMCP.exe'
-    $binding='"'+$exe+'" service'
-    if($service -and ($service.State -ne 'Stopped' -or $service.PathName -ine $binding -or $service.StartName -ne 'LocalSystem')){throw 'SCM_MAINTENANCE_REQUIRED'}
-    if(-not(Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'))){throw 'MACHINE_POWERSHELL_REQUIRED'}
+    $service=Assert-Quiescent
     if(-not(Test-Path -LiteralPath $root)){New-Protected $root}else{Assert-Protected $root}
+    $lock=Enter-Maintenance
+    $service=Assert-Quiescent
     foreach($name in @('native','client','manifest.json')){
         $p=Join-Path $root $name
         if(Test-Path -LiteralPath $p){Assert-Protected $p}
@@ -124,24 +176,18 @@ try{
         }
     }
     if(Test-Path -LiteralPath (Join-Path $root '.rollback')){throw 'UNACCEPTED_PREVIOUS_INSTALLATION'}
-    $script:createdService=$false
     $swapAttempted=$true
-    Invoke-NativeFileSwap -Root $root -Incoming $incoming -Validate {
+    Invoke-NativeFileSwap -Root $root -Incoming $incoming -ServiceExisted ([bool]$service) -BeforeRestore {param($j) Restore-ServiceRegistration $j} -Validate {
         $null=Read-Manifest $root
         if(-not $service){
-            try{
-                New-Service -Name WindowsAdminMCP -BinaryPathName $binding -StartupType Manual|Out-Null
-                $script:createdService=$true
-                $actual=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
-                if($actual.PathName -ine $binding -or $actual.StartName -ne 'LocalSystem' -or $actual.StartMode -ne 'Manual'){throw 'SCM_READBACK_FAILED'}
-            }catch{
-                if($script:createdService){& sc.exe delete WindowsAdminMCP|Out-Null;if($LASTEXITCODE -ne 0){throw 'SCM_ROLLBACK_FAILED'}}
-                throw
-            }
+            New-Service -Name WindowsAdminMCP -BinaryPathName $binding -StartupType Manual|Out-Null
+            $actual=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
+            if($actual.PathName -ine $binding -or $actual.StartName -ne 'LocalSystem' -or $actual.StartMode -ne 'Manual'){throw 'SCM_READBACK_FAILED'}
         }
     }
     [pscustomobject]@{status='INSTALLED_OFFLINE';commit=$m.commit;rollback_retained=$true;autostart=$false;remote_accepted=$false}|ConvertTo-Json -Compress
 }finally{
+    if($lock){$lock.Dispose()}
     $stream.Dispose()
     # If rollback itself failed, keep the incoming files for offline recovery.
     if($incoming -and (Test-Path -LiteralPath $incoming) -and (-not $swapAttempted -or -not(Test-Path -LiteralPath (Join-Path $root '.rollback')))){

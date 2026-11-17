@@ -24,7 +24,39 @@ try{
     [IO.File]::WriteAllText((Join-Path $old 'sentinel.txt'),'keep')
     $rolled=$false
     try{Invoke-NativeFileSwap -Root $old -Incoming $new -Validate {throw 'FIXTURE_VALIDATION_FAILED'}}catch{if($_.Exception.Message -eq 'FIXTURE_VALIDATION_FAILED'){$rolled=$true}else{throw}}
-    Check ($rolled -and (Test-Path (Join-Path $old 'client\old.txt')) -and -not(Test-Path (Join-Path $old 'client\new.txt')) -and (Test-Path (Join-Path $new 'client\new.txt')) -and -not(Test-Path (Join-Path $old '.rollback')) -and (Get-Content (Join-Path $old 'sentinel.txt') -Raw) -eq 'keep') 'r6.actual_file_swap_rollback'
+    Check ($rolled -and (Test-Path (Join-Path $old 'client\old.txt')) -and -not(Test-Path (Join-Path $old 'client\new.txt')) -and -not(Test-Path (Join-Path $old '.rollback')) -and (Get-Content (Join-Path $old 'sentinel.txt') -Raw) -eq 'keep') 'r6.actual_file_swap_rollback'
+
+    # Genuine process exit after directory swaps: kill a separate PowerShell
+    # in the validation callback before any exception rollback can execute.
+    foreach($name in @('native','client')){[void][IO.Directory]::CreateDirectory((Join-Path $new $name))}
+    [IO.File]::WriteAllText((Join-Path $new 'manifest.json'),'replacement')
+    [IO.File]::WriteAllText((Join-Path $new 'client\new.txt'),'next')
+    $marker=Join-Path $fixture 'entered'
+    $childScript=Join-Path $fixture 'interrupted.ps1'
+    $source=@'
+param($Helper,$Root,$Incoming,$Marker)
+$ErrorActionPreference='Stop'
+. $Helper
+Invoke-NativeFileSwap -Root $Root -Incoming $Incoming -ServiceExisted $true -Validate {
+    [IO.File]::WriteAllText($Marker,'entered')
+    Start-Sleep -Seconds 120
+}
+'@
+    [IO.File]::WriteAllText($childScript,$source)
+    $si=[Diagnostics.ProcessStartInfo]::new((Join-Path $PSHOME 'pwsh.exe'))
+    $si.UseShellExecute=$false
+    foreach($arg in @('-NoProfile','-NonInteractive','-File',$childScript,(Join-Path $PSScriptRoot '../installer/NativeFileSwap.ps1'),$old,$new,$marker)){$si.ArgumentList.Add($arg)}
+    $p=[Diagnostics.Process]::Start($si)
+    try{
+        $clock=[Diagnostics.Stopwatch]::StartNew()
+        while(-not(Test-Path -LiteralPath $marker) -and -not $p.HasExited -and $clock.Elapsed.TotalSeconds -lt 10){Start-Sleep -Milliseconds 50}
+        Check (Test-Path -LiteralPath $marker) 'r6.interruption_after_swap_reached'
+        $p.Kill();if(-not $p.WaitForExit(5000)){throw 'CHILD_NOT_TERMINATED'}
+        $j=Get-NativeSwapJournal $old
+        Check ($j.service_existed -and $j.original.Count -eq 3) 'r6.interrupted_journal_persists'
+        Restore-NativeFileSwap -Root $old
+        Check ((Test-Path (Join-Path $old 'client\old.txt')) -and -not(Test-Path (Join-Path $old 'client\new.txt')) -and -not(Test-Path (Join-Path $old '.rollback'))) 'r6.recover_after_process_kill'
+    }finally{if(-not $p.HasExited){$p.Kill();$p.WaitForExit()};$p.Dispose()}
 }finally{Remove-Item -LiteralPath $fixture -Recurse -Force}
 try{
     $result=& $installer -Action Install -PackagePath $Package -ExpectedSha256 $Sha256|ConvertFrom-Json
@@ -38,6 +70,8 @@ try{
     $null=& $installer -PackagePath $Package -ExpectedSha256 $Sha256
     $after=@(Get-ChildItem -LiteralPath $env:ProgramFiles -Directory -Filter 'WindowsAdminMCP.incoming-*').Count
     Check ($before -eq $after) 'r6.verify_cleans_temporary_tree'
+    $rollback=& $installer -Action Rollback|ConvertFrom-Json
+    Check ($rollback.status -eq 'ROLLED_BACK_OFFLINE' -and -not(Test-Path (Join-Path $root 'native')) -and -not(Test-Path (Join-Path $root 'client')) -and -not(Test-Path (Join-Path $root '.rollback'))) 'r6.explicit_clean_install_rollback'
 }finally{
     if(Get-Service WindowsAdminMCP -ErrorAction SilentlyContinue){& sc.exe delete WindowsAdminMCP|Out-Host}
     if(Test-Path -LiteralPath $root){Remove-Item -LiteralPath $root -Recurse -Force}
