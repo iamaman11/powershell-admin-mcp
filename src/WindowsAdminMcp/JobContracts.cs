@@ -33,4 +33,7 @@ public sealed record JobReply(
     [property:JsonPropertyName("operation_key")] string? OperationKey = null,
     [property:JsonPropertyName("native_error")] int? NativeError = null);
 
-internal sealed record AdminResponse(StatusCode Code, string Correlation, AdminStatus? Info = null, JobReply? Job = null);
+internal sealed record StoreSummary(long Total,long Queued,long Running,long CancelRequested,long WaitingForResume,
+    long WaitingForReboot,long NeedsReconciliation,long Completed,long Failed,long Cancelled,int SchemaVersion,int ActiveLimit,int TotalLimit);
+internal sealed record AdminResponse(StatusCode Code, string Correlation, AdminStatus? Info = null, JobReply? Job = null,
+    [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] StoreSummary? Store = null);

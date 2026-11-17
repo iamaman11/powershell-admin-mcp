@@ -136,3 +136,80 @@ if(actualBoot.Status==BootEvidenceCode.FULL_BOOT_OBSERVED && actualBoot.Stamp is
 }
 else Console.WriteLine($"NOT_TESTED r4.boot_native_event_readback status={actualBoot.Status}");
 Console.WriteLine("R4_BOOT_EVIDENCE_PROBE_COMPLETE (no actual OS reboot; not wired to job transitions)");
+
+// Exact v2 schema from merged main, actual SQLite + real DPAPI ciphertext.
+// No service or production directory is used.
+string migrationRoot=Path.Combine(Path.GetTempPath(),"WindowsAdminMCP-migration-"+Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(migrationRoot);
+try
+{
+    string database=Path.Combine(migrationRoot,"jobs.db");
+    string id=Guid.NewGuid().ToString("N"), key="v2-completed-fixture";
+    string command="Write-Output 'v2 preserved'", cwd=Environment.SystemDirectory;
+    string Hash(string text)=>Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
+    // Same anonymous object/property order and defaults as schema v2.
+    string payload=Hash(System.Text.Json.JsonSerializer.Serialize(new {steps=new[] {new {command,timeout_seconds=30,pause_after=false}},cwd}));
+    using(var db=new Microsoft.Data.Sqlite.SqliteConnection("Data Source="+database+";Pooling=False"))
+    {
+        db.Open();
+        using var create=db.CreateCommand();
+        create.CommandText="""
+                CREATE TABLE IF NOT EXISTS jobs(
+                  seq INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL UNIQUE, op_key TEXT NOT NULL UNIQUE,
+                  payload_hash TEXT NOT NULL, command_hash TEXT NOT NULL, cwd BLOB NOT NULL,
+                  state TEXT NOT NULL CHECK(state IN ('QUEUED','RUNNING','CANCEL_REQUESTED','WAITING_FOR_RESUME','COMPLETED','FAILED','CANCELLED','NEEDS_RECONCILIATION')),
+                  created_utc TEXT NOT NULL, updated_utc TEXT NOT NULL,
+                  completed_steps INTEGER NOT NULL DEFAULT 0, step_count INTEGER NOT NULL CHECK(step_count BETWEEN 1 AND 8),
+                  CHECK(completed_steps BETWEEN 0 AND step_count));
+                CREATE TABLE IF NOT EXISTS job_steps(
+                  job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+                  step_index INTEGER NOT NULL CHECK(step_index BETWEEN 1 AND 8),
+                  command BLOB, timeout_seconds INTEGER NOT NULL CHECK(timeout_seconds BETWEEN 1 AND 3600),
+                  pause_after INTEGER NOT NULL CHECK(pause_after IN (0,1)), result BLOB,
+                  PRIMARY KEY(job_id,step_index));
+                PRAGMA user_version=2;
+                """;
+        create.ExecuteNonQuery();
+        using var row=db.CreateCommand();
+        row.CommandText="""
+            INSERT INTO jobs(job_id,op_key,payload_hash,command_hash,cwd,state,created_utc,updated_utc,completed_steps,step_count)
+            VALUES($id,$key,$payload,$hash,$cwd,'COMPLETED',$now,$now,1,1);
+            INSERT INTO job_steps(job_id,step_index,command,timeout_seconds,pause_after,result)
+            VALUES($id,1,NULL,30,0,$result);
+            """;
+        row.Parameters.AddWithValue("$id",id);
+        row.Parameters.AddWithValue("$key",key);
+        row.Parameters.AddWithValue("$payload",payload);
+        row.Parameters.AddWithValue("$hash",Hash(command));
+        row.Parameters.AddWithValue("$cwd",JobDataProtection.Protect(cwd,id,"cwd"));
+        row.Parameters.AddWithValue("$now",DateTimeOffset.UtcNow.ToString("O"));
+        row.Parameters.AddWithValue("$result",JobDataProtection.Protect(System.Text.Json.JsonSerializer.Serialize(
+            new ExecutionResult(ExecutionState.COMPLETED,Hash(command),12,0,"v2 preserved"),PipeWire.Json),id,"step/1/result"));
+        row.ExecuteNonQuery();
+    }
+    using(var store=new JobCoordinator(Microsoft.Extensions.Logging.Abstractions.NullLogger<JobCoordinator>.Instance))
+    {
+        store.Initialize(database);
+        var saved=store.Dispatch(new(AdminOperation.Job,JobAction.logs,JobId:id),"migration");
+        Check(saved.Status==StatusCode.OK && saved.Job?.State==JobState.COMPLETED &&
+            saved.Job.Execution?.Stdout=="v2 preserved","r4.real_v2_migration_preserves_encrypted_result");
+        var duplicate=store.Dispatch(new(AdminOperation.Job,JobAction.submit,Key:key,Command:command,WorkingDirectory:cwd),"migration");
+        Check(duplicate.Status==StatusCode.OK && duplicate.Job?.JobId==id,"r4.v2_payload_hash_unchanged");
+        var counts=store.Summary();
+        Check(counts.SchemaVersion==3 && counts.Total==1 && counts.Completed==1,"r4.migration_store_counts");
+    }
+    var backups=Directory.GetFiles(migrationRoot,"jobs.db.schema2-*.backup");
+    Check(backups.Length==1,"r4.v2_backup_retained");
+    using(var db=new Microsoft.Data.Sqlite.SqliteConnection("Data Source="+backups[0]+";Mode=ReadOnly;Pooling=False"))
+    {
+        db.Open();using var cmd=db.CreateCommand();cmd.CommandText="PRAGMA user_version";
+        Check((long)cmd.ExecuteScalar()! ==2,"r4.v2_backup_schema");
+    }
+    using(var store=new JobCoordinator(Microsoft.Extensions.Logging.Abstractions.NullLogger<JobCoordinator>.Instance))
+    {
+        store.Initialize(database);
+        Check(store.Summary().Completed==1 && Directory.GetFiles(migrationRoot,"jobs.db.schema2-*.backup").Length==1,
+            "r4.v3_reopen_no_duplicate_migration");
+    }
+}
+finally{Directory.Delete(migrationRoot,true);}

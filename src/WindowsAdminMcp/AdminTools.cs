@@ -39,6 +39,8 @@ public sealed class AdminTools
         catch(IOException e){return Fail(StatusCode.IPC_FAILED,e.HResult);}
     }
 
+    internal static Task<AdminResponse> Diagnostics(CancellationToken ct) => Call(new(AdminOperation.Diagnostics),ct);
+
     [McpServerTool(Name="powershell_status",UseStructuredContent=true),
         Description("Read actual Windows service status and execution identity.")]
     public static async Task<AdminStatus> Status(CancellationToken cancellationToken)

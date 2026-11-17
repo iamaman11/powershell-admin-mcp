@@ -238,6 +238,16 @@ try{
     Assert ($still.status -eq 'OK') 'r5.status_after_screenshot_error'
     Write-Host 'R5_SCREENSHOT_CONTRACT=PASS (no physical desktop capture in CI)'
 
+    # Native CLI diagnostics use the same service and complete store counts.
+    $rawDoctor=& $Exe doctor
+    $doctorExit=$LASTEXITCODE
+    $doctor=$rawDoctor|ConvertFrom-Json -AsHashtable
+    Assert ($doctor.schemaVersion -eq 1 -and $doctor.status -eq 'DEGRADED' -and $doctorExit -eq 1) 'r6.doctor_reports_isolated_install_degraded'
+    Assert ($doctor.service.service_pid -eq (Get-CimInstance Win32_Service -Filter "Name='$name'").ProcessId -and $doctor.store.schemaVersion -eq 3) 'r6.doctor_authoritative_service_store'
+    Assert ($doctor.store.total -gt 0 -and $doctor.store.waitingForReboot -eq 0 -and $doctor.store.needsReconciliation -ge 1) 'r6.doctor_total_state_counts'
+    Assert (@($doctor.checks|Where-Object {$_.component -eq 'Remote' -and $_.status -eq 'NOT_TESTED'}).Count -eq 1) 'r6.doctor_no_false_remote_acceptance'
+
+
 }finally{
     foreach($p in $clients){
         if(-not $p.HasExited){$p.StandardInput.Close();if(-not $p.WaitForExit(3000)){$p.Kill($true);$p.WaitForExit()}}

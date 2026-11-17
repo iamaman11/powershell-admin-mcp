@@ -24,6 +24,12 @@ else if (args is ["tunnel"])
 {
     Environment.ExitCode = await TunnelHost.RunAsync();
 }
+else if (args is ["doctor"])
+{
+    var report=await Doctor.ObserveAsync();
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(report,PipeWire.Json));
+    Environment.ExitCode=report.Status==DoctorState.DEGRADED?1:0;
+}
 else if (args is ["doctor", "boot"])
 {
     // The first read-only component of the unified native doctor.
@@ -47,6 +53,6 @@ else if (args is ["stdio"])
 }
 else
 {
-    Console.Error.WriteLine("Usage: WindowsAdminMCP.exe service|stdio|tunnel|doctor boot");
+    Console.Error.WriteLine("Usage: WindowsAdminMCP.exe service|stdio|tunnel|doctor [boot]");
     Environment.ExitCode = 2;
 }

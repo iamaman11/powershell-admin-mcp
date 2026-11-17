@@ -82,14 +82,15 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                         var result = jobs.Dispatch(request, correlation);
                         response = new(result.Status, correlation, Job: result);
                     }
-                    else if (request?.Operation == AdminOperation.Status && request.Action is null &&
+                    else if (request?.Operation is (AdminOperation.Status or AdminOperation.Diagnostics) && request.Action is null &&
                         request.Command is null && request.Key is null && request.JobId is null &&
                         request.Steps is null && request.StepIndex is null && request.ExpectedCompletedSteps is null)
                     {
                         using var actual = WindowsIdentity.GetCurrent();
                         var status = new AdminStatus(StatusCode.OK, correlation, Environment.ProcessId, Environment.MachineName,
                             actual.Name, actual.User?.Value, actual.IsSystem, started);
-                        response = new(StatusCode.OK, correlation, Info: status);
+                        response = new(StatusCode.OK, correlation, Info: status,
+                            Store:request.Operation==AdminOperation.Diagnostics?jobs.Summary():null);
                     }
                     else response = new(StatusCode.IPC_PROTOCOL_ERROR, correlation);
                 }

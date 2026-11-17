@@ -16,13 +16,16 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
     private static string Now() => DateTimeOffset.UtcNow.ToString("O");
     private static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 
-    internal void Initialize()
+    internal void Initialize() => Initialize(StateDirectory.DatabasePath());
+
+    // Internal isolated fixture entry; no CLI, environment or IPC override.
+    internal void Initialize(string databasePath)
     {
         lock (gate)
         {
             connection = new SqliteConnection(new SqliteConnectionStringBuilder
             {
-                DataSource = StateDirectory.DatabasePath(), Pooling = false
+                DataSource = databasePath, Pooling = false
             }.ToString());
             Db.Open();
             long versionValue;
@@ -121,6 +124,25 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
         check.CommandText="PRAGMA user_version";
         if((long)check.ExecuteScalar()! != 2)throw new InvalidOperationException("Schema backup version mismatch.");
         logger.LogInformation("Protected schema v2 backup created before migration.");
+    }
+
+    internal StoreSummary Summary()
+    {
+        lock(gate)
+        {
+            using var cmd=Command("""
+                SELECT count(*),
+                  coalesce(sum(state='QUEUED'),0),coalesce(sum(state='RUNNING'),0),
+                  coalesce(sum(state='CANCEL_REQUESTED'),0),coalesce(sum(state='WAITING_FOR_RESUME'),0),
+                  coalesce(sum(state='WAITING_FOR_REBOOT'),0),coalesce(sum(state='NEEDS_RECONCILIATION'),0),
+                  coalesce(sum(state='COMPLETED'),0),coalesce(sum(state='FAILED'),0),coalesce(sum(state='CANCELLED'),0)
+                FROM jobs
+                """,null);
+            using var row=cmd.ExecuteReader();
+            if(!row.Read())throw new InvalidOperationException("Store count unavailable.");
+            return new(row.GetInt64(0),row.GetInt64(1),row.GetInt64(2),row.GetInt64(3),row.GetInt64(4),
+                row.GetInt64(5),row.GetInt64(6),row.GetInt64(7),row.GetInt64(8),row.GetInt64(9),3,16,10000);
+        }
     }
 
     private void Signal() { if (wake.CurrentCount == 0) wake.Release(); }
