@@ -47,9 +47,9 @@ function Probe([bool]$Modern) {
         $meta=$null
         $listParams=@{}
         if ($Modern) {
-            $d=Call $p 1 'server/discover' @{}
+            $meta=@{'io.modelcontextprotocol/protocolVersion'='2026-07-28';'io.modelcontextprotocol/clientCapabilities'=@{};'io.modelcontextprotocol/clientInfo'=@{name='raw-acceptance';version='1'}}
+            $d=Call $p 1 'server/discover' @{_meta=$meta}
             Assert ('2026-07-28' -in $d.supportedVersions) 'modern.discovery'
-            $meta=@{'io.modelcontextprotocol/protocolVersion'='2026-07-28';'io.modelcontextprotocol/clientCapabilities'=@{}}
             $listParams._meta=$meta
         } else {
             $i=Call $p 1 'initialize' @{protocolVersion='2025-06-18';capabilities=@{};clientInfo=@{name='raw-acceptance';version='1'}}
