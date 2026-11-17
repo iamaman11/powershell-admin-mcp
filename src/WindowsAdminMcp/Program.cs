@@ -11,6 +11,7 @@ if (args is ["service"])
     var builder = Host.CreateApplicationBuilder();
     builder.Logging.ClearProviders();
     builder.Services.AddWindowsService(options => options.ServiceName = ServiceIdentity.Name);
+    builder.Services.AddSingleton<JobCoordinator>();
     builder.Services.AddHostedService<AdminService>();
     await builder.Build().RunAsync();
 }

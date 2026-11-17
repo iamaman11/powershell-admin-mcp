@@ -4,6 +4,8 @@ Set-StrictMode -Version Latest
 if(-not $env:GITHUB_ACTIONS -or $env:RUNNER_OS -ne 'Windows'){throw 'ISOLATED_WINDOWS_CI_ONLY'}
 $Exe=[IO.Path]::GetFullPath($Exe)
 $name='WindowsAdminMCP'
+$data=Join-Path $env:ProgramData 'WindowsAdminMCP.Data'
+if(Test-Path -LiteralPath $data){throw 'STATE_ALREADY_EXISTS'}
 if(Get-Service $name -ErrorAction SilentlyContinue){throw 'SERVICE_ALREADY_EXISTS'}
 $clients=[Collections.Generic.List[Diagnostics.Process]]::new()
 $meta=@{'io.modelcontextprotocol/protocolVersion'='2026-07-28';'io.modelcontextprotocol/clientCapabilities'=@{};'io.modelcontextprotocol/clientInfo'=@{name='r1-fixture';version='1'}}
@@ -54,8 +56,8 @@ try{
     foreach($p in @($a,$b,$c)){
         Send $p 1 'tools/list' @{_meta=$meta}
         $list=Receive $p 1
-        Assert (@($list.tools).Count -eq 1 -and $list.tools[0].name -eq 'powershell_status') 'r1.actual_tool_only'
-        Assert ($list.tools[0].Contains('outputSchema')) 'r1.typed_status_schema'
+        Assert (@($list.tools).Count -eq 3 -and @($list.tools.name|Where-Object {$_ -in @('powershell_status','powershell_exec','powershell_job')}).Count -eq 3) 'r3.three_implemented_tools'
+        Assert (@($list.tools|Where-Object {$_.name -eq 'powershell_status' -and $_.Contains('outputSchema')}).Count -eq 1) 'r1.typed_status_schema'
         $v=Wait-Status $p 'OK'
         Assert ($v.service_pid -eq $svc.ProcessId -and $v.execution_sid -eq 'S-1-5-18' -and $v.elevated) 'r1.scm_pid_and_real_execution_identity'
     }
@@ -70,11 +72,59 @@ try{
     $now=Wait-Status $a 'OK'
     $newSvc=Get-CimInstance Win32_Service -Filter "Name='$name'"
     Assert ($now.service_pid -eq $newSvc.ProcessId -and $now.started_utc -ne $results[0].started_utc) 'r1.same_frontend_reconnects_new_service'
-    Write-Host 'R1_NATIVE_STATUS=PASS (one candidate binary; no execution or tunnel yet)'
+    function ToolCall($p,$id,$tool,$arguments){
+        Send $p $id 'tools/call' @{name=$tool;arguments=$arguments;_meta=$meta}
+        return (Receive $p $id).structuredContent
+    }
+    function Job($p,$id,$arguments){return (ToolCall $p $id 'powershell_job' $arguments)}
+    function Wait-JobState($p,$jobId,$state){
+        $clock=[Diagnostics.Stopwatch]::StartNew();$id=2000
+        do{
+            $v=Job $p $id @{action='logs';job_id=$jobId};$id++
+            if($v.job.state -eq $state){return $v.job}
+            Start-Sleep -Milliseconds 100
+        }while($clock.Elapsed.TotalSeconds -lt 15)
+        throw "JOB_STATE_TIMEOUT $state $($v.job.state)"
+    }
+    $x=ToolCall $a 10 'powershell_exec' @{command="Write-Output 'real-exec'; [Security.Principal.WindowsIdentity]::GetCurrent().User.Value";timeout_seconds=10;operation_key='short'}
+    Assert ($x.status -eq 'COMPLETED' -and $x.stdout.Contains('real-exec') -and $x.stdout.Contains('S-1-5-18') -and $x.audit_persisted) 'r3.actual_exec_service_context'
+    $prefix="Write-Output 'Проверка 🚀'"+[char]10+'#'
+    $long=$prefix+('x'*(11982-$prefix.Length))
+    $x=ToolCall $b 11 'powershell_exec' @{command=$long;timeout_seconds=10;operation_key='long'}
+    Assert ($x.status -eq 'COMPLETED' -and $x.stdout.Trim() -ceq 'Проверка 🚀') 'r3.long_unicode_through_mcp'
+    $first=Job $a 12 @{action='submit';operation_key='shared';command="Start-Sleep -Seconds 5; Write-Output 'first'";timeout_seconds=20}
+    Assert ($first.status -eq 'OK' -and $first.job.state -eq 'QUEUED') 'r3.durable_admission'
+    $null=Wait-JobState $b $first.job.job_id 'RUNNING'
+    Send $b 13 'tools/call' @{name='powershell_job';arguments=@{action='submit';operation_key='next';command="Write-Output 'second'";timeout_seconds=10};_meta=$meta}
+    Send $c 13 'tools/call' @{name='powershell_job';arguments=@{action='submit';operation_key='shared';command="Start-Sleep -Seconds 5; Write-Output 'first'";timeout_seconds=20};_meta=$meta}
+    $next=(Receive $b 13).structuredContent;$dup=(Receive $c 13).structuredContent
+    Assert ($next.job.state -eq 'QUEUED' -and $dup.job.job_id -eq $first.job.job_id) 'r3.concurrent_fifo_and_idempotency'
+    $conflict=Job $c 14 @{action='submit';operation_key='shared';command="Write-Output 'different'"}
+    Assert ($conflict.status -eq 'CONFLICT') 'r3.same_key_different_payload_conflict'
+    $a.Kill($true);$a.WaitForExit()
+    $one=Wait-JobState $b $first.job.job_id 'COMPLETED'
+    $two=Wait-JobState $c $next.job.job_id 'COMPLETED'
+    Assert ($one.execution.stdout.Trim() -eq 'first' -and $two.execution.stdout.Trim() -eq 'second') 'r3.disconnect_and_distinct_results'
+    $kill=Job $b 15 @{action='submit';operation_key='cancel';command='Start-Sleep -Seconds 30';timeout_seconds=60}
+    $null=Wait-JobState $c $kill.job.job_id 'RUNNING'
+    Start-Sleep -Milliseconds 700
+    $ack=Job $c 16 @{action='cancel';job_id=$kill.job.job_id}
+    Assert ($ack.status -eq 'OK' -and $ack.job.state -eq 'CANCEL_REQUESTED') 'r3.running_cancel_ack'
+    $unknown=Wait-JobState $b $kill.job.job_id 'NEEDS_RECONCILIATION'
+    Assert ($unknown.execution.status -eq 'CANCELLED_UNKNOWN_EFFECT') 'r3.cancel_unknown_effect'
+    Stop-Service $name
+    Start-Service $name
+    $null=Wait-Status $b 'OK'
+    $saved=Job $c 17 @{action='logs';job_id=$first.job.job_id}
+    Assert ($saved.job.state -eq 'COMPLETED' -and $saved.job.execution.stdout.Trim() -eq 'first') 'r3.persisted_real_output'
+    $list=Job $c 18 @{action='list'}
+    Assert (@($list.jobs|Where-Object {$_.job_id -eq $kill.job.job_id -and $_.state -eq 'NEEDS_RECONCILIATION'}).Count -eq 1) 'r3.list_recovery'
+    Write-Host 'R3_NATIVE_JOBS=PASS (actual service and PowerShell, three SDK stdio clients; no live tunnel/reboot)'
 }finally{
     foreach($p in $clients){
         if(-not $p.HasExited){$p.StandardInput.Close();if(-not $p.WaitForExit(3000)){$p.Kill($true);$p.WaitForExit()}}
         $p.Dispose()
     }
     if(Get-Service $name -ErrorAction SilentlyContinue){Stop-Service $name -ErrorAction SilentlyContinue;sc.exe delete $name|Out-Host}
+    if(Test-Path -LiteralPath $data){Remove-Item -LiteralPath $data -Recurse -Force}
 }

@@ -8,14 +8,26 @@ public enum ExecutionState
 {
     COMPLETED, COMMAND_ERROR, INVALID_ARGUMENT, POWERSHELL_NOT_FOUND,
     EXECUTION_FAILED, TIMEOUT_BEFORE_EXECUTION, CANCELLED_BEFORE_EXECUTION,
-    TIMEOUT_UNKNOWN_EFFECT, CANCELLED_UNKNOWN_EFFECT, OUTPUT_INCOMPLETE
+    TIMEOUT_UNKNOWN_EFFECT, CANCELLED_UNKNOWN_EFFECT, OUTPUT_INCOMPLETE,
+    PENDING, NEEDS_RECONCILIATION, SERVICE_UNAVAILABLE, ACCESS_DENIED, IPC_TIMEOUT, IPC_PROTOCOL_ERROR,
+    IPC_FAILED, NOT_FOUND, CONFLICT, BUSY, STORE_FULL, NOT_CANCELLABLE, ADMISSION_UNCONFIRMED, CANCELLED
 }
 
 public sealed record ExecutionResult(
-    ExecutionState Status, string CommandSha256, long ElapsedMs,
-    int? ExitCode = null, string Stdout = "", string Stderr = "",
-    string[]? Warnings = null, bool OutputTruncated = false,
-    string? Stage = null, int? NativeError = null);
+    [property:JsonPropertyName("status")] ExecutionState Status,
+    [property:JsonPropertyName("command_sha256")] string CommandSha256,
+    [property:JsonPropertyName("elapsed_ms")] long ElapsedMs,
+    [property:JsonPropertyName("exit_code")] int? ExitCode = null,
+    [property:JsonPropertyName("stdout")] string Stdout = "",
+    [property:JsonPropertyName("stderr")] string Stderr = "",
+    [property:JsonPropertyName("warnings")] string[]? Warnings = null,
+    [property:JsonPropertyName("output_truncated")] bool OutputTruncated = false,
+    [property:JsonPropertyName("stage")] string? Stage = null,
+    [property:JsonPropertyName("native_error")] int? NativeError = null,
+    [property:JsonPropertyName("job_id")] string? JobId = null,
+    [property:JsonPropertyName("operation_key")] string? OperationKey = null,
+    [property:JsonPropertyName("correlation_id")] string? CorrelationId = null,
+    [property:JsonPropertyName("audit_persisted")] bool AuditPersisted = false);
 
 internal static class PowerShellRunner
 {
@@ -56,7 +68,7 @@ internal static class PowerShellRunner
         ExecutionResult Fail(ExecutionState state, string stage, int? code = null)
             => new(state, hash, clock.ElapsedMilliseconds, Stage: stage, NativeError: code);
         cwd ??= Environment.SystemDirectory;
-        if (command.Length is < 1 or > 12000 || timeoutSeconds is < 1 or > 120 ||
+        if (command.Length is < 1 or > 12000 || timeoutSeconds is < 1 or > 3600 ||
             !Path.IsPathFullyQualified(cwd) || !Directory.Exists(cwd))
             return Fail(ExecutionState.INVALID_ARGUMENT, "VALIDATION");
         string executable = Executable;

@@ -6,7 +6,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
-internal sealed class AdminService(ILogger<AdminService> logger) : BackgroundService
+internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator jobs) : BackgroundService
 {
     private readonly DateTimeOffset started = DateTimeOffset.UtcNow;
     private static PipeSecurity Security()
@@ -24,9 +24,10 @@ internal sealed class AdminService(ILogger<AdminService> logger) : BackgroundSer
     {
         using var identity = WindowsIdentity.GetCurrent();
         if (!identity.IsSystem) throw new InvalidOperationException("LocalSystem required.");
+        jobs.Initialize();
         logger.LogInformation("Administrative service starting. PID {Pid}", Environment.ProcessId);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-        Task[] listeners = Enumerable.Range(0, 4).Select(_ => Listen(linked.Token)).ToArray();
+        Task[] listeners = Enumerable.Range(0, 4).Select(_ => Listen(linked.Token)).Append(jobs.RunAsync(linked.Token)).ToArray();
         try
         {
             var completed = await Task.WhenAny(listeners);
@@ -67,21 +68,27 @@ internal sealed class AdminService(ILogger<AdminService> logger) : BackgroundSer
                     allowed = token is not null && (token.IsSystem ||
                         new WindowsPrincipal(token).IsInRole(WindowsBuiltInRole.Administrator));
                 });
-                AdminStatus status;
-                if (!allowed) status = new(StatusCode.ACCESS_DENIED, correlation);
+                AdminResponse response;
+                if (!allowed) response = new(StatusCode.ACCESS_DENIED, correlation);
                 else
                 {
                     var request = JsonSerializer.Deserialize<AdminRequest>(input, PipeWire.Json);
-                    if (request is null || request.Operation != AdminOperation.Status)
-                        status = new(StatusCode.IPC_PROTOCOL_ERROR, correlation);
-                    else
+                    if (request?.Operation == AdminOperation.Job)
+                    {
+                        var result = jobs.Dispatch(request, correlation);
+                        response = new(result.Status, correlation, Job: result);
+                    }
+                    else if (request?.Operation == AdminOperation.Status && request.Action is null &&
+                        request.Command is null && request.Key is null && request.JobId is null)
                     {
                         using var actual = WindowsIdentity.GetCurrent();
-                        status = new(StatusCode.OK, correlation, Environment.ProcessId, Environment.MachineName,
+                        var status = new AdminStatus(StatusCode.OK, correlation, Environment.ProcessId, Environment.MachineName,
                             actual.Name, actual.User?.Value, actual.IsSystem, started);
+                        response = new(StatusCode.OK, correlation, Info: status);
                     }
+                    else response = new(StatusCode.IPC_PROTOCOL_ERROR, correlation);
                 }
-                await PipeWire.WriteFrameAsync(pipe, JsonSerializer.Serialize(status, PipeWire.Json), deadline.Token);
+                await PipeWire.WriteFrameAsync(pipe, JsonSerializer.Serialize(response, PipeWire.Json), deadline.Token);
             }
             catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
             catch (Exception e) when (e is IOException or OperationCanceledException or JsonException
