@@ -93,6 +93,23 @@ jobs:
           $plan=./installer/NativeStartup.ps1 -Action Plan | ConvertFrom-Json
           if($plan.mutated -or $plan.service_start -ne 'Automatic' -or $plan.trigger -ne 'MSFT_TaskLogonTrigger' -or $plan.logon -ne 'Interactive' -or $plan.run_level -ne 'Highest' -or $plan.arguments -ne 'tunnel' -or $plan.multiple_instances -ne 'IgnoreNew' -or $plan.restart_count -ne 3){throw 'NATIVE_STARTUP_PLAN_INVALID'}
           Write-Host 'R6_STARTUP_DEFINITION=PASS (plan only; no task registered)'
+      - name: Build and test offline native installation package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $package=Join-Path "${{ runner.temp }}" 'WindowsAdminMCP-win-x64.zip'
+          $receipt=./installer/New-NativePackage.ps1 -PublishDirectory "${{ runner.temp }}/WindowsAdminMcpCandidate" -Output $package -Commit $env:GITHUB_SHA | ConvertFrom-Json
+          Write-Host ("NATIVE_PACKAGE_SHA256="+$receipt.sha256)
+          ./tests/Test-NativePackage.ps1 -Package $package -Sha256 $receipt.sha256
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: WindowsAdminMCP-offline-package
+          path: |
+            ${{ runner.temp }}/WindowsAdminMCP-win-x64.zip
+            installer/Install-Native.ps1
+            installer/NativeFileSwap.ps1
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: success()
         with:
