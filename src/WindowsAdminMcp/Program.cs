@@ -24,6 +24,13 @@ else if (args is ["tunnel"])
 {
     Environment.ExitCode = await TunnelHost.RunAsync();
 }
+else if (args is ["doctor", "boot"])
+{
+    // The first read-only component of the unified native doctor.
+    var boot = BootEvidence.Observe();
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(boot, PipeWire.Json));
+    Environment.ExitCode = boot.Status == BootEvidenceCode.FULL_BOOT_OBSERVED ? 0 : 1;
+}
 else if (args is ["stdio"])
 {
     // The SDK frontend is not a runtime credential owner.
@@ -40,6 +47,6 @@ else if (args is ["stdio"])
 }
 else
 {
-    Console.Error.WriteLine("Usage: WindowsAdminMCP.exe service|stdio|tunnel");
+    Console.Error.WriteLine("Usage: WindowsAdminMCP.exe service|stdio|tunnel|doctor boot");
     Environment.ExitCode = 2;
 }
