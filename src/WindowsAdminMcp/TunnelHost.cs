@@ -15,7 +15,7 @@ internal static class TunnelHost
     {
         STARTED, EXITED, INTERACTIVE_ADMIN_REQUIRED, INSTALL_PATH_INVALID,
         VENDOR_INTEGRITY_FAILED, SERVICE_UNAVAILABLE, ALREADY_RUNNING,
-        CREDENTIAL_INVALID, START_FAILED, WAITING_FOR_TUN, TUN_READY
+        CREDENTIAL_INVALID, START_FAILED, WAITING_FOR_TUN, TUN_READY, TUN_LOST, CONTROL_PLANE_ACCESS_DENIED
     }
 
     internal sealed record Credential(
@@ -103,8 +103,10 @@ internal static class TunnelHost
             }while(clock.Elapsed<TimeSpan.FromSeconds(30));
             if(!ready)return Report(stage,3);
 
-            // Startup dependency only: read OS state, never execute or reconfigure INTERNET.
+            // Local dependency only: read OS state, never execute or reconfigure INTERNET.
             // Poll slowly while blocked and log transitions, not every observation.
+            while (true)
+            {
             TunReadiness? previous = null;
             while (true)
             {
@@ -156,23 +158,39 @@ internal static class TunnelHost
             if(finalDependency!=TunReadiness.READY)
             {
                 info.Environment.Remove("CONTROL_PLANE_API_KEY");
-                return Report(stage,3,dependency:finalDependency);
+                Report(stage,0,dependency:finalDependency);
+                await Task.Delay(TimeSpan.FromSeconds(5));
+                continue;
             }
             stage=Code.START_FAILED;
-            Process? child;
-            try{child=Process.Start(info);}
+            NativeChildProcess child;
+            try{child=NativeChildProcess.Start(info);}
             finally{info.Environment.Remove("CONTROL_PLANE_API_KEY");}
-            if(child is null)return Report(stage,5);
             using(child)
             {
-                // The scheduler owns this foreground lifetime; the vendor owns its own network/stdio recovery.
-                Report(Code.STARTED,0,vendorPid:child.Id);
-                await child.WaitForExitAsync();
-                return Report(Code.EXITED,child.ExitCode,vendorPid:child.Id);
+                // Job Object closes the complete owned tree on task stop or launcher crash.
+                // The vendor owns its protocol and network recovery while the dependency is alive.
+                child.Input.Close();
+                Report(Code.STARTED,0,vendorPid:child.Process.Id);
+                var stdout=Task.Run(()=>child.Output.CopyTo(Stream.Null));
+                var stderr=Task.Run(()=>child.Error.CopyTo(Stream.Null));
+                var end=await TunnelLifetime.WatchAsync(child.Process,TunDependency.Observe,
+                    TunnelLifetime.AccessDeniedAsync,TimeSpan.FromSeconds(5));
+                child.StopTree();
+                if(!child.Process.WaitForExit(5000))return Report(Code.START_FAILED,5,vendorPid:child.Process.Id);
+                await Task.WhenAll(stdout,stderr).WaitAsync(TimeSpan.FromSeconds(5));
+                if(end==TunnelEnd.ACCESS_DENIED)
+                    // An explicit operator action is required after an access denial.
+                    return Report(Code.CONTROL_PLANE_ACCESS_DENIED,0,vendorPid:child.Process.Id);
+                if(end==TunnelEnd.EXITED)
+                    return Report(Code.EXITED,child.Process.ExitCode,vendorPid:child.Process.Id);
+                Report(Code.TUN_LOST,0,vendorPid:child.Process.Id);
+            }
+            await Task.Delay(TimeSpan.FromSeconds(5));
             }
         }
         catch(Exception e) when(e is IOException or UnauthorizedAccessException or Win32Exception or
-            CryptographicException or JsonException or ArgumentException or InvalidOperationException or System.Security.SecurityException)
+            CryptographicException or JsonException or ArgumentException or InvalidOperationException or TimeoutException or System.Security.SecurityException)
         {return Report(stage,5,e is Win32Exception w?w.NativeErrorCode:e.HResult);}
     }
 

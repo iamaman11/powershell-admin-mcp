@@ -85,3 +85,35 @@ Check(TunDependency.Classify([down],1)==TunReadiness.ADAPTER_DOWN,"r6.tun_down")
 Check(TunDependency.Classify([up],0)==TunReadiness.DATAPLANE_NOT_RUNNING,"r6.tun_stale_adapter");
 Check(TunDependency.Classify([up,up],1)==TunReadiness.ADAPTER_AMBIGUOUS,"r6.tun_duplicate_adapter");
 Check(TunDependency.Classify([up],2)==TunReadiness.DATAPLANE_AMBIGUOUS,"r6.tun_duplicate_process");
+
+using(var denied=System.Text.Json.JsonDocument.Parse("""{"schema_version":1,"component":"control-plane","details":{"http_status":403,"consecutive_failures":1}}"""))
+    Check(TunnelLifetime.IsAccessDenied(denied.RootElement),"r6.authorization_denial_terminal");
+using(var stale=System.Text.Json.JsonDocument.Parse("""{"schema_version":1,"component":"control-plane","details":{"http_status":403,"consecutive_failures":0}}"""))
+    Check(!TunnelLifetime.IsAccessDenied(stale.RootElement),"r6.no_stale_denial");
+using(var other=System.Text.Json.JsonDocument.Parse("""{"schema_version":1,"component":"control-plane","details":{"http_status":503,"consecutive_failures":2}}"""))
+    Check(!TunnelLifetime.IsAccessDenied(other.RootElement),"r6.transient_error_not_auth_denial");
+ProcessStartInfo InertChild()
+{
+    var info=new ProcessStartInfo(PowerShellRunner.Executable){UseShellExecute=false,WorkingDirectory=Environment.SystemDirectory};
+    foreach(string arg in new[]{"-NoLogo","-NoProfile","-NonInteractive","-Command","Start-Sleep -Seconds 60"})info.ArgumentList.Add(arg);
+    return info;
+}
+using(var fixture=NativeChildProcess.Start(InertChild()))
+{
+    fixture.Input.Close();
+    int checks=0;
+    var end=await TunnelLifetime.WatchAsync(fixture.Process,()=>++checks==1?TunReadiness.READY:TunReadiness.ADAPTER_DOWN,
+        ()=>Task.FromResult(false),TimeSpan.FromMilliseconds(50));
+    Check(end==TunnelEnd.TUN_LOST && !fixture.Process.HasExited,"r6.tun_loss_detected_on_real_child");
+    fixture.StopTree();
+    Check(fixture.Process.WaitForExit(5000),"r6.owned_child_terminated");
+}
+using(var fixture=NativeChildProcess.Start(InertChild()))
+{
+    fixture.Input.Close();
+    var end=await TunnelLifetime.WatchAsync(fixture.Process,()=>TunReadiness.READY,
+        ()=>Task.FromResult(true),TimeSpan.FromMilliseconds(50));
+    Check(end==TunnelEnd.ACCESS_DENIED,"r6.real_child_auth_stop");
+    fixture.StopTree();
+    Check(fixture.Process.WaitForExit(5000),"r6.auth_denied_child_terminated");
+}

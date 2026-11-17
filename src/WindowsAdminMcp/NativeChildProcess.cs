@@ -6,7 +6,7 @@ using Microsoft.Win32.SafeHandles;
 
 // A single native process tree, with only the three explicitly listed inherited
 // handles. The job is assigned while the initial thread is still suspended.
-internal sealed class NativePowerShell : IDisposable
+internal sealed class NativeChildProcess : IDisposable
 {
     private const uint CreateSuspended = 0x4, CreateNoWindow = 0x08000000,
         ExtendedStartupInfoPresent = 0x00080000, CreateUnicodeEnvironment = 0x400;
@@ -17,10 +17,37 @@ internal sealed class NativePowerShell : IDisposable
     internal FileStream Output { get; }
     internal FileStream Error { get; }
 
-    private NativePowerShell(SafeFileHandle job, Process process, FileStream input, FileStream output, FileStream error)
+    private NativeChildProcess(SafeFileHandle job, Process process, FileStream input, FileStream output, FileStream error)
         => (this.job, Process, Input, Output, Error) = (job, process, input, output, error);
 
-    internal static NativePowerShell Start(string executable, string commandLine, string cwd)
+    // Both the administrative runner and the official vendor use the same suspended
+    // process creation and Job Object ownership, with different explicit environments.
+    internal static NativeChildProcess Start(ProcessStartInfo info)
+    {
+        if(info.UseShellExecute || info.Arguments.Length!=0)
+            throw new ArgumentException("Expected direct executable and argument list.");
+        var line=string.Join(" ",new[]{info.FileName}.Concat(info.ArgumentList).Select(QuoteArgument));
+        return Start(info.FileName,line,info.WorkingDirectory,info.Environment);
+    }
+
+    internal static string QuoteArgument(string arg)
+    {
+        var result=new StringBuilder("\"");
+        int slashes=0;
+        foreach(char c in arg)
+        {
+            if(c=='\\'){slashes++;continue;}
+            if(c=='"')result.Append('\\',slashes*2+1);
+            else result.Append('\\',slashes);
+            result.Append(c);
+            slashes=0;
+        }
+        result.Append('\\',slashes*2).Append('"');
+        return result.ToString();
+    }
+
+    internal static NativeChildProcess Start(string executable,string commandLine,string cwd,
+        IDictionary<string,string?>? explicitEnvironment=null)
     {
         var job = CreateJobObjectW(IntPtr.Zero, null);
         if (job.IsInvalid) { job.Dispose(); throw NativeFailure.Last("CREATE_JOB"); }
@@ -57,6 +84,12 @@ internal sealed class NativePowerShell : IDisposable
                     !key.Equals("CONTROL_PLANE_API_KEY", StringComparison.OrdinalIgnoreCase) &&
                     !key.Equals("OPENAI_API_KEY", StringComparison.OrdinalIgnoreCase))
                     env[key] = value;
+            if(explicitEnvironment is not null)
+            {
+                env.Clear();
+                foreach(var item in explicitEnvironment)
+                    if(item.Value is not null)env[item.Key]=item.Value;
+            }
             IntPtr environment = Marshal.StringToHGlobalUni(string.Join('\0', env.Select(e => $"{e.Key}={e.Value}")) + "\0\0");
             ProcessInformation child;
             try
@@ -81,7 +114,7 @@ internal sealed class NativePowerShell : IDisposable
                 // Parent copies of the child endpoints must not delay EOF.
                 stdin.Child.Dispose(); stdout.Child.Dispose(); stderr.Child.Dispose();
                 if (ResumeThread(thread) == uint.MaxValue) throw NativeFailure.Last("RESUME_PROCESS");
-                var result = new NativePowerShell(job, managed, input, output, error);
+                var result = new NativeChildProcess(job, managed, input, output, error);
                 success = true;
                 return result;
             }

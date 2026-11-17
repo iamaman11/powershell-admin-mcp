@@ -78,8 +78,8 @@ internal static class PowerShellRunner
         deadline.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
         string line = "\"" + executable + "\" -NoLogo -NoProfile -NonInteractive -Command \"" +
             Bootstrap.Replace("\r", " ").Replace("\n", " ") + "\"";
-        NativePowerShell child;
-        try { child = NativePowerShell.Start(executable, line, cwd); }
+        NativeChildProcess child;
+        try { child = NativeChildProcess.Start(executable, line, cwd); }
         catch (NativeFailure e) { return Fail(ExecutionState.EXECUTION_FAILED, e.Stage, e.NativeErrorCode); }
         catch (Exception e) when (e is IOException or InvalidOperationException or System.ComponentModel.Win32Exception)
         { return Fail(ExecutionState.EXECUTION_FAILED, "PROCESS_START", e.HResult); }
