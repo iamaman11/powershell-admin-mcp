@@ -81,6 +81,16 @@ try{$config=[Text.Encoding]::UTF8.GetString($plain)|ConvertFrom-Json}
 finally{[Security.Cryptography.CryptographicOperations]::ZeroMemory($plain)}
 if($config.version -ne 1 -or [string]$config.tunnel_id -cnotmatch '^tunnel_[0-9a-f]{32}$' -or
     [string]::IsNullOrWhiteSpace($config.runtime_key)){throw 'INVALID_TUNNEL_CONFIG'}
+# Confirm that the rollback binding represents the running tunnel, not merely a valid local credential.
+$oldLine=[string]$other[0].CommandLine
+$oldServerBinding=$oldServer.Replace('\','/')
+if(-not $oldLine.Contains([string]$config.tunnel_id) -or
+    -not $oldLine.Contains('env:CONTROL_PLANE_API_KEY') -or
+    -not $oldLine.Contains('pwsh -NoLogo -NoProfile -NonInteractive -File') -or
+    -not $oldLine.Contains($oldServerBinding) -or
+    -not $oldLine.Contains('127.0.0.1:8080') -or
+    $oldLine.Contains([string]$config.runtime_key)){throw 'ROLLBACK_BINDING_MISMATCH'}
+$oldLine=$null
 if($Mode -eq 'Preflight'){
     $config=$null
     Write-Output 'CUTOVER_PREFLIGHT=PASS (no tunnel stopped)'
