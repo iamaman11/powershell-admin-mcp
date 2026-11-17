@@ -76,3 +76,12 @@ Check(launch.FileName.EndsWith(@"\client\tunnel-client-runtime.exe",StringCompar
     launch.ArgumentList.Contains("env:CONTROL_PLANE_API_KEY")&&
     !launch.ArgumentList.Any(a=>a.Contains("inert-test-key",StringComparison.Ordinal))&&
     launch.Environment["CONTROL_PLANE_API_KEY"]=="inert-test-key","r6.stable_vendor_binding_no_key_in_argv");
+
+var up=System.Net.NetworkInformation.OperationalStatus.Up;
+var down=System.Net.NetworkInformation.OperationalStatus.Down;
+Check(TunDependency.Classify([up],1)==TunReadiness.READY,"r6.tun_ready");
+Check(TunDependency.Classify([],1)==TunReadiness.ADAPTER_MISSING,"r6.tun_missing");
+Check(TunDependency.Classify([down],1)==TunReadiness.ADAPTER_DOWN,"r6.tun_down");
+Check(TunDependency.Classify([up],0)==TunReadiness.DATAPLANE_NOT_RUNNING,"r6.tun_stale_adapter");
+Check(TunDependency.Classify([up,up],1)==TunReadiness.ADAPTER_AMBIGUOUS,"r6.tun_duplicate_adapter");
+Check(TunDependency.Classify([up],2)==TunReadiness.DATAPLANE_AMBIGUOUS,"r6.tun_duplicate_process");

@@ -15,7 +15,7 @@ internal static class TunnelHost
     {
         STARTED, EXITED, INTERACTIVE_ADMIN_REQUIRED, INSTALL_PATH_INVALID,
         VENDOR_INTEGRITY_FAILED, SERVICE_UNAVAILABLE, ALREADY_RUNNING,
-        CREDENTIAL_INVALID, START_FAILED
+        CREDENTIAL_INVALID, START_FAILED, WAITING_FOR_TUN, TUN_READY
     }
 
     internal sealed record Credential(
@@ -54,11 +54,11 @@ internal static class TunnelHost
     {
         string correlation = Guid.NewGuid().ToString("N");
         Code stage = Code.INTERACTIVE_ADMIN_REQUIRED;
-        int Report(Code code,int exit,int? native=null,int? vendorPid=null)
+        int Report(Code code,int exit,int? native=null,int? vendorPid=null,TunReadiness? dependency=null)
         {
             // Only allowlisted fields, no exception messages, arguments or credential data.
             string line = JsonSerializer.Serialize(new { status=code.ToString(),correlation_id=correlation,
-                exit_code=exit,native_error=native,vendor_pid=vendorPid });
+                exit_code=exit,native_error=native,vendor_pid=vendorPid,dependency_state=dependency?.ToString() });
             Console.Error.WriteLine(line);
             try { EventLog.WriteEntry(Source,line, exit==0 ? EventLogEntryType.Information : EventLogEntryType.Error); }
             catch (Exception e) when (e is System.Security.SecurityException or Win32Exception or
@@ -103,6 +103,33 @@ internal static class TunnelHost
             }while(clock.Elapsed<TimeSpan.FromSeconds(30));
             if(!ready)return Report(stage,3);
 
+            // Startup dependency only: read OS state, never execute or reconfigure INTERNET.
+            // Poll slowly while blocked and log transitions, not every observation.
+            TunReadiness? previous = null;
+            while (true)
+            {
+                var dependency = TunDependency.Observe();
+                if (dependency != previous)
+                {
+                    Report(dependency == TunReadiness.READY ? Code.TUN_READY : Code.WAITING_FOR_TUN,
+                        0, dependency: dependency);
+                    previous = dependency;
+                }
+                if (dependency == TunReadiness.READY)
+                {
+                    // The service may have stopped while the network was unavailable.
+                    var status = await AdminTools.Status(CancellationToken.None);
+                    if (status.Status == StatusCode.OK && status.ServicePid is int currentPid &&
+                        status.ExecutionSid == "S-1-5-18")
+                    {
+                        using var service = Process.GetProcessById(currentPid);
+                        if (string.Equals(service.MainModule?.FileName, frontend, StringComparison.OrdinalIgnoreCase))
+                            break;
+                    }
+                }
+                await Task.Delay(TimeSpan.FromSeconds(5));
+            }
+
             stage=Code.ALREADY_RUNNING;
             var existing=Process.GetProcessesByName("tunnel-client-runtime");
             try{if(existing.Length!=0)return Report(stage,4);}
@@ -123,6 +150,14 @@ internal static class TunnelHost
                 info=StartInfo(vendor,frontend,credential!);
             }
             finally{CryptographicOperations.ZeroMemory(plaintext);}
+            stage=Code.WAITING_FOR_TUN;
+            // Revalidate immediately before starting the vendor, not after using the network.
+            var finalDependency=TunDependency.Observe();
+            if(finalDependency!=TunReadiness.READY)
+            {
+                info.Environment.Remove("CONTROL_PLANE_API_KEY");
+                return Report(stage,3,dependency:finalDependency);
+            }
             stage=Code.START_FAILED;
             Process? child;
             try{child=Process.Start(info);}
@@ -158,7 +193,7 @@ internal static class TunnelHost
         var admins=new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid,null);
         var system=new SecurityIdentifier(WellKnownSidType.LocalSystemSid,null);
         if(acl.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner ||
-            (!owner.Equals(admins)&&!owner.Equals(system)&&!owner.Equals(current)))throw new UnauthorizedAccessException();
+            (!owner.Equals(admins)&&!owner.Equals(system)&&(current is null||!owner.Equals(current))))throw new UnauthorizedAccessException();
         foreach(FileSystemAccessRule rule in acl.GetAccessRules(true,true,typeof(SecurityIdentifier)))
             if(rule.AccessControlType==AccessControlType.Allow &&
                 !rule.IdentityReference.Equals(admins)&&!rule.IdentityReference.Equals(system))
