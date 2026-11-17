@@ -32,12 +32,69 @@ try {
     Start-Service $name
     $a=Wait-State 'RUNNING' 1
     Assert ($a.checkpoint -eq 1 -and $a.identity -eq 'S-1-5-18') 'scm.actual_system_and_checkpoint_a'
+    # Each request is a separate native process/connection, sharing the service.
+    $pipeName='WindowsAdminMcpR0_'+[IO.Path]::GetFileName($root)
+    function Start-PipeCall($request){
+        $si=[Diagnostics.ProcessStartInfo]::new($Exe)
+        foreach($v in @('pipe-client',$pipeName,($request|ConvertTo-Json -Compress))){$si.ArgumentList.Add($v)}
+        $si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
+        return [Diagnostics.Process]::Start($si)
+    }
+    function Finish-PipeCall($p){
+        try{
+            $output=$p.StandardOutput.ReadToEndAsync();$err=$p.StandardError.ReadToEndAsync()
+            if(-not $p.WaitForExit(8000)){throw 'PIPE_CLIENT_TIMEOUT'}
+            if($p.ExitCode -ne 0){throw "PIPE_CLIENT_FAILED $($err.GetAwaiter().GetResult())"}
+            return ($output.GetAwaiter().GetResult()|ConvertFrom-Json)
+        }finally{if(-not $p.HasExited){$p.Kill($true)};$p.Dispose()}
+    }
+    function PipeCall($r){return (Finish-PipeCall (Start-PipeCall $r))}
+    $first=PipeCall @{action='submit';key='first';delayMs=8000}
+    Assert ($first.status -eq 'OK') 'ipc.first_admitted'
+    $running=$false
+    for($i=0;$i -lt 15;$i++){
+        $f=PipeCall @{action='status';key='first'}
+        if($f.state -eq 'RUNNING'){$running=$true;break}
+    }
+    Assert $running 'ipc.first_running'
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    $p1=Start-PipeCall @{action='submit';key='second';delayMs=20}
+    $p2=Start-PipeCall @{action='submit';key='second';delayMs=20}
+    $p3=Start-PipeCall @{action='status';key='first'}
+    $second=Finish-PipeCall $p1
+    $repeat=Finish-PipeCall $p2
+    $status=Finish-PipeCall $p3
+    $clock.Stop()
+    Assert ($second.status -eq 'OK' -and $repeat.id -eq $second.id) 'ipc.concurrent_duplicate_single_job'
+    Assert ($status.id -eq $first.id -and $status.state -eq 'RUNNING' -and $clock.ElapsedMilliseconds -lt 4000) 'ipc.status_independent_of_long_job'
+    Write-Host "IPC_CONCURRENT_PROCESS_ROUNDTRIP_MS=$($clock.ElapsedMilliseconds)"
+    $conflict=PipeCall @{action='submit';key='second';delayMs=21}
+    Assert ($conflict.status -eq 'CONFLICT') 'ipc.idempotency_payload_conflict'
+    $third=PipeCall @{action='submit';key='third';delayMs=20}
+    $fourth=PipeCall @{action='submit';key='fourth';delayMs=20}
+    $overflow=PipeCall @{action='submit';key='overflow';delayMs=20}
+    Assert ($third.status -eq 'OK' -and $fourth.status -eq 'OK' -and $overflow.status -eq 'BUSY') 'ipc.bounded_admission'
+    $cancel=PipeCall @{action='cancel';key='third'}
+    Assert ($cancel.state -eq 'CANCELLED') 'ipc.queued_cancel_during_long_job'
+    $final=$null
+    $deadline=[Diagnostics.Stopwatch]::StartNew()
+    while($deadline.Elapsed.TotalSeconds -lt 15){
+        $final=PipeCall @{action='status';key='fourth'}
+        if($final.state -eq 'COMPLETED'){break}
+        Start-Sleep -Milliseconds 100
+    }
+    $firstDone=PipeCall @{action='status';key='first'}
+    $secondDone=PipeCall @{action='status';key='second'}
+    $thirdDone=PipeCall @{action='status';key='third'}
+    Assert ($firstDone.result -eq 'fixture:first' -and $secondDone.result -eq 'fixture:second' -and $thirdDone.state -eq 'CANCELLED' -and $final.result -eq 'fixture:fourth') 'ipc.reconnect_distinct_results_queue_drained'
     Stop-Service $name
     $s=Wait-State 'STOPPED' 1
     Assert ($s.checkpoint -eq 1) 'scm.graceful_stop'
     Start-Service $name
     $b=Wait-State 'RUNNING' 2
     Assert ($b.checkpoint -eq 1) 'sqlite.committed_checkpoint_not_repeated'
+    $persisted=PipeCall @{action='submit';key='second';delayMs=20}
+    Assert ($persisted.id -eq $second.id -and $persisted.state -eq 'COMPLETED') 'ipc.idempotency_survives_service_restart'
     $p=[Diagnostics.ProcessStartInfo]::new($Exe)
     $p.ArgumentList.Add('crash-write');$p.ArgumentList.Add($db);$p.UseShellExecute=$false;$p.CreateNoWindow=$true
     $writer=[Diagnostics.Process]::Start($p)

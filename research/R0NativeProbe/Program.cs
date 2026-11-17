@@ -5,6 +5,12 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Logging;
 
+if (args is ["pipe-client", var pipe, var json])
+{
+    await PipeProbe.ClientAsync(pipe, json);
+    return;
+}
+
 if (args is ["job-object"])
 {
     JobObjectProbe.Run();
@@ -47,6 +53,7 @@ builder.Logging.ClearProviders();
 builder.Services.AddWindowsService(options => options.ServiceName = "WindowsAdminMcpR0Probe");
 builder.Services.AddSingleton(new Store(path));
 builder.Services.AddHostedService<ProbeWorker>();
+builder.Services.AddHostedService(_ => new PipeProbe(path));
 await builder.Build().RunAsync();
 
 sealed class Store(string path)
