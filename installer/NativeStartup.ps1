@@ -25,9 +25,14 @@ function New-Definition([bool]$EnableLogon=$false) {
 function Get-State {
     $svc=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
     $task=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+    $definitionValid=$false
+    if($task){try{Assert-Task $task;$definitionValid=$true}catch{}}
+    $serviceValid=[bool]($svc -and $svc.PathName -ieq ('"'+$native+'" service') -and $svc.StartName -eq 'LocalSystem')
+    $logon=[bool]($task -and @($task.Triggers).Count -eq 1 -and $task.Triggers[0].Enabled)
     $tunnels=@(Get-CimInstance Win32_Process -Filter "Name='tunnel-client-runtime.exe'"|Select-Object ProcessId,SessionId,ExecutablePath)
     [pscustomobject]@{service=$(if($svc){$svc.State});service_start=$(if($svc){$svc.StartMode});
-        task=$(if($task){$task.State.ToString()});logon_enabled=$(if($task){[bool]$task.Triggers[0].Enabled});tunnel_instances=$tunnels;startup_owner='SCM + Task Scheduler'}
+        task=$(if($task){$task.State.ToString()});logon_enabled=$logon;tunnel_instances=$tunnels;startup_owner='SCM + Task Scheduler';definition_valid=$definitionValid;service_binding_valid=$serviceValid;
+        startup_ready=[bool]($definitionValid -and $serviceValid -and $svc.StartMode -eq 'Auto' -and $logon)}
 }
 function Assert-Installed {
     if(-not $ExpectedNativeSha256){throw 'EXPECTED_NATIVE_DIGEST_REQUIRED'}

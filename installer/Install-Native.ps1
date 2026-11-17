@@ -34,6 +34,13 @@ function New-Protected($path){
     Assert-Protected $path
 }
 function Read-Manifest($dir){
+    Assert-Protected $dir
+    foreach($sub in @('native','client')){
+        $path=Join-Path $dir $sub
+        Assert-NativeSwapTree $path
+        Assert-Protected $path
+        foreach($item in Get-ChildItem -LiteralPath $path -Recurse -Force){Assert-Protected $item.FullName}
+    }
     $p=Join-Path $dir 'manifest.json'
     Assert-Protected $p
     $m=Get-Content -LiteralPath $p -Raw|ConvertFrom-Json -AsHashtable
@@ -42,7 +49,7 @@ function Read-Manifest($dir){
     $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach($name in $m.files.Keys){
         if($name -cnotmatch '^(native|client)/[A-Za-z0-9_./+-]+$' -or $name.Split('/') -contains '..' -or
-            $name.Split('/') -contains '.' -or $name.Contains('//') -or -not $seen.Add($name) -or $m.files[$name] -cnotmatch '^[A-F0-9]{64}$'){throw 'MANIFEST_ENTRY_INVALID'}
+            $name.Split('/') -contains '.' -or $name.Contains('//') -or @($name.Split('/')|Where-Object {$_.EndsWith('.') -or $_ -eq ''}).Count -or -not $seen.Add($name) -or $m.files[$name] -cnotmatch '^[A-F0-9]{64}$'){throw 'MANIFEST_ENTRY_INVALID'}
         $file=Join-Path $dir $name
         Assert-Protected $file
         if((Get-FileHash -LiteralPath $file).Hash -cne $m.files[$name]){throw 'PACKAGE_FILE_HASH_INVALID'}

@@ -83,6 +83,27 @@ try{
     Check ($blocked -and (Test-Path (Join-Path $root '.rollback')) -and -not (Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel').Triggers[0].Enabled) 'r6.operator_attestation_alone_cannot_accept'
     $native=Join-Path $root 'native\WindowsAdminMCP.exe'
     $startup=Join-Path $root 'native\NativeStartup.ps1'
+    $state=& $startup -Action Status|ConvertFrom-Json
+    Check ($state.definition_valid -and $state.service_binding_valid -and -not $state.startup_ready -and -not $state.logon_enabled) 'r6.startup_readback_demand_only'
+    $doctorInfo=[Diagnostics.ProcessStartInfo]::new($native)
+    $doctorInfo.ArgumentList.Add('doctor');$doctorInfo.UseShellExecute=$false
+    $doctorInfo.RedirectStandardOutput=$true;$doctorInfo.RedirectStandardError=$true
+    function Read-Doctor {
+        $process=[Diagnostics.Process]::Start($doctorInfo)
+        try{
+            $out=$process.StandardOutput.ReadToEndAsync();$err=$process.StandardError.ReadToEndAsync()
+            if(-not $process.WaitForExit(25000)){throw 'DOCTOR_TIMEOUT'}
+            return ($out.GetAwaiter().GetResult()|ConvertFrom-Json)
+        }finally{if(-not $process.HasExited){$process.Kill($true);$process.WaitForExit()};$process.Dispose()}
+    }
+    $doctor=Read-Doctor
+    Check ($doctor.package.status -eq 'VERIFIED' -and $doctor.package.commit -eq $result.commit -and $doctor.startup.definitionValid -and -not $doctor.startup.ready) 'r6.doctor_installed_manifest_and_startup'
+    $unexpected=Join-Path $root 'native\unexpected-fixture.txt'
+    try{
+        [IO.File]::WriteAllText($unexpected,'fixture')
+        $doctor=Read-Doctor
+        Check ($doctor.package.status -eq 'FILE_SET_MISMATCH' -and $null -eq $doctor.startup) 'r6.doctor_unexpected_file_blocks_script'
+    }finally{Remove-Item -LiteralPath $unexpected -Force}
     & $startup -Action RemoveTrial -ExpectedNativeSha256 (Get-FileHash -LiteralPath $native).Hash|Out-Null
     Check (-not(Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel' -ErrorAction SilentlyContinue)) 'r6.remove_quiescent_trial'
     $rollback=& $installer -Action Rollback|ConvertFrom-Json
