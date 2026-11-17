@@ -50,3 +50,28 @@ jobs:
           if ((Get-TunnelIdFromText $oldLine) -cne $dummyId) { throw 'AUTO_ID_ROLLBACK_FAILED' }
           if ($null -ne (Get-TunnelIdFromText 'invalid without any ID')) { throw 'AUTO_ID_INVALID_ACCEPTED' }
           Write-Host "TUNNEL_ID_AUTODISCOVERY_TESTS=4/4_PASS"
+
+  r0-sdk:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build pinned native SDK probe and execute raw wire acceptance
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet --info
+          dotnet restore research/R0SdkProbe/R0SdkProbe.csproj
+          if ($LASTEXITCODE -ne 0) { throw 'RESTORE_FAILED' }
+          dotnet build research/R0SdkProbe/R0SdkProbe.csproj -c Release --no-restore
+          if ($LASTEXITCODE -ne 0) { throw 'BUILD_FAILED' }
+          ./research/R0SdkProbe/Test-Wire.ps1 -Dll research/R0SdkProbe/bin/Release/net10.0/R0SdkProbe.dll
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r0-sdk-package-lock
+          path: research/R0SdkProbe/packages.lock.json
+          if-no-files-found: warn
