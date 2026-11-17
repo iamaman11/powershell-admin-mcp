@@ -56,3 +56,12 @@ try { using var child = Process.GetProcessById(pid); gone = child.WaitForExit(50
 catch (ArgumentException) { gone = true; }
 Check(gone, "r2.job_terminated_child");
 Console.WriteLine("R2_POWERSHELL_RUNNER=PASS (actual candidate runner, direct CI; not exposed through MCP yet)");
+
+using(var bitmap=new System.Drawing.Bitmap(2400,1800))
+{
+    using(var graphics=System.Drawing.Graphics.FromImage(bitmap))graphics.Clear(System.Drawing.Color.SteelBlue);
+    var png=DesktopCapture.Encode(bitmap,1280);
+    Check(png is not null && png.Width==1280 && png.Height==960 &&
+        png.Png.AsSpan(0,8).SequenceEqual(new byte[]{137,80,78,71,13,10,26,10}),"r5.synthetic_png_dimensions_and_signature");
+}
+Check(!DesktopCapture.ValidArguments(0,0,0,10,null,1280),"r5.invalid_region_pair");

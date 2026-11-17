@@ -58,7 +58,7 @@ try{
     foreach($p in @($a,$b,$c)){
         Send $p 1 'tools/list' @{_meta=$meta}
         $list=Receive $p 1
-        Assert (@($list.tools).Count -eq 3 -and @($list.tools.name|Where-Object {$_ -in @('powershell_status','powershell_exec','powershell_job')}).Count -eq 3) 'r3.three_implemented_tools'
+        Assert (@($list.tools).Count -eq 4 -and @($list.tools.name|Where-Object {$_ -in @('powershell_status','powershell_exec','powershell_job','powershell_screenshot')}).Count -eq 4) 'r5.exactly_four_tools'
         Assert (@($list.tools|Where-Object {$_.name -eq 'powershell_status' -and $_.Contains('outputSchema')}).Count -eq 1) 'r1.typed_status_schema'
         $v=Wait-Status $p 'OK'
         Assert ($v.service_pid -eq $svc.ProcessId -and $v.execution_sid -eq 'S-1-5-18' -and $v.elevated) 'r1.scm_pid_and_real_execution_identity'
@@ -199,6 +199,14 @@ try{
     $bad=Job $b 46 @{action='submit';operation_key='r4-invalid';command='Write-Output 1';steps=$steps}
     Assert ($bad.status -eq 'INVALID_ARGUMENT') 'r4.mixed_payload_rejected'
     Write-Host 'R4_CHECKPOINT_PLAN=PASS (explicit resume after SCM restart; OS reboot proof pending)'
+    Send $b 70 'tools/call' @{name='powershell_screenshot';arguments=@{width=1};_meta=$meta}
+    # This is a tool-level error, not a JSON-RPC failure.
+    $line=$b.StandardOutput.ReadLineAsync().WaitAsync([TimeSpan]::FromSeconds(10)).GetAwaiter().GetResult()
+    $bad=$line|ConvertFrom-Json -AsHashtable
+    Assert ($bad.id -eq 70 -and $bad.result.isError -and $bad.result.structuredContent.status -eq 'INVALID_ARGUMENT') 'r5.invalid_region_typed'
+    $still=Status $c 71
+    Assert ($still.status -eq 'OK') 'r5.status_after_screenshot_error'
+    Write-Host 'R5_SCREENSHOT_CONTRACT=PASS (no physical desktop capture in CI)'
 
 }finally{
     foreach($p in $clients){

@@ -87,6 +87,12 @@ jobs:
           dotnet run --project tests/RunnerTests/RunnerTests.csproj -c Release
           if ($LASTEXITCODE -ne 0) { throw 'R2_RUNNER_FAILED' }
       - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: WindowsAdminMcp-candidate-win-x64
+          path: "${{ runner.temp }}/WindowsAdminMcpCandidate/"
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: r0-package-locks

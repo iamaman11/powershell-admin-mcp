@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using ModelContextProtocol.Server;
+using ModelContextProtocol.Protocol;
 
 [McpServerToolType]
 public sealed class AdminTools
@@ -54,6 +55,21 @@ public sealed class AdminTools
     {
         var reply=await Call(new(AdminOperation.Job,action,operation_key,job_id,command,timeout_seconds,working_directory,steps,step_index,expected_completed_steps),cancellationToken);
         return reply.Job??new(reply.Code,reply.Correlation,OperationKey:operation_key);
+    }
+
+    [McpServerTool(Name="powershell_screenshot"),
+        Description("Capture the current authorized interactive physical console desktop. Returns PNG directly; never unlocks or switches sessions. Screen may contain sensitive data.")]
+    public static async Task<CallToolResult> Screenshot(int monitor=0,int x=0,int y=0,int? width=null,int? height=null,
+        int max_width=1280,CancellationToken cancellationToken=default)
+    {
+        string correlation=Guid.NewGuid().ToString("N");
+        if(!DesktopCapture.ValidArguments(monitor,x,y,width,height,max_width))
+            return DesktopCapture.Error(CaptureCode.INVALID_ARGUMENT,correlation);
+        var status=await Status(cancellationToken);
+        if(status.Status!=StatusCode.OK)
+            return DesktopCapture.Error(CaptureCode.SERVICE_CHECK_FAILED,correlation,status.Status);
+        cancellationToken.ThrowIfCancellationRequested();
+        return DesktopCapture.Capture(monitor,x,y,width,height,max_width,correlation);
     }
 
     [McpServerTool(Name="powershell_exec",UseStructuredContent=true),
