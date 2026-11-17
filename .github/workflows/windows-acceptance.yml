@@ -75,3 +75,25 @@ jobs:
           name: r0-sdk-package-lock
           path: research/R0SdkProbe/packages.lock.json
           if-no-files-found: warn
+
+  r0-native:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Publish and exercise native Windows mechanisms
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet publish research/R0NativeProbe/R0NativeProbe.csproj -c Release -r win-x64 --self-contained true -o "${{ runner.temp }}/R0NativeProbe"
+          if ($LASTEXITCODE -ne 0) { throw 'PUBLISH_FAILED' }
+          ./research/R0NativeProbe/Test-Native.ps1 -Exe "${{ runner.temp }}/R0NativeProbe/R0NativeProbe.exe"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r0-native-package-lock
+          path: research/R0NativeProbe/packages.lock.json
+          if-no-files-found: warn
