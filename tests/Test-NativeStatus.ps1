@@ -147,7 +147,7 @@ try{
     }while($clock.Elapsed.TotalSeconds -lt 20)
     Assert ($restarted.status -eq 'OK' -and $restarted.service_pid -ne $pre) 'r4.actual_scm_auto_restart'
     $unknown=Wait-JobState $b $active.job.job_id 'NEEDS_RECONCILIATION'
-    Assert ($null -eq $unknown.execution -and $unknown.job_id -eq $active.job.job_id) 'r4.unknown_effect_not_replayed'
+    Assert ((-not $unknown.Contains('execution') -or $null -eq $unknown['execution']) -and $unknown.job_id -eq $active.job.job_id) 'r4.unknown_effect_not_replayed'
     $recovered=Wait-JobState $c $queued.job.job_id 'COMPLETED'
     Assert ($recovered.execution.stdout.Trim() -eq 'R4_OUTPUT_FIXTURE_7A98E1' -and [IO.File]::ReadAllText($marker) -ceq 'AB') 'r4.queued_runs_after_crash_effect_exactly_once_in_fixture'
     $again=Job $b 32 @{action='submit';operation_key='r4-crash-active';command=$scriptA;timeout_seconds=120}
