@@ -11,9 +11,8 @@ using ModelContextProtocol.Server;
 var builder = Host.CreateApplicationBuilder(args);
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
-builder.Services.AddMcpServer()
-    .WithStdioServerTransport()
-    .WithTools<ProbeTools>();
+var mcp = builder.Services.AddMcpServer().WithStdioServerTransport().WithTools<ProbeTools>();
+if (Environment.GetEnvironmentVariable("R0_PIPE") is not null) mcp.WithTools<SharedProbeTools>();
 await builder.Build().RunAsync();
 
 public sealed record ProbeResponse(

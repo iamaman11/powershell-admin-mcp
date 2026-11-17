@@ -11,4 +11,7 @@
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.15" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.15" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../R0Shared/PipeWire.cs" Link="PipeWire.cs" />
+  </ItemGroup>
 </Project>

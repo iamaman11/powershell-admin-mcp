@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$Exe)
+param([Parameter(Mandatory)][string]$Exe,[Parameter(Mandatory)][string]$SdkDll)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $Exe=[IO.Path]::GetFullPath($Exe)
@@ -87,6 +87,7 @@ try {
     $secondDone=PipeCall @{action='status';key='second'}
     $thirdDone=PipeCall @{action='status';key='third'}
     Assert ($firstDone.result -eq 'fixture:first' -and $secondDone.result -eq 'fixture:second' -and $thirdDone.state -eq 'CANCELLED' -and $final.result -eq 'fixture:fourth') 'ipc.reconnect_distinct_results_queue_drained'
+    & (Join-Path $PSScriptRoot 'Test-McpShared.ps1') -Dll $SdkDll -Pipe $pipeName
     Stop-Service $name
     $s=Wait-State 'STOPPED' 1
     Assert ($s.checkpoint -eq 1) 'scm.graceful_stop'

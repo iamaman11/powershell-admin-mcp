@@ -8,8 +8,6 @@ using System.Text.Json.Serialization;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Hosting;
 
-internal sealed record PipeRequest(string Action, string? Key = null, int DelayMs = 0);
-internal sealed record PipeReply(string Status, long? Id = null, string? State = null, string? Result = null);
 
 internal sealed class PipeProbe(string path) : BackgroundService
 {
@@ -18,10 +16,7 @@ internal sealed class PipeProbe(string path) : BackgroundService
     // transactions, not network reads/writes or the actual execution.
     private readonly object gate = new();
     private readonly string name = "WindowsAdminMcpR0_" + Path.GetFileName(Path.GetDirectoryName(path)!);
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
-    {
-        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
-    };
+
 
     private static PipeSecurity Security()
     {
@@ -65,7 +60,7 @@ internal sealed class PipeProbe(string path) : BackgroundService
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stop);
                 deadline.CancelAfter(TimeSpan.FromSeconds(3));
                 // Read bounded frame before impersonation, as required by Windows pipes.
-                string input = await ReadFrameAsync(pipe, deadline.Token);
+                string input = await PipeWire.ReadFrameAsync(pipe, deadline.Token);
                 bool authenticated = false;
                 pipe.RunAsClient(() =>
                 {
@@ -74,11 +69,11 @@ internal sealed class PipeProbe(string path) : BackgroundService
                         new WindowsPrincipal(id).IsInRole(WindowsBuiltInRole.Administrator));
                 });
                 var reply = authenticated
-                    ? Dispatch(JsonSerializer.Deserialize<PipeRequest>(input, Json) ?? throw new JsonException())
+                    ? Dispatch(JsonSerializer.Deserialize<PipeRequest>(input, PipeWire.Json) ?? throw new JsonException())
                     : new PipeReply("ACCESS_DENIED");
-                await WriteFrameAsync(pipe, JsonSerializer.Serialize(reply, Json), deadline.Token);
+                await PipeWire.WriteFrameAsync(pipe, JsonSerializer.Serialize(reply, PipeWire.Json), deadline.Token);
             }
-            catch (Exception e) when (e is IOException or OperationCanceledException or JsonException or UnauthorizedAccessException)
+            catch (Exception e) when (e is IOException or OperationCanceledException or JsonException or DecoderFallbackException or UnauthorizedAccessException)
             {
                 // An abandoned, malformed or slow connection does not stop the listener.
                 // Unexpected exceptions propagate and fail the service in this fixture.
@@ -196,35 +191,6 @@ internal sealed class PipeProbe(string path) : BackgroundService
         }
     }
 
-    // Explicit small length-prefixed frames; no unbounded ReadLine or new protocol server.
-    private static async Task<string> ReadFrameAsync(Stream s, CancellationToken token)
-    {
-        byte[] header = new byte[4];
-        await s.ReadExactlyAsync(header, token);
-        int length = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(header);
-        if (length is < 1 or > 4096) throw new IOException("Invalid fixture frame length");
-        byte[] body = new byte[length];
-        await s.ReadExactlyAsync(body, token);
-        return new UTF8Encoding(false, true).GetString(body);
-    }
-    private static async Task WriteFrameAsync(Stream s, string value, CancellationToken token)
-    {
-        byte[] body = Encoding.UTF8.GetBytes(value);
-        if (body.Length is < 1 or > 4096) throw new IOException("Invalid fixture frame length");
-        byte[] header = new byte[4];
-        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(header, body.Length);
-        await s.WriteAsync(header, token);
-        await s.WriteAsync(body, token);
-        await s.FlushAsync(token);
-    }
-
     public static async Task ClientAsync(string name, string payload)
-    {
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        using var pipe = new NamedPipeClientStream(".", name, PipeDirection.InOut,
-            PipeOptions.Asynchronous, TokenImpersonationLevel.Impersonation);
-        await pipe.ConnectAsync(deadline.Token);
-        await WriteFrameAsync(pipe, payload, deadline.Token);
-        Console.WriteLine(await ReadFrameAsync(pipe, deadline.Token));
-    }
+        => Console.WriteLine(await PipeWire.RoundTripAsync(name, payload, CancellationToken.None));
 }
