@@ -4,6 +4,8 @@ if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows'){throw 'CI_ON
 . (Join-Path $PSScriptRoot '../installer/NativeFileSwap.ps1')
 $installer=Join-Path $PSScriptRoot '../installer/Install-Native.ps1'
 $root=Join-Path $env:ProgramFiles 'WindowsAdminMCP'
+$data=Join-Path $env:ProgramData 'WindowsAdminMCP.Data'
+if(Test-Path -LiteralPath $data){throw 'FIXTURE_DATA_EXISTS'}
 if(Test-Path -LiteralPath $root){throw 'FIXTURE_ROOT_EXISTS'}
 if(Get-Service WindowsAdminMCP -ErrorAction SilentlyContinue){throw 'FIXTURE_SERVICE_EXISTS'}
 function Check($ok,$name){if(-not $ok){throw "FAIL $name"};Write-Host "PASS $name"}
@@ -111,9 +113,119 @@ try{
     Check (-not(Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel' -ErrorAction SilentlyContinue)) 'r6.remove_quiescent_trial'
     $rollback=& $installer -Action Rollback|ConvertFrom-Json
     Check ($rollback.status -eq 'ROLLED_BACK_OFFLINE' -and -not(Test-Path (Join-Path $root 'native')) -and -not(Test-Path (Join-Path $root 'client')) -and -not(Test-Path (Join-Path $root '.rollback'))) 'r6.explicit_clean_install_rollback'
+
+    # A separate actual installation/upgrade/rollback exercise. CI only:
+    # retire the first install journal and enable stopped startup registrations
+    # as a fixture for an accepted baseline, not as remote acceptance evidence.
+    $baseline=& $installer -Action Install -PackagePath $Package -ExpectedSha256 $Sha256|ConvertFrom-Json
+    $null=& $installer -Action Prepare -ExpectedCommit $baseline.commit
+    $task=Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel'
+    $trigger=$task.Triggers[0];$trigger.Enabled=$true
+    Set-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel' -Trigger $trigger|Out-Null
+    Set-Service WindowsAdminMCP -StartupType Automatic
+    Move-NativePath (Join-Path $root '.rollback') (Join-Path $root ('.accepted-backup-'+$baseline.commit))
+    Write-Host 'FIXTURE_ONLY accepted baseline registration; no remote acceptance'
+    $meta=@{'io.modelcontextprotocol/protocolVersion'='2026-07-28';'io.modelcontextprotocol/clientCapabilities'=@{};'io.modelcontextprotocol/clientInfo'=@{name='package-upgrade-fixture';version='1'}}
+    function With-Client([scriptblock]$Body){
+        $si=[Diagnostics.ProcessStartInfo]::new((Join-Path $root 'native\WindowsAdminMCP.exe'))
+        $si.ArgumentList.Add('stdio');$si.UseShellExecute=$false
+        $si.RedirectStandardInput=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
+        $p=[Diagnostics.Process]::Start($si)
+        $err=$p.StandardError.ReadToEndAsync()
+        try{& $Body $p}finally{$p.StandardInput.Close();if(-not $p.WaitForExit(3000)){$p.Kill($true);$p.WaitForExit()};$p.Dispose()}
+    }
+    function Call-Tool($p,$id,$name,$arguments){
+        $msg=@{jsonrpc='2.0';id=$id;method='tools/call';params=@{name=$name;arguments=$arguments;_meta=$meta}}
+        $p.StandardInput.WriteLine(($msg|ConvertTo-Json -Depth 10 -Compress));$p.StandardInput.Flush()
+        do{
+            $line=$p.StandardOutput.ReadLineAsync().WaitAsync([TimeSpan]::FromSeconds(10)).GetAwaiter().GetResult()
+            if($null -eq $line){throw 'RPC_EOF'}
+            $m=$line|ConvertFrom-Json -AsHashtable
+        }while($m.id -ne $id)
+        if($m.Contains('error') -or ($m.result.Contains('isError') -and $m.result.isError)){throw 'RPC_FAILURE'}
+        return $m.result.structuredContent
+    }
+    Start-Service WindowsAdminMCP
+    $saved=With-Client {
+        param($p)
+        $clock=[Diagnostics.Stopwatch]::StartNew()
+        do{
+            $s=Call-Tool $p 1 'powershell_status' @{}
+            if($s.status -eq 'OK'){break}
+            Start-Sleep -Milliseconds 100
+        }while($clock.Elapsed.TotalSeconds -lt 10)
+        if($s.status -ne 'OK'){throw 'SERVICE_NOT_READY'}
+        Call-Tool $p 2 'powershell_exec' @{command="Write-Output 'upgrade-preserved'";operation_key='package-upgrade-durable';timeout_seconds=10}
+    }
+    Check ($saved.status -eq 'COMPLETED' -and $saved.stdout.Trim() -ceq 'upgrade-preserved') 'r6.update_durable_job_created'
+    $blocked=$false
+    try{& $installer -Action Maintenance -ExpectedCommit $baseline.commit|Out-Null}catch{if($_.Exception.Message -eq 'SCM_MAINTENANCE_REQUIRED'){$blocked=$true}else{throw}}
+    Check $blocked 'r6.maintenance_refuses_running_service'
+    Stop-Service WindowsAdminMCP
+    $maintenance=& $installer -Action Maintenance -ExpectedCommit $baseline.commit|ConvertFrom-Json
+    Check ($maintenance.status -eq 'MAINTENANCE_READY' -and $maintenance.service_start -eq 'Manual' -and -not(Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel' -ErrorAction SilentlyContinue)) 'r6.accepted_registration_offline_maintenance'
+    $again=& $installer -Action Maintenance -ExpectedCommit $baseline.commit|ConvertFrom-Json
+    Check ($again.status -eq 'MAINTENANCE_READY') 'r6.maintenance_idempotent'
+    $replacementRoot=Join-Path $env:RUNNER_TEMP ('upgrade-'+[guid]::NewGuid().ToString('N'))
+    $replacementZip=$replacementRoot+'.zip'
+    try{
+        [IO.Compression.ZipFile]::ExtractToDirectory($Package,$replacementRoot)
+        $manifestFile=Join-Path $replacementRoot 'manifest.json'
+        $manifest=Get-Content -LiteralPath $manifestFile -Raw|ConvertFrom-Json -AsHashtable
+        $manifest.commit='1111111111111111111111111111111111111111'
+        $marker=Join-Path $replacementRoot 'native\upgrade-fixture.txt'
+        [IO.File]::WriteAllText($marker,'second package fixture')
+        $manifest.files['native/upgrade-fixture.txt']=(Get-FileHash -LiteralPath $marker).Hash
+        [IO.File]::WriteAllText($manifestFile,($manifest|ConvertTo-Json -Depth 5))
+        [IO.Compression.ZipFile]::CreateFromDirectory($replacementRoot,$replacementZip)
+        $newDigest=(Get-FileHash -LiteralPath $replacementZip).Hash
+        $updated=& $installer -Action Install -PackagePath $replacementZip -ExpectedSha256 $newDigest|ConvertFrom-Json
+        Check ($updated.status -eq 'INSTALLED_OFFLINE' -and $updated.commit -eq $manifest.commit -and (Test-Path -LiteralPath (Join-Path $root 'native\upgrade-fixture.txt'))) 'r6.actual_second_package_installed'
+        function Read-SavedJob {
+            Start-Service WindowsAdminMCP
+            try{
+                With-Client {
+                    param($p)
+                    $clock=[Diagnostics.Stopwatch]::StartNew()
+                    do{
+                        $s=Call-Tool $p 1 'powershell_status' @{}
+                        if($s.status -eq 'OK'){break}
+                        Start-Sleep -Milliseconds 100
+                    }while($clock.Elapsed.TotalSeconds -lt 10)
+                    if($s.status -ne 'OK'){throw 'SERVICE_NOT_READY'}
+                    Call-Tool $p 2 'powershell_job' @{action='logs';job_id=$saved.job_id}
+                }
+            }finally{Stop-Service WindowsAdminMCP}
+        }
+        $read=Read-SavedJob
+        Check ($read.status -eq 'OK' -and $read.job.job_id -eq $saved.job_id -and $read.job.execution.stdout.Trim() -ceq 'upgrade-preserved') 'r6.job_preserved_after_package_update'
+        # Negative metadata fixture: target claims schema 2, current SQLite
+        # is really schema 3. No old executable or DB is actually restored.
+        $priorManifest=Join-Path $root '.rollback\manifest.json'
+        $original=[IO.File]::ReadAllText($priorManifest)
+        try{
+            $prior=$original|ConvertFrom-Json -AsHashtable
+            $prior.store_schema=2
+            [IO.File]::WriteAllText($priorManifest,($prior|ConvertTo-Json -Depth 5))
+            $blocked=$false
+            try{& $installer -Action Rollback|Out-Null}catch{if($_.Exception.Message -eq 'STORE_SCHEMA_DOWNGRADE_FORBIDDEN'){$blocked=$true}else{throw}}
+            Check ($blocked -and (Test-Path (Join-Path $root '.rollback')) -and (Test-Path (Join-Path $root 'native\upgrade-fixture.txt'))) 'r6.actual_installer_blocks_schema_downgrade'
+        }finally{[IO.File]::WriteAllText($priorManifest,$original)}
+        $restored=& $installer -Action Rollback|ConvertFrom-Json
+        Check ($restored.status -eq 'ROLLED_BACK_OFFLINE' -and -not(Test-Path (Join-Path $root 'native\upgrade-fixture.txt'))) 'r6.actual_compatible_package_rollback'
+        $read=Read-SavedJob
+        Check ($read.status -eq 'OK' -and $read.job.job_id -eq $saved.job_id -and $read.job.execution.stdout.Trim() -ceq 'upgrade-preserved') 'r6.job_preserved_after_rollback'
+        $prepared=& $installer -Action Prepare -ExpectedCommit $baseline.commit|ConvertFrom-Json
+        Check ($prepared.status -eq 'TRIAL_PREPARED' -and -not $prepared.logon_enabled -and -not $prepared.rollback_retained) 'r6.restored_baseline_reprepare'
+    }finally{
+        if(Test-Path -LiteralPath $replacementZip){Remove-Item -LiteralPath $replacementZip -Force}
+        if(Test-Path -LiteralPath $replacementRoot){Remove-Item -LiteralPath $replacementRoot -Recurse -Force}
+    }
+
 }finally{
     $task=Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel' -ErrorAction SilentlyContinue
     if($task -and $task.State.ToString() -ne 'Running'){Unregister-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel' -Confirm:$false}
-    if(Get-Service WindowsAdminMCP -ErrorAction SilentlyContinue){& sc.exe delete WindowsAdminMCP|Out-Host}
+    if(Get-Service WindowsAdminMCP -ErrorAction SilentlyContinue){Stop-Service WindowsAdminMCP -ErrorAction SilentlyContinue;& sc.exe delete WindowsAdminMCP|Out-Host}
     if(Test-Path -LiteralPath $root){Remove-Item -LiteralPath $root -Recurse -Force}
+    if(Test-Path -LiteralPath $data){Remove-Item -LiteralPath $data -Recurse -Force}
 }

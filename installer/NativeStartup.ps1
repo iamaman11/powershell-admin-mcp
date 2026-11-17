@@ -1,7 +1,7 @@
 # One native service and one interactive logon task; no second tunnel or network owner.
 # Prepare one demand-start task for explicit trials; enable logon only after acceptance.
 [CmdletBinding()]
-param([ValidateSet('Plan','Prepare','Accept','RemoveTrial','Status','Start','Stop')][string]$Action='Plan',
+param([ValidateSet('Plan','Prepare','Accept','RemoveTrial','Status','Start','Stop','Maintenance')][string]$Action='Plan',
       [ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedNativeSha256,
       [switch]$RemoteAcceptanceConfirmed)
 $ErrorActionPreference='Stop'
@@ -158,6 +158,34 @@ switch($Action){
             throw
         }
         [pscustomobject]@{status='AUTOSTART_ACCEPTED';pid=$receipt.pid;generation=$receipt.generation;accepted_responses=$receipt.accepted_responses}|ConvertTo-Json -Compress
+    }
+    'Maintenance'{
+        # Explicit offline transition only. The operator must first finish jobs
+        # and stop the service and transport using an independent local console.
+        $svc=Assert-Installed
+        if($svc.State -ne 'Stopped' -or $svc.ProcessId -ne 0){throw 'SCM_MAINTENANCE_REQUIRED'}
+        if(@(Get-Process -Name 'tunnel-client-runtime' -ErrorAction SilentlyContinue).Count){throw 'ACTIVE_TUNNEL_MAINTENANCE_REQUIRED'}
+        if(@(Get-ScheduledTask|Where-Object {$_.TaskName -like 'WindowsAdminMCP-R6-*' -and $_.State.ToString() -eq 'Running'}).Count){throw 'ACTIVE_TRIAL_TASK'}
+        $task=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        if($task){
+            Assert-Task $task
+            if($task.State.ToString() -notin @('Ready','Disabled')){throw 'TASK_MAINTENANCE_REQUIRED'}
+        }
+        # Disable automatic launches before touching files. A partial transition
+        # leaves the installation offline, never automatically activates it.
+        Set-Service -Name $svcName -StartupType Manual
+        if($task){
+            Disable-ScheduledTask -TaskName $name|Out-Null
+            $disabled=Get-ScheduledTask -TaskName $name
+            Assert-Task $disabled
+            if($disabled.State.ToString() -ne 'Disabled'){throw 'TASK_DISABLE_READBACK_FAILED'}
+        }
+        $svc=Assert-Installed
+        if($svc.State -ne 'Stopped' -or $svc.ProcessId -ne 0 -or $svc.StartMode -ne 'Manual' -or
+            @(Get-Process -Name 'tunnel-client-runtime' -ErrorAction SilentlyContinue).Count){throw 'MAINTENANCE_READBACK_FAILED'}
+        if($task){Unregister-ScheduledTask -TaskName $name -Confirm:$false}
+        if(Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue){throw 'TASK_REMOVAL_READBACK_FAILED'}
+        Get-State|ConvertTo-Json -Depth 4 -Compress
     }
     'RemoveTrial'{
         $task=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue

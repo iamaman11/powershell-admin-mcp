@@ -1,7 +1,7 @@
 # Native offline install. No credential access, network calls, live shutdown,
 # TUN changes, or logon task activation. Existing active installs fail closed.
 [CmdletBinding()]
-param([ValidateSet('Verify','Install','Rollback','Prepare','Accept')][string]$Action='Verify',
+param([ValidateSet('Verify','Install','Rollback','Prepare','Accept','Maintenance')][string]$Action='Verify',
       [string]$PackagePath,
       [ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedSha256,
       [ValidatePattern('^[a-f0-9]{40}$')][string]$ExpectedCommit,
@@ -83,7 +83,7 @@ function Assert-Quiescent {
     $service=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
     $exe=Join-Path $root 'native\WindowsAdminMCP.exe'
     $binding='"'+$exe+'" service'
-    if($service -and ($service.State -ne 'Stopped' -or $service.PathName -ine $binding -or $service.StartName -ne 'LocalSystem')){throw 'SCM_MAINTENANCE_REQUIRED'}
+    if($service -and ($service.State -ne 'Stopped' -or $service.PathName -ine $binding -or $service.StartName -ne 'LocalSystem' -or $service.StartMode -ne 'Manual')){throw 'SCM_MAINTENANCE_REQUIRED'}
     if(-not(Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'))){throw 'MACHINE_POWERSHELL_REQUIRED'}
 
 
@@ -131,7 +131,7 @@ function Restore-ServiceRegistration($journal){
         if($LASTEXITCODE -ne 0){throw 'SCM_ROLLBACK_FAILED'}
     }
 }
-if($Action -in @('Prepare','Accept')){
+if($Action -in @('Prepare','Accept','Maintenance')){
     if(-not $ExpectedCommit){throw 'EXPECTED_COMMIT_REQUIRED'}
     if($Action -eq 'Accept' -and -not $RemoteAcceptanceConfirmed){throw 'REMOTE_ACCEPTANCE_REQUIRED'}
     Assert-Protected $root
@@ -139,24 +139,38 @@ if($Action -in @('Prepare','Accept')){
     try{
         $m=Read-Manifest $root
         if($m.commit -cne $ExpectedCommit){throw 'INSTALLED_COMMIT_MISMATCH'}
-        $backup=Join-Path $root '.rollback'
-        if(-not(Test-Path -LiteralPath $backup -PathType Container)){throw 'PENDING_INSTALL_REQUIRED'}
-        Assert-Protected $backup
-        Assert-NativeSwapTree $backup
-        $null=Get-NativeSwapJournal $root
         $startup=Join-Path $root 'native\NativeStartup.ps1'
-        if($Action -eq 'Prepare'){
-            $result=& $startup -Action Prepare -ExpectedNativeSha256 $m.files['native/WindowsAdminMCP.exe']|ConvertFrom-Json
-            [pscustomobject]@{status='TRIAL_PREPARED';commit=$m.commit;logon_enabled=$result.logon_enabled;service_start=$result.service_start;rollback_retained=$true}|ConvertTo-Json -Compress
+        $backup=Join-Path $root '.rollback'
+        $previous=Join-Path $root ('.accepted-backup-'+$m.commit)
+        $pending=Test-Path -LiteralPath $backup -PathType Container
+        if($Action -eq 'Maintenance'){
+            $result=& $startup -Action Maintenance -ExpectedNativeSha256 $m.files['native/WindowsAdminMCP.exe']|ConvertFrom-Json
+            $null=Assert-Quiescent
+            [pscustomobject]@{status='MAINTENANCE_READY';commit=$m.commit;service_start=$result.service_start;autostart=$false;rollback_retained=$pending}|ConvertTo-Json -Compress
             return
         }
-        $previous=Join-Path $root ('.accepted-backup-'+$m.commit)
-        if(Test-Path -LiteralPath $previous){throw 'ACCEPTANCE_BACKUP_EXISTS'}
+        if($pending){
+            Assert-Protected $backup
+            Assert-NativeSwapTree $backup
+            $null=Get-NativeSwapJournal $root
+        }else{
+            # Previously accepted package may be prepared again after offline
+            # maintenance or rollback. Historical acceptance is not live proof.
+            if(-not(Test-Path -LiteralPath $previous -PathType Container)){throw 'PENDING_INSTALL_REQUIRED'}
+            Assert-Protected $previous
+            Assert-NativeSwapTree $previous
+        }
+        if($Action -eq 'Prepare'){
+            $result=& $startup -Action Prepare -ExpectedNativeSha256 $m.files['native/WindowsAdminMCP.exe']|ConvertFrom-Json
+            [pscustomobject]@{status='TRIAL_PREPARED';commit=$m.commit;logon_enabled=$result.logon_enabled;service_start=$result.service_start;rollback_retained=$pending}|ConvertTo-Json -Compress
+            return
+        }
+        if($pending -and (Test-Path -LiteralPath $previous)){throw 'ACCEPTANCE_BACKUP_EXISTS'}
         $result=& $startup -Action Accept -ExpectedNativeSha256 $m.files['native/WindowsAdminMCP.exe'] -RemoteAcceptanceConfirmed|ConvertFrom-Json
         if($result.status -ne 'AUTOSTART_ACCEPTED'){throw 'STARTUP_ACCEPTANCE_MISSING'}
         # Previous files are retained, but no longer represent an unfinished transaction.
         # The same-volume rename is the final local commit point.
-        Move-NativePath $backup $previous
+        if($pending){Move-NativePath $backup $previous}
         [pscustomobject]@{status='ACCEPTED';commit=$m.commit;autostart=$true;previous_files_retained=$true;vendor_pid=$result.pid;generation=$result.generation;accepted_responses=$result.accepted_responses}|ConvertTo-Json -Compress
     }finally{$lock.Dispose()}
     return
