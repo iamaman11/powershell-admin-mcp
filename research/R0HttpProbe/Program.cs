@@ -120,10 +120,10 @@ try
     {
         var call = await Request(item.Item1, "tools/call", new { requestedOwner = "fixture-alpha" }, "fixture-alpha");
         var result = call.Body.GetProperty("result").GetProperty("structuredContent");
-        return (item.Item2, Subject: result.GetProperty("subject").GetString(), Own: result.GetProperty("isOwner").GetBoolean(), call.Session);
+        return (Expected: item.Item2, Subject: result.GetProperty("subject").GetString(), Own: result.GetProperty("isOwner").GetBoolean(), call.Session);
     }));
-    Check(results.All(x => x.Item2 == x.Subject && !x.Session), "http.concurrent_verified_subjects");
-    Check(results.All(x => x.Own == (x.Item2 == "fixture-alpha")), "http.owner_scope_and_forged_header_ignored");
+    Check(results.All(x => x.Expected == x.Subject && !x.Session), "http.concurrent_verified_subjects");
+    Check(results.All(x => x.Own == (x.Expected == "fixture-alpha")), "http.owner_scope_and_forged_header_ignored");
     Console.WriteLine("R0_HTTP_IDENTITY=PASS (synthetic signed JWTs; no external IdP or tunnel)");
 }
 finally { await app.StopAsync(); }
@@ -139,4 +139,6 @@ public sealed class IdentityProbeTools
         return new IdentityResult(subject, StringComparer.Ordinal.Equals(subject, requestedOwner));
     }
 }
-public sealed record IdentityResult(string Subject, bool IsOwner);
+public sealed record IdentityResult(
+    [property: System.Text.Json.Serialization.JsonPropertyName("subject")] string Subject,
+    [property: System.Text.Json.Serialization.JsonPropertyName("isOwner")] bool IsOwner);
