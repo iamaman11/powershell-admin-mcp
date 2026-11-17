@@ -19,7 +19,7 @@ function Invoke-GuardedTrial {
         }
     }catch{
         # Do not serialize exception messages, which may contain credentials.
-        $failure='TRIAL_FAILED'
+        $failure=if($_.Exception.Message -ceq 'CONTROL_PLANE_ACCESS_DENIED'){'CONTROL_PLANE_ACCESS_DENIED'}else{'TRIAL_FAILED'}
     }finally{
         if(-not $committed){& $Rollback $failure}
     }

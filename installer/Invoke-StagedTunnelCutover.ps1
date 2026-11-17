@@ -69,6 +69,11 @@ function Save-HealthEvidence([string]$phase,[int]$expected){
         $tmp=$path+'.tmp'
         [IO.File]::WriteAllText($tmp,($evidence|ConvertTo-Json -Depth 32 -Compress),[Text.UTF8Encoding]::new($false))
         [IO.File]::Move($tmp,$path,$true)
+        if($snapshot.components.Contains('control-plane')){
+            $control=$snapshot.components['control-plane']
+            if($control.details -is [System.Collections.IDictionary] -and $control.details.Contains('http_status') -and $control.details.Contains('consecutive_failures') -and
+                $control.details.http_status -in @(401,403) -and $control.details.consecutive_failures -gt 0){$script:controlPlaneDenied=$true}
+        }
     }catch{
         # Diagnostic failure cannot prevent rollback.
     }
@@ -122,6 +127,7 @@ if($Mode -eq 'Preflight'){
 $script:new=$null
 $script:fallback=$null
 $script:lastSnapshot=[DateTimeOffset]::MinValue
+$script:controlPlaneDenied=$false
 function Start-Vendor([string]$exe,[string]$binding){
     $info=[Diagnostics.ProcessStartInfo]::new($exe)
     $info.UseShellExecute=$false
@@ -148,12 +154,14 @@ try{
         $script:new=Start-Vendor $TunnelExe $newBinding
         if(-not(Wait-Ready $script:new 45)){throw 'CANDIDATE_NOT_READY'}
         Save-HealthEvidence 'initial' $script:new.Id
+        if($script:controlPlaneDenied){throw 'CONTROL_PLANE_ACCESS_DENIED'}
         $script:lastSnapshot=[DateTimeOffset]::UtcNow
         Write-State 'AWAITING_REMOTE_CONFIRMATION' $script:new.Id
     } -CheckCommit {
         if($script:new.HasExited){throw 'CANDIDATE_EXITED'}
         if(([DateTimeOffset]::UtcNow-$script:lastSnapshot).TotalSeconds -ge 10){
             Save-HealthEvidence 'latest' $script:new.Id
+            if($script:controlPlaneDenied){throw 'CONTROL_PLANE_ACCESS_DENIED'}
             $script:lastSnapshot=[DateTimeOffset]::UtcNow
         }
         if(-not(Test-Path -LiteralPath $commitFile -PathType Leaf)){return $false}

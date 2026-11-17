@@ -44,6 +44,13 @@ try {
     } -TimeoutSeconds 2
     Check (-not $result -and $script:rollback -and $script:reason -eq 'TRIAL_FAILED' -and $null -eq $script:child) 'rollback.exception_stops_candidate'
     $script:rollback=$false
+    $result=Invoke-GuardedTrial -StartCandidate {Start-Fixture;throw 'CONTROL_PLANE_ACCESS_DENIED'} -CheckCommit {$false} -Rollback {
+        param($why)
+        Remove-Fixture
+        $script:rollback=$true;$script:reason=$why
+    } -TimeoutSeconds 2
+    Check (-not $result -and $script:rollback -and $script:reason -eq 'CONTROL_PLANE_ACCESS_DENIED' -and $null -eq $script:child) 'rollback.access_denied_is_terminal'
+    $script:rollback=$false
     $result=Invoke-GuardedTrial -StartCandidate {Start-Fixture} -CheckCommit {$true} -Rollback {$script:rollback=$true;Remove-Fixture} -TimeoutSeconds 2
     Check ($result -and -not $script:rollback -and -not $script:child.HasExited) 'rollback.explicit_commit_keeps_candidate'
     Remove-Fixture
