@@ -24,6 +24,25 @@ else if (args is ["tunnel"])
 {
     Environment.ExitCode = await TunnelHost.RunAsync();
 }
+else if (args is ["maintenance", "store-schema"])
+{
+    var schema=StoreSchema.ObserveOffline();
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(schema,PipeWire.Json));
+    Environment.ExitCode=schema.Status==StoreSchemaCode.READBACK_FAILED?1:0;
+}
+else if (args is ["doctor"])
+{
+    var report=await Doctor.ObserveAsync();
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(report,PipeWire.Json));
+    Environment.ExitCode=report.Status==DoctorState.OK?0:1;
+}
+else if (args is ["doctor", "boot"])
+{
+    // The first read-only component of the unified native doctor.
+    var boot = BootEvidence.Observe();
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(boot, PipeWire.Json));
+    Environment.ExitCode = boot.Status == BootEvidenceCode.FULL_BOOT_OBSERVED ? 0 : 1;
+}
 else if (args is ["stdio"])
 {
     // The SDK frontend is not a runtime credential owner.
@@ -40,6 +59,6 @@ else if (args is ["stdio"])
 }
 else
 {
-    Console.Error.WriteLine("Usage: WindowsAdminMCP.exe service|stdio|tunnel");
+    Console.Error.WriteLine("Usage: WindowsAdminMCP.exe service|stdio|tunnel|doctor [boot]|maintenance store-schema");
     Environment.ExitCode = 2;
 }

@@ -1,7 +1,7 @@
 using System.Text.Json.Serialization;
 
 [JsonConverter(typeof(JsonStringEnumConverter<AdminOperation>))]
-internal enum AdminOperation { Status, Job }
+internal enum AdminOperation { Status, Job, Diagnostics }
 
 [JsonConverter(typeof(JsonStringEnumConverter<StatusCode>))]
 public enum StatusCode

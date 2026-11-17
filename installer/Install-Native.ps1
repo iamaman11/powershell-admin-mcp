@@ -1,7 +1,7 @@
 # Native offline install. No credential access, network calls, live shutdown,
 # TUN changes, or logon task activation. Existing active installs fail closed.
 [CmdletBinding()]
-param([ValidateSet('Verify','Install','Rollback','Prepare','Accept')][string]$Action='Verify',
+param([ValidateSet('Verify','Install','Rollback','Prepare','Accept','Maintenance')][string]$Action='Verify',
       [string]$PackagePath,
       [ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedSha256,
       [ValidatePattern('^[a-f0-9]{40}$')][string]$ExpectedCommit,
@@ -34,15 +34,23 @@ function New-Protected($path){
     Assert-Protected $path
 }
 function Read-Manifest($dir){
+    Assert-Protected $dir
+    foreach($sub in @('native','client')){
+        $path=Join-Path $dir $sub
+        Assert-NativeSwapTree $path
+        Assert-Protected $path
+        foreach($item in Get-ChildItem -LiteralPath $path -Recurse -Force){Assert-Protected $item.FullName}
+    }
     $p=Join-Path $dir 'manifest.json'
     Assert-Protected $p
     $m=Get-Content -LiteralPath $p -Raw|ConvertFrom-Json -AsHashtable
     if($m.schema -ne 1 -or $m.vendor_version -ne '0.0.21' -or $m.commit -cnotmatch '^[a-f0-9]{40}$' -or $m.files -isnot [Collections.IDictionary]){throw 'MANIFEST_INVALID'}
+    if($m.Contains('store_schema') -and $m.store_schema -notin @(2,3)){throw 'MANIFEST_STORE_SCHEMA_INVALID'}
     if($m.files.Count -lt 3 -or $m.files.Count -gt 2000){throw 'MANIFEST_SIZE_INVALID'}
     $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach($name in $m.files.Keys){
         if($name -cnotmatch '^(native|client)/[A-Za-z0-9_./+-]+$' -or $name.Split('/') -contains '..' -or
-            $name.Split('/') -contains '.' -or $name.Contains('//') -or -not $seen.Add($name) -or $m.files[$name] -cnotmatch '^[A-F0-9]{64}$'){throw 'MANIFEST_ENTRY_INVALID'}
+            $name.Split('/') -contains '.' -or $name.Contains('//') -or @($name.Split('/')|Where-Object {$_.EndsWith('.') -or $_ -eq ''}).Count -or -not $seen.Add($name) -or $m.files[$name] -cnotmatch '^[A-F0-9]{64}$'){throw 'MANIFEST_ENTRY_INVALID'}
         $file=Join-Path $dir $name
         Assert-Protected $file
         if((Get-FileHash -LiteralPath $file).Hash -cne $m.files[$name]){throw 'PACKAGE_FILE_HASH_INVALID'}
@@ -75,11 +83,33 @@ function Assert-Quiescent {
     $service=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
     $exe=Join-Path $root 'native\WindowsAdminMCP.exe'
     $binding='"'+$exe+'" service'
-    if($service -and ($service.State -ne 'Stopped' -or $service.PathName -ine $binding -or $service.StartName -ne 'LocalSystem')){throw 'SCM_MAINTENANCE_REQUIRED'}
+    if($service -and ($service.State -ne 'Stopped' -or $service.PathName -ine $binding -or $service.StartName -ne 'LocalSystem' -or $service.StartMode -ne 'Manual')){throw 'SCM_MAINTENANCE_REQUIRED'}
     if(-not(Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'))){throw 'MACHINE_POWERSHELL_REQUIRED'}
 
 
     return $service
+}
+function Assert-StoreCompatible($reader,$target){
+    # The fixed offline reader belongs to an already verified package. Never
+    # restore an old database or use a file header while a WAL may be present.
+    $si=[Diagnostics.ProcessStartInfo]::new($reader)
+    $si.UseShellExecute=$false;$si.CreateNoWindow=$true
+    $si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
+    $si.ArgumentList.Add('maintenance');$si.ArgumentList.Add('store-schema')
+    $null=$si.Environment.Remove('CONTROL_PLANE_API_KEY')
+    $null=$si.Environment.Remove('OPENAI_API_KEY')
+    $p=[Diagnostics.Process]::Start($si)
+    try{
+        $out=$p.StandardOutput.ReadToEndAsync();$err=$p.StandardError.ReadToEndAsync()
+        if(-not $p.WaitForExit(10000)){throw 'STORE_SCHEMA_READBACK_TIMEOUT'}
+        if($p.ExitCode -ne 0){throw 'STORE_SCHEMA_READBACK_FAILED'}
+        $receipt=$out.GetAwaiter().GetResult()|ConvertFrom-Json -AsHashtable
+        if($receipt.status -eq 'ABSENT'){return}
+        if($receipt.status -ne 'OBSERVED' -or $receipt.version -isnot [long] -and $receipt.version -isnot [int]){throw 'STORE_SCHEMA_READBACK_FAILED'}
+        if($null -eq $target){throw 'ROLLBACK_TARGET_SCHEMA_UNPROVEN'}
+        if($target -lt $receipt.version){throw 'STORE_SCHEMA_DOWNGRADE_FORBIDDEN'}
+        if($receipt.version -lt 2){throw 'STORE_SCHEMA_UNSUPPORTED'}
+    }finally{if(-not $p.HasExited){$p.Kill($true);$p.WaitForExit()};$p.Dispose()}
 }
 function Enter-Maintenance {
     $path=Join-Path $root '.install.lock'
@@ -101,7 +131,7 @@ function Restore-ServiceRegistration($journal){
         if($LASTEXITCODE -ne 0){throw 'SCM_ROLLBACK_FAILED'}
     }
 }
-if($Action -in @('Prepare','Accept')){
+if($Action -in @('Prepare','Accept','Maintenance')){
     if(-not $ExpectedCommit){throw 'EXPECTED_COMMIT_REQUIRED'}
     if($Action -eq 'Accept' -and -not $RemoteAcceptanceConfirmed){throw 'REMOTE_ACCEPTANCE_REQUIRED'}
     Assert-Protected $root
@@ -109,24 +139,38 @@ if($Action -in @('Prepare','Accept')){
     try{
         $m=Read-Manifest $root
         if($m.commit -cne $ExpectedCommit){throw 'INSTALLED_COMMIT_MISMATCH'}
-        $backup=Join-Path $root '.rollback'
-        if(-not(Test-Path -LiteralPath $backup -PathType Container)){throw 'PENDING_INSTALL_REQUIRED'}
-        Assert-Protected $backup
-        Assert-NativeSwapTree $backup
-        $null=Get-NativeSwapJournal $root
         $startup=Join-Path $root 'native\NativeStartup.ps1'
-        if($Action -eq 'Prepare'){
-            $result=& $startup -Action Prepare -ExpectedNativeSha256 $m.files['native/WindowsAdminMCP.exe']|ConvertFrom-Json
-            [pscustomobject]@{status='TRIAL_PREPARED';commit=$m.commit;logon_enabled=$result.logon_enabled;service_start=$result.service_start;rollback_retained=$true}|ConvertTo-Json -Compress
+        $backup=Join-Path $root '.rollback'
+        $previous=Join-Path $root ('.accepted-backup-'+$m.commit)
+        $pending=Test-Path -LiteralPath $backup -PathType Container
+        if($Action -eq 'Maintenance'){
+            $result=& $startup -Action Maintenance -ExpectedNativeSha256 $m.files['native/WindowsAdminMCP.exe']|ConvertFrom-Json
+            $null=Assert-Quiescent
+            [pscustomobject]@{status='MAINTENANCE_READY';commit=$m.commit;service_start=$result.service_start;autostart=$false;rollback_retained=$pending}|ConvertTo-Json -Compress
             return
         }
-        $previous=Join-Path $root ('.accepted-backup-'+$m.commit)
-        if(Test-Path -LiteralPath $previous){throw 'ACCEPTANCE_BACKUP_EXISTS'}
+        if($pending){
+            Assert-Protected $backup
+            Assert-NativeSwapTree $backup
+            $null=Get-NativeSwapJournal $root
+        }else{
+            # Previously accepted package may be prepared again after offline
+            # maintenance or rollback. Historical acceptance is not live proof.
+            if(-not(Test-Path -LiteralPath $previous -PathType Container)){throw 'PENDING_INSTALL_REQUIRED'}
+            Assert-Protected $previous
+            Assert-NativeSwapTree $previous
+        }
+        if($Action -eq 'Prepare'){
+            $result=& $startup -Action Prepare -ExpectedNativeSha256 $m.files['native/WindowsAdminMCP.exe']|ConvertFrom-Json
+            [pscustomobject]@{status='TRIAL_PREPARED';commit=$m.commit;logon_enabled=$result.logon_enabled;service_start=$result.service_start;rollback_retained=$pending}|ConvertTo-Json -Compress
+            return
+        }
+        if($pending -and (Test-Path -LiteralPath $previous)){throw 'ACCEPTANCE_BACKUP_EXISTS'}
         $result=& $startup -Action Accept -ExpectedNativeSha256 $m.files['native/WindowsAdminMCP.exe'] -RemoteAcceptanceConfirmed|ConvertFrom-Json
         if($result.status -ne 'AUTOSTART_ACCEPTED'){throw 'STARTUP_ACCEPTANCE_MISSING'}
         # Previous files are retained, but no longer represent an unfinished transaction.
         # The same-volume rename is the final local commit point.
-        Move-NativePath $backup $previous
+        if($pending){Move-NativePath $backup $previous}
         [pscustomobject]@{status='ACCEPTED';commit=$m.commit;autostart=$true;previous_files_retained=$true;vendor_pid=$result.pid;generation=$result.generation;accepted_responses=$result.accepted_responses}|ConvertTo-Json -Compress
     }finally{$lock.Dispose()}
     return
@@ -145,6 +189,20 @@ if($Action -eq 'Rollback'){
         foreach($name in @('native','client','manifest.json')){
             $existing=Join-Path $root $name
             if(Test-Path -LiteralPath $existing){Assert-Protected $existing}
+        }
+        # No DB at all is the only case where legacy/absent previous manifests
+        # can be restored without a compatibility decision.
+        $dbRoot=Join-Path $env:ProgramData 'WindowsAdminMCP.Data'
+        if(Test-Path -LiteralPath $dbRoot){
+            Assert-Protected $dbRoot
+            $current=Read-Manifest $root
+            if(-not $current.Contains('store_schema') -or $current.store_schema -ne 3){throw 'ROLLBACK_READER_UNPROVEN'}
+            $targetSchema=$null
+            if(Test-Path -LiteralPath (Join-Path $backup 'manifest.json')){
+                $old=Read-Manifest $backup
+                $targetSchema=if($old.Contains('store_schema')){[int]$old.store_schema}else{2}
+            }
+            Assert-StoreCompatible $exe $targetSchema
         }
         Restore-NativeFileSwap -Root $root -BeforeRestore {param($j) Restore-ServiceRegistration $j}
         [pscustomobject]@{status='ROLLED_BACK_OFFLINE';autostart=$false;remote_accepted=$false}|ConvertTo-Json -Compress
@@ -209,6 +267,8 @@ try{
         }
     }
     if(Test-Path -LiteralPath (Join-Path $root '.rollback')){throw 'UNACCEPTED_PREVIOUS_INSTALLATION'}
+    if(-not $m.Contains('store_schema') -or $m.store_schema -ne 3){throw 'PACKAGE_STORE_SCHEMA_REQUIRED'}
+    Assert-StoreCompatible (Join-Path $incoming 'native\WindowsAdminMCP.exe') ([int]$m.store_schema)
     $swapAttempted=$true
     Invoke-NativeFileSwap -Root $root -Incoming $incoming -ServiceExisted ([bool]$service) -BeforeRestore {param($j) Restore-ServiceRegistration $j} -Validate {
         $null=Read-Manifest $root

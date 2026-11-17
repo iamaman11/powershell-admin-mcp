@@ -5,6 +5,7 @@ using System.Net.NetworkInformation;
 // Local startup prerequisite, not proof of Internet reachability or service authorization.
 // INTERNET and Windows remain the owners of networking. No CLI subprocess, route changes,
 // driver changes, external requests, config parsing or new persistent watchdog.
+[System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter<TunReadiness>))]
 internal enum TunReadiness
 {
     READY, ADAPTER_MISSING, ADAPTER_AMBIGUOUS, ADAPTER_DOWN,

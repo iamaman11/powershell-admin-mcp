@@ -199,6 +199,36 @@ try{
     $bad=Job $b 46 @{action='submit';operation_key='r4-invalid';command='Write-Output 1';steps=$steps}
     Assert ($bad.status -eq 'INVALID_ARGUMENT') 'r4.mixed_payload_rejected'
     Write-Host 'R4_CHECKPOINT_PLAN=PASS (explicit resume after SCM restart; OS reboot proof pending)'
+
+    # External reboot boundary: no physical reboot in CI. A real SCM restart
+    # must not release it; completed effects and outputs remain durable.
+    $bootMarker=Join-Path $data 'boot-marker.txt'
+    $bootPath=$bootMarker.Replace("'","''")
+    $bootSteps=@(
+        @{command="[IO.File]::AppendAllText('$bootPath','A'); Write-Output 'boot-step-A'";timeout_seconds=10;reboot_after=$true},
+        @{command="if([IO.File]::ReadAllText('$bootPath') -cne 'A'){throw 'POSTCONDITION_FAILED'}; Write-Output 'verified'";timeout_seconds=10;verify_after_reboot=$true},
+        @{command="[IO.File]::AppendAllText('$bootPath','B'); Write-Output 'boot-step-B'";timeout_seconds=10}
+    )
+    $missingCheck=@(@{command='Write-Output 1';reboot_after=$true},@{command='Write-Output 2'})
+    $invalidBoot=Job $b 81 @{action='submit';operation_key='r4-boot-invalid';steps=$missingCheck}
+    Assert ($invalidBoot.status -eq 'INVALID_ARGUMENT') 'r4.reboot_requires_declared_postcondition'
+    $boot=Job $b 82 @{action='submit';operation_key='r4-boot-boundary';steps=$bootSteps}
+    Assert ($boot.status -eq 'OK') 'r4.reboot_plan_admitted'
+    $waiting=Wait-JobState $b $boot.job.job_id 'WAITING_FOR_REBOOT'
+    Assert ($waiting.completed_steps -eq 1 -and $waiting.execution.stdout.Trim() -ceq 'boot-step-A' -and [IO.File]::ReadAllText($bootMarker) -ceq 'A') 'r4.reboot_checkpoint_committed'
+    $deny=Job $c 83 @{action='resume';job_id=$boot.job.job_id;expected_completed_steps=1}
+    Assert ($deny.status -eq 'NOT_RESUMABLE') 'r4.manual_resume_cannot_bypass_reboot'
+    Stop-Service $name
+    Start-Service $name
+    $null=Wait-Status $b 'OK'
+    $waiting=Wait-JobState $c $boot.job.job_id 'WAITING_FOR_REBOOT'
+    Assert ($waiting.completed_steps -eq 1 -and $waiting.reboot_evidence -eq 'SAME_BOOT' -and [IO.File]::ReadAllText($bootMarker) -ceq 'A') 'r4.scm_restart_does_not_release_reboot'
+    $same=Job $b 84 @{action='submit';operation_key='r4-boot-boundary';steps=$bootSteps}
+    Assert ($same.job.job_id -eq $boot.job.job_id -and $same.job.state -eq 'WAITING_FOR_REBOOT') 'r4.reboot_checkpoint_idempotent'
+    $cancelBoot=Job $c 85 @{action='cancel';job_id=$boot.job.job_id}
+    Assert ($cancelBoot.status -eq 'OK' -and $cancelBoot.job.state -eq 'CANCELLED' -and [IO.File]::ReadAllText($bootMarker) -ceq 'A') 'r4.cancel_waiting_reboot'
+    Write-Host 'R4_DURABLE_REBOOT_BOUNDARY=PASS (same kernel session; positive actual reboot still NOT_TESTED)'
+
     Send $b 70 'tools/call' @{name='powershell_screenshot';arguments=@{width=1};_meta=$meta}
     # This is a tool-level error, not a JSON-RPC failure.
     $line=$b.StandardOutput.ReadLineAsync().WaitAsync([TimeSpan]::FromSeconds(10)).GetAwaiter().GetResult()
@@ -207,6 +237,32 @@ try{
     $still=Status $c 71
     Assert ($still.status -eq 'OK') 'r5.status_after_screenshot_error'
     Write-Host 'R5_SCREENSHOT_CONTRACT=PASS (no physical desktop capture in CI)'
+
+    # Native CLI diagnostics use the same service and complete store counts.
+    $doctorStart=[Diagnostics.ProcessStartInfo]::new($Exe)
+    $doctorStart.ArgumentList.Add('doctor')
+    $doctorStart.UseShellExecute=$false
+    $doctorStart.RedirectStandardOutput=$true
+    $doctorStart.RedirectStandardError=$true
+    $doctorProc=[Diagnostics.Process]::Start($doctorStart)
+    try{
+        $out=$doctorProc.StandardOutput.ReadToEndAsync()
+        $err=$doctorProc.StandardError.ReadToEndAsync()
+        if(-not $doctorProc.WaitForExit(15000)){throw 'DOCTOR_TIMEOUT'}
+        $rawDoctor=$out.GetAwaiter().GetResult()
+        $doctorExit=$doctorProc.ExitCode
+    }finally{if(-not $doctorProc.HasExited){$doctorProc.Kill($true);$doctorProc.WaitForExit()};$doctorProc.Dispose()}
+    $doctor=$rawDoctor|ConvertFrom-Json -AsHashtable
+    Assert ($doctor.schemaVersion -eq 1 -and $doctor.status -eq 'DEGRADED' -and $doctorExit -eq 1) 'r6.doctor_reports_isolated_install_degraded'
+    Assert ($doctor.service.service_pid -eq (Get-CimInstance Win32_Service -Filter "Name='$name'").ProcessId -and $doctor.store.schemaVersion -eq 3) 'r6.doctor_authoritative_service_store'
+    Assert ($doctor.store.total -gt 0 -and $doctor.store.waitingForReboot -eq 0 -and $doctor.store.needsReconciliation -ge 1) 'r6.doctor_total_state_counts'
+    Assert (@($doctor.checks|Where-Object {$_.component -eq 'Remote' -and $_.status -eq 'NOT_TESTED'}).Count -eq 1) 'r6.doctor_no_false_remote_acceptance'
+    $performance=& (Join-Path $PSScriptRoot 'Test-NativePerformance.ps1') -Exe $Exe -DurationSeconds 12 -ExerciseJobs|ConvertFrom-Json
+    Assert ($performance.status -eq 'PASS' -and $performance.status_latency.count -ge 12 -and
+        $performance.admission_latency.count -eq 12 -and $performance.cancel_latency.count -eq 12) 'r7.bounded_performance_fixture'
+    Write-Host ('PERFORMANCE_BASELINE='+($performance|ConvertTo-Json -Depth 8 -Compress))
+
+
 
 }finally{
     foreach($p in $clients){
