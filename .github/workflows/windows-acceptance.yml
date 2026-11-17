@@ -97,3 +97,24 @@ jobs:
           name: r0-native-package-lock
           path: research/R0NativeProbe/packages.lock.json
           if-no-files-found: warn
+
+  r0-http:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Verify authenticated stateless MCP with synthetic principals
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet run --project research/R0HttpProbe/R0HttpProbe.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'HTTP_PROBE_FAILED' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r0-http-package-lock
+          path: research/R0HttpProbe/packages.lock.json
+          if-no-files-found: warn
