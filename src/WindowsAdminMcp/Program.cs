@@ -20,8 +20,15 @@ if (args is ["service"])
     builder.Services.AddHostedService<AdminService>();
     await builder.Build().RunAsync();
 }
+else if (args is ["tunnel"])
+{
+    Environment.ExitCode = await TunnelHost.RunAsync();
+}
 else if (args is ["stdio"])
 {
+    // The SDK frontend is not a runtime credential owner.
+    Environment.SetEnvironmentVariable("CONTROL_PLANE_API_KEY", null);
+    Environment.SetEnvironmentVariable("OPENAI_API_KEY", null);
     var builder = Host.CreateApplicationBuilder();
     builder.Logging.ClearProviders();
     builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
@@ -33,6 +40,6 @@ else if (args is ["stdio"])
 }
 else
 {
-    Console.Error.WriteLine("Usage: WindowsAdminMCP.exe service|stdio");
+    Console.Error.WriteLine("Usage: WindowsAdminMCP.exe service|stdio|tunnel");
     Environment.ExitCode = 2;
 }

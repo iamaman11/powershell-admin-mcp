@@ -1,0 +1,167 @@
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Security.AccessControl;
+using System.Security.Cryptography;
+using System.Security.Principal;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
+
+internal static class TunnelHost
+{
+    internal const string VendorSha256 = "DB590A52993C830A4C806108C3F25345EA986C6248210B86DF640E5081FF6A0B";
+    private const string Source = "WindowsAdminMCP";
+    private enum Code
+    {
+        STARTED, EXITED, INTERACTIVE_ADMIN_REQUIRED, INSTALL_PATH_INVALID,
+        VENDOR_INTEGRITY_FAILED, SERVICE_UNAVAILABLE, ALREADY_RUNNING,
+        CREDENTIAL_INVALID, START_FAILED
+    }
+
+    internal sealed record Credential(
+        [property: JsonPropertyName("version")] int Version,
+        [property: JsonPropertyName("tunnel_id")] string TunnelId,
+        [property: JsonPropertyName("runtime_key")] string RuntimeKey);
+
+    internal static bool Valid(Credential? c) => c is
+        { Version: 1, TunnelId: not null, RuntimeKey: not null } &&
+        Regex.IsMatch(c.TunnelId, @"\Atunnel_[a-f0-9]{32}\z", RegexOptions.CultureInvariant) &&
+        !string.IsNullOrWhiteSpace(c.RuntimeKey) && c.RuntimeKey.Length <= 16384 &&
+        !c.RuntimeKey.Contains('\0') && !c.RuntimeKey.Contains('\r') && !c.RuntimeKey.Contains('\n');
+
+    internal static ProcessStartInfo StartInfo(string vendor,string frontend,Credential credential)
+    {
+        if (!Valid(credential)) throw new InvalidOperationException("Invalid credential.");
+        var info = new ProcessStartInfo(vendor)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = Path.GetDirectoryName(vendor)!
+        };
+        foreach (string arg in new[] {"run","--control-plane.tunnel-id",credential.TunnelId,
+            "--control-plane.api-key","env:CONTROL_PLANE_API_KEY",
+            "--mcp.command",$"command=\"{frontend.Replace('\\','/')}\" stdio,channel=main",
+            "--health.listen-addr","127.0.0.1:8080",
+            "--mcp.stdio-send-initialized-notification"})
+            info.ArgumentList.Add(arg);
+        info.Environment.Remove("OPENAI_API_KEY");
+        info.Environment.Remove("WINDOWS_ADMIN_MCP_EXEC");
+        info.Environment["CONTROL_PLANE_API_KEY"] = credential.RuntimeKey;
+        return info;
+    }
+
+    internal static async Task<int> RunAsync()
+    {
+        string correlation = Guid.NewGuid().ToString("N");
+        Code stage = Code.INTERACTIVE_ADMIN_REQUIRED;
+        int Report(Code code,int exit,int? native=null,int? vendorPid=null)
+        {
+            // Only allowlisted fields, no exception messages, arguments or credential data.
+            string line = JsonSerializer.Serialize(new { status=code.ToString(),correlation_id=correlation,
+                exit_code=exit,native_error=native,vendor_pid=vendorPid });
+            Console.Error.WriteLine(line);
+            try { EventLog.WriteEntry(Source,line, exit==0 ? EventLogEntryType.Information : EventLogEntryType.Error); }
+            catch (Exception e) when (e is System.Security.SecurityException or Win32Exception or
+                InvalidOperationException or UnauthorizedAccessException or ArgumentException) { }
+            return exit;
+        }
+        try
+        {
+            using var identity = WindowsIdentity.GetCurrent();
+            using var self = Process.GetCurrentProcess();
+            if(!Environment.UserInteractive || self.SessionId==0 ||
+                !new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
+                return Report(stage,2);
+            stage=Code.INSTALL_PATH_INVALID;
+            string root=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),"WindowsAdminMCP");
+            string frontend=Path.Combine(root,"native","WindowsAdminMCP.exe");
+            string vendor=Path.Combine(root,"client","tunnel-client-runtime.exe");
+            if(!string.Equals(Environment.ProcessPath,frontend,StringComparison.OrdinalIgnoreCase))return Report(stage,2);
+            VerifyDirectory(root,identity.User);
+            VerifyDirectory(Path.GetDirectoryName(frontend)!,identity.User);
+            VerifyDirectory(Path.GetDirectoryName(vendor)!,identity.User);
+            stage=Code.VENDOR_INTEGRITY_FAILED;
+            VerifyFile(vendor,identity.User);
+            using(var reader=File.OpenRead(vendor))
+                if(!string.Equals(Convert.ToHexString(SHA256.HashData(reader)),VendorSha256,StringComparison.Ordinal))
+                    return Report(stage,2);
+
+            // SCM and the existing IPC contract are the source of truth, not a new health server.
+            stage=Code.SERVICE_UNAVAILABLE;
+            var clock=Stopwatch.StartNew();
+            bool ready=false;
+            do
+            {
+                var status=await AdminTools.Status(CancellationToken.None);
+                if(status.Status==StatusCode.OK && status.ServicePid is int pid && status.ExecutionSid=="S-1-5-18")
+                {
+                    using var service=Process.GetProcessById(pid);
+                    ready=string.Equals(service.MainModule?.FileName,frontend,StringComparison.OrdinalIgnoreCase);
+                    if(ready)break;
+                }
+                await Task.Delay(500);
+            }while(clock.Elapsed<TimeSpan.FromSeconds(30));
+            if(!ready)return Report(stage,3);
+
+            stage=Code.ALREADY_RUNNING;
+            var existing=Process.GetProcessesByName("tunnel-client-runtime");
+            try{if(existing.Length!=0)return Report(stage,4);}
+            finally{foreach(var process in existing)process.Dispose();}
+
+            stage=Code.CREDENTIAL_INVALID;
+            string credentialPath=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "WindowsAdminMCP","tunnel-credential.dpapi");
+            VerifyDirectory(Path.GetDirectoryName(credentialPath)!,identity.User);
+            VerifyFile(credentialPath,identity.User);
+            if(new FileInfo(credentialPath).Length is <=0 or >65536)return Report(stage,2);
+            byte[] plaintext=ProtectedData.Unprotect(File.ReadAllBytes(credentialPath),null,DataProtectionScope.LocalMachine);
+            ProcessStartInfo info;
+            try
+            {
+                var credential=JsonSerializer.Deserialize<Credential>(plaintext);
+                if(!Valid(credential))return Report(stage,2);
+                info=StartInfo(vendor,frontend,credential!);
+            }
+            finally{CryptographicOperations.ZeroMemory(plaintext);}
+            stage=Code.START_FAILED;
+            Process? child;
+            try{child=Process.Start(info);}
+            finally{info.Environment.Remove("CONTROL_PLANE_API_KEY");}
+            if(child is null)return Report(stage,5);
+            using(child)
+            {
+                // The scheduler owns this foreground lifetime; the vendor owns its own network/stdio recovery.
+                Report(Code.STARTED,0,vendorPid:child.Id);
+                await child.WaitForExitAsync();
+                return Report(Code.EXITED,child.ExitCode,vendorPid:child.Id);
+            }
+        }
+        catch(Exception e) when(e is IOException or UnauthorizedAccessException or Win32Exception or
+            CryptographicException or JsonException or ArgumentException or InvalidOperationException or System.Security.SecurityException)
+        {return Report(stage,5,e is Win32Exception w?w.NativeErrorCode:e.HResult);}
+    }
+
+    private static void VerifyDirectory(string path,SecurityIdentifier? current)
+    {
+        var item=new DirectoryInfo(path);
+        if((item.Attributes&FileAttributes.ReparsePoint)!=0)throw new UnauthorizedAccessException();
+        VerifyAcl(item.GetAccessControl(),current);
+    }
+    private static void VerifyFile(string path,SecurityIdentifier? current)
+    {
+        var item=new FileInfo(path);
+        if((item.Attributes&FileAttributes.ReparsePoint)!=0)throw new UnauthorizedAccessException();
+        VerifyAcl(item.GetAccessControl(),current);
+    }
+    private static void VerifyAcl(FileSystemSecurity acl,SecurityIdentifier? current)
+    {
+        var admins=new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid,null);
+        var system=new SecurityIdentifier(WellKnownSidType.LocalSystemSid,null);
+        if(acl.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner ||
+            (!owner.Equals(admins)&&!owner.Equals(system)&&!owner.Equals(current)))throw new UnauthorizedAccessException();
+        foreach(FileSystemAccessRule rule in acl.GetAccessRules(true,true,typeof(SecurityIdentifier)))
+            if(rule.AccessControlType==AccessControlType.Allow &&
+                !rule.IdentityReference.Equals(admins)&&!rule.IdentityReference.Equals(system))
+                throw new UnauthorizedAccessException();
+    }
+}

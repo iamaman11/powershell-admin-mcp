@@ -86,6 +86,13 @@ jobs:
           $ErrorActionPreference = 'Stop'
           dotnet run --project tests/RunnerTests/RunnerTests.csproj -c Release
           if ($LASTEXITCODE -ne 0) { throw 'R2_RUNNER_FAILED' }
+      - name: Verify unified startup definition without registering a live tunnel
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $plan=./installer/NativeStartup.ps1 -Action Plan | ConvertFrom-Json
+          if($plan.mutated -or $plan.service_start -ne 'Automatic' -or $plan.trigger -ne 'MSFT_TaskLogonTrigger' -or $plan.logon -ne 'Interactive' -or $plan.run_level -ne 'Highest' -or $plan.arguments -ne 'tunnel' -or $plan.multiple_instances -ne 'IgnoreNew' -or $plan.restart_count -ne 3){throw 'NATIVE_STARTUP_PLAN_INVALID'}
+          Write-Host 'R6_STARTUP_DEFINITION=PASS (plan only; no task registered)'
       - uses: actions/upload-artifact@v4
         if: success()
         with:
