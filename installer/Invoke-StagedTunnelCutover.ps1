@@ -50,6 +50,29 @@ function Write-State([string]$state,[int]$pidValue=0,[string]$reason=''){
     [IO.File]::WriteAllText($temp,($data|ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
     [IO.File]::Move($temp,$statusFile,$true)
 }
+# Use the official versioned loopback component schema; never log command arguments,
+# request bodies, credentials, or raw protocol frames. Keep only three bounded snapshots.
+function Save-HealthEvidence([string]$phase,[int]$expected){
+    try{
+        if($phase -notin @('initial','latest','final')){return}
+        $listen=@(Get-NetTCPConnection -LocalAddress '127.0.0.1' -LocalPort 8080 -State Listen -ErrorAction Stop)
+        if($listen.Count -ne 1 -or $listen[0].OwningProcess -ne $expected){return}
+        $response=Invoke-WebRequest 'http://127.0.0.1:8080/health?details=true' -TimeoutSec 3
+        if($response.Content.Length -gt 262144){return}
+        $snapshot=$response.Content|ConvertFrom-Json -AsHashtable -Depth 30
+        if($snapshot.schema_version -ne 1){return}
+        $evidence=[ordered]@{attempt=$AttemptId;pid=$expected;phase=$phase;utc=[DateTimeOffset]::UtcNow.ToString('O');schema_version=1;ready=$snapshot.ready;runtime=$snapshot.runtime;components=@{}}
+        foreach($name in @('mcp','control-plane','response-delivery','queue','dispatcher','oauth')){
+            if($snapshot.components.Contains($name)){$evidence.components[$name]=$snapshot.components[$name]}
+        }
+        $path=Join-Path $stage ("health-$AttemptId-$phase.json")
+        $tmp=$path+'.tmp'
+        [IO.File]::WriteAllText($tmp,($evidence|ConvertTo-Json -Depth 32 -Compress),[Text.UTF8Encoding]::new($false))
+        [IO.File]::Move($tmp,$path,$true)
+    }catch{
+        # Diagnostic failure cannot prevent rollback.
+    }
+}
 function Wait-Ready($proc,[int]$seconds){
     $clock=[Diagnostics.Stopwatch]::StartNew()
     while($clock.Elapsed.TotalSeconds -lt $seconds){
@@ -98,6 +121,7 @@ if($Mode -eq 'Preflight'){
 }
 $script:new=$null
 $script:fallback=$null
+$script:lastSnapshot=[DateTimeOffset]::MinValue
 function Start-Vendor([string]$exe,[string]$binding){
     $info=[Diagnostics.ProcessStartInfo]::new($exe)
     $info.UseShellExecute=$false
@@ -123,14 +147,21 @@ try{
         $old.Kill();if(-not $old.WaitForExit(10000)){throw 'OLD_TUNNEL_NOT_STOPPED'}
         $script:new=Start-Vendor $TunnelExe $newBinding
         if(-not(Wait-Ready $script:new 45)){throw 'CANDIDATE_NOT_READY'}
+        Save-HealthEvidence 'initial' $script:new.Id
+        $script:lastSnapshot=[DateTimeOffset]::UtcNow
         Write-State 'AWAITING_REMOTE_CONFIRMATION' $script:new.Id
     } -CheckCommit {
         if($script:new.HasExited){throw 'CANDIDATE_EXITED'}
+        if(([DateTimeOffset]::UtcNow-$script:lastSnapshot).TotalSeconds -ge 10){
+            Save-HealthEvidence 'latest' $script:new.Id
+            $script:lastSnapshot=[DateTimeOffset]::UtcNow
+        }
         if(-not(Test-Path -LiteralPath $commitFile -PathType Leaf)){return $false}
         if((Get-Item -LiteralPath $commitFile).Length -gt 128){return $false}
         return ([IO.File]::ReadAllText($commitFile).Trim() -ceq "$AttemptId/$($script:new.Id)" -and (Get-Ready $script:new.Id))
     } -Rollback {
         param($why)
+        if($null -ne $script:new -and -not $script:new.HasExited){Save-HealthEvidence 'final' $script:new.Id}
         Write-State 'ROLLING_BACK' 0 $why
         if($null -ne $script:new -and -not $script:new.HasExited){
             $script:new.Kill();if(-not $script:new.WaitForExit(10000)){throw 'CANDIDATE_NOT_STOPPED'}
@@ -140,7 +171,7 @@ try{
         if(-not(Wait-Ready $script:fallback 45)){Write-State 'ROLLBACK_FAILED' $script:fallback.Id $why;throw 'ROLLBACK_NOT_READY'}
         Write-State 'ROLLED_BACK' $script:fallback.Id $why
     }
-    if($accepted){Write-State 'COMMITTED' $script:new.Id}
+    if($accepted){Save-HealthEvidence 'final' $script:new.Id;Write-State 'COMMITTED' $script:new.Id}
     # Do not end the independent task while its vendor child is running.
     $running=if($accepted){$script:new}else{$script:fallback}
     $config=$null
