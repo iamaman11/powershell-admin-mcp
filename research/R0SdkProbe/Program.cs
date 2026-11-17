@@ -21,7 +21,7 @@ public sealed record ProbeResponse(
     [property: JsonPropertyName("status")] string Status);
 
 [McpServerToolType]
-public static class ProbeTools
+public sealed class ProbeTools
 {
     private static int _started;
     private static int _cancelled;
