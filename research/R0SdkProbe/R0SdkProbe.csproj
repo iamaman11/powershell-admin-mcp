@@ -12,6 +12,7 @@
     <PackageReference Include="ModelContextProtocol" Version="2.4.0" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="../R0Shared/PipeWire.cs" Link="PipeWire.cs" />
+    <Compile Include="../../src/WindowsAdminMcp/PipeWire.cs" Link="PipeWire.cs" />
+    <Compile Include="../R0Shared/PipeContracts.cs" Link="PipeContracts.cs" />
   </ItemGroup>
 </Project>

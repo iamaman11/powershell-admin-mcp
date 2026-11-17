@@ -6,13 +6,6 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-internal sealed record PipeRequest(string Action, string? Key = null, int DelayMs = 0);
-public sealed record PipeReply(
-    [property: JsonPropertyName("status")] string Status,
-    [property: JsonPropertyName("id")] long? Id = null,
-    [property: JsonPropertyName("state")] string? State = null,
-    [property: JsonPropertyName("result")] string? Result = null);
-
 internal static class PipeWire
 {
     internal static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
@@ -26,7 +19,7 @@ internal static class PipeWire
         byte[] header = new byte[4];
         await s.ReadExactlyAsync(header, token);
         int length = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(header);
-        if (length is < 1 or > 4096) throw new IOException("Invalid fixture frame length");
+        if (length is < 1 or > 4096) throw new IOException("Invalid IPC frame length");
         byte[] body = new byte[length];
         await s.ReadExactlyAsync(body, token);
         return new UTF8Encoding(false, true).GetString(body);
@@ -34,7 +27,7 @@ internal static class PipeWire
     internal static async Task WriteFrameAsync(Stream s, string value, CancellationToken token)
     {
         byte[] body = Encoding.UTF8.GetBytes(value);
-        if (body.Length is < 1 or > 4096) throw new IOException("Invalid fixture frame length");
+        if (body.Length is < 1 or > 4096) throw new IOException("Invalid IPC frame length");
         byte[] header = new byte[4];
         System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(header, body.Length);
         await s.WriteAsync(header, token);

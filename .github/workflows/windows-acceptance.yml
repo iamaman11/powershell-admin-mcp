@@ -73,9 +73,18 @@ jobs:
           dotnet publish research/R0NativeProbe/R0NativeProbe.csproj -c Release -r win-x64 --self-contained true -o "${{ runner.temp }}/R0NativeProbe"
           if ($LASTEXITCODE -ne 0) { throw 'PUBLISH_FAILED' }
           ./research/R0NativeProbe/Test-Native.ps1 -Exe "${{ runner.temp }}/R0NativeProbe/R0NativeProbe.exe" -SdkDll research/R0SdkProbe/bin/Release/net10.0/R0SdkProbe.dll
+      - name: Publish and verify actual native application R1 status
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet publish src/WindowsAdminMcp/WindowsAdminMcp.csproj -c Release -r win-x64 --self-contained true -o "${{ runner.temp }}/WindowsAdminMcpCandidate"
+          if ($LASTEXITCODE -ne 0) { throw 'R1_PUBLISH_FAILED' }
+          ./tests/Test-NativeStatus.ps1 -Exe "${{ runner.temp }}/WindowsAdminMcpCandidate/WindowsAdminMCP.exe"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: r0-package-locks
-          path: research/**/packages.lock.json
+          path: |
+            research/**/packages.lock.json
+            src/**/packages.lock.json
           if-no-files-found: warn
