@@ -3,7 +3,7 @@
 param([Parameter(Mandatory)][string]$Output)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
-. (Join-Path $PSScriptRoot 'GuardedTrial.ps1')
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'installer\GuardedTrial.ps1')
 $test=[ordered]@{session=[Diagnostics.Process]::GetCurrentProcess().SessionId;interactive=[Environment]::UserInteractive;admin=([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator);checks=@()}
 function Check([bool]$ok,[string]$name){
     if(-not $ok){throw "FAIL $name"}
