@@ -80,6 +80,12 @@ jobs:
           dotnet publish src/WindowsAdminMcp/WindowsAdminMcp.csproj -c Release -r win-x64 --self-contained true -o "${{ runner.temp }}/WindowsAdminMcpCandidate"
           if ($LASTEXITCODE -ne 0) { throw 'R1_PUBLISH_FAILED' }
           ./tests/Test-NativeStatus.ps1 -Exe "${{ runner.temp }}/WindowsAdminMcpCandidate/WindowsAdminMCP.exe"
+      - name: Exercise actual bounded PowerShell runner before MCP wiring
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet run --project tests/RunnerTests/RunnerTests.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'R2_RUNNER_FAILED' }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
