@@ -56,6 +56,19 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Parse PowerShell sources before expensive tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach($file in @(Get-ChildItem installer,tests -Filter '*.ps1' -File -Recurse)){
+            $tokens=$null;$errors=$null
+            $null=[System.Management.Automation.Language.Parser]::ParseFile($file.FullName,[ref]$tokens,[ref]$errors)
+            if($errors.Count -gt 0){
+              foreach($err in $errors){Write-Host ("PARSE_FAILURE {0}:{1} {2}" -f $file.Name,$err.Extent.StartLineNumber,$err.ErrorId)}
+              throw 'POWERSHELL_PARSE_FAILED'
+            }
+          }
+          Write-Host 'POWERSHELL_PARSE=PASS'
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
