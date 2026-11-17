@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$Dll,[Parameter(Mandatory)][string]$Pipe)
+param([Parameter(Mandatory)][string]$Dll,[Parameter(Mandatory)][string]$Pipe,[Parameter(Mandatory)][uint32]$ServicePid)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $meta=@{'io.modelcontextprotocol/protocolVersion'='2026-07-28';'io.modelcontextprotocol/clientCapabilities'=@{};'io.modelcontextprotocol/clientInfo'=@{name='r0-shared-fixture';version='1'}}
@@ -8,6 +8,7 @@ function Connect {
     $si=[Diagnostics.ProcessStartInfo]::new('dotnet')
     $si.ArgumentList.Add([IO.Path]::GetFullPath($Dll))
     $si.Environment['R0_PIPE']=$Pipe
+    $si.Environment['R0_SERVICE_PID']=[string]$ServicePid
     $si.UseShellExecute=$false;$si.RedirectStandardInput=$true;$si.RedirectStandardOutput=$true
     $si.RedirectStandardError=$true
     $p=[Diagnostics.Process]::Start($si);$clients.Add($p)

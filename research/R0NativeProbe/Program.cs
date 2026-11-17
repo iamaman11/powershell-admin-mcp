@@ -5,12 +5,22 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Logging;
 
-if (args is ["pipe-client", var pipe, var json])
+if (args is ["pipe-client", var pipe, var pid, var json])
 {
-    await PipeProbe.ClientAsync(pipe, json);
+    await PipeProbe.ClientAsync(pipe, uint.Parse(pid, System.Globalization.CultureInfo.InvariantCulture), json);
     return;
 }
 
+if (args is ["restricted-client", var restrictedPipe, var database])
+{
+    SecurityProbe.RestrictedClient(restrictedPipe, database);
+    return;
+}
+if (args is ["fake-server"])
+{
+    await SecurityProbe.RejectFakeServer();
+    return;
+}
 if (args is ["job-object"])
 {
     JobObjectProbe.Run();

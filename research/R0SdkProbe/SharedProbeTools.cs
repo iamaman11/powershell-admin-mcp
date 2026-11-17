@@ -11,8 +11,9 @@ public sealed class SharedProbeTools
         CancellationToken cancellationToken = default)
     {
         string name = Environment.GetEnvironmentVariable("R0_PIPE") ?? throw new InvalidOperationException("No fixture pipe");
+        uint pid = uint.Parse(Environment.GetEnvironmentVariable("R0_SERVICE_PID") ?? throw new InvalidOperationException("Missing fixture service PID"), System.Globalization.CultureInfo.InvariantCulture);
         string request = JsonSerializer.Serialize(new PipeRequest(action, key, delayMs), PipeWire.Json);
-        string reply = await PipeWire.RoundTripAsync(name, request, cancellationToken);
+        string reply = await PipeWire.RoundTripAsync(name, request, pid, cancellationToken);
         return JsonSerializer.Deserialize<PipeReply>(reply, PipeWire.Json) ?? throw new JsonException("No reply");
     }
 }

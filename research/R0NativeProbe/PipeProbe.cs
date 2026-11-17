@@ -191,6 +191,6 @@ internal sealed class PipeProbe(string path) : BackgroundService
         }
     }
 
-    public static async Task ClientAsync(string name, string payload)
-        => Console.WriteLine(await PipeWire.RoundTripAsync(name, payload, CancellationToken.None));
+    public static async Task ClientAsync(string name, uint expectedServerPid, string payload)
+        => Console.WriteLine(await PipeWire.RoundTripAsync(name, payload, expectedServerPid, CancellationToken.None));
 }

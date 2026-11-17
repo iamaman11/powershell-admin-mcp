@@ -8,6 +8,9 @@ if(Get-Service -Name $name -ErrorAction SilentlyContinue){throw 'PROBE_SERVICE_A
 $root=Join-Path $env:RUNNER_TEMP ('admin-mcp-r0-'+[guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($root)
 $db=Join-Path $root 'state.db'
+# Actual protected ACL; do not rely on runner-temp inherited access.
+& icacls.exe $root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Host
+if($LASTEXITCODE -ne 0){throw 'FIXTURE_ACL_FAILED'}
 function Assert([bool]$condition,[string]$name){if(-not $condition){throw "FAIL $name"};Write-Host "PASS $name"}
 function Read-State {
     $raw=& $Exe inspect $db
@@ -24,11 +27,15 @@ function Wait-State([string]$expected,[int]$starts){
 }
 & $Exe job-object
 if($LASTEXITCODE -ne 0){throw 'JOB_OBJECT_FAILED'}
+& $Exe fake-server
+if($LASTEXITCODE -ne 0){throw 'FAKE_SERVER_PROBE_FAILED'}
 try {
     $binary='"'+$Exe+'" service "'+$db+'"'
     New-Service -Name $name -BinaryPathName $binary -StartupType Automatic -DisplayName 'Isolated R0 probe' | Out-Null
     $svc=Get-CimInstance Win32_Service -Filter "Name='$name'"
     Assert ($svc.StartMode -eq 'Auto' -and $svc.StartName -eq 'LocalSystem') 'scm.auto.localsystem'
+    & sc.exe failure $name reset= 0 actions= restart/1000 | Out-Host
+    if($LASTEXITCODE -ne 0){throw 'SCM_FAILURE_POLICY_FAILED'}
     Start-Service $name
     $a=Wait-State 'RUNNING' 1
     Assert ($a.checkpoint -eq 1 -and $a.identity -eq 'S-1-5-18') 'scm.actual_system_and_checkpoint_a'
@@ -36,7 +43,8 @@ try {
     $pipeName='WindowsAdminMcpR0_'+[IO.Path]::GetFileName($root)
     function Start-PipeCall($request){
         $si=[Diagnostics.ProcessStartInfo]::new($Exe)
-        foreach($v in @('pipe-client',$pipeName,($request|ConvertTo-Json -Compress))){$si.ArgumentList.Add($v)}
+        $servicePid=(Get-CimInstance Win32_Service -Filter "Name='$name'").ProcessId
+        foreach($v in @('pipe-client',$pipeName,[string]$servicePid,($request|ConvertTo-Json -Compress))){$si.ArgumentList.Add($v)}
         $si.UseShellExecute=$false;$si.CreateNoWindow=$true;$si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true
         return [Diagnostics.Process]::Start($si)
     }
@@ -49,6 +57,11 @@ try {
         }finally{if(-not $p.HasExited){$p.Kill($true)};$p.Dispose()}
     }
     function PipeCall($r){return (Finish-PipeCall (Start-PipeCall $r))}
+    # Warm listener before explicit access-denied assertions.
+    $ping=PipeCall @{action='ping'}
+    Assert ($ping.status -eq 'OK') 'ipc.authorized_ping'
+    & $Exe restricted-client $pipeName $db
+    if($LASTEXITCODE -ne 0){throw 'RESTRICTED_CLIENT_PROBE_FAILED'}
     $first=PipeCall @{action='submit';key='first';delayMs=8000}
     Assert ($first.status -eq 'OK') 'ipc.first_admitted'
     $running=$false
@@ -87,7 +100,7 @@ try {
     $secondDone=PipeCall @{action='status';key='second'}
     $thirdDone=PipeCall @{action='status';key='third'}
     Assert ($firstDone.result -eq 'fixture:first' -and $secondDone.result -eq 'fixture:second' -and $thirdDone.state -eq 'CANCELLED' -and $final.result -eq 'fixture:fourth') 'ipc.reconnect_distinct_results_queue_drained'
-    & (Join-Path $PSScriptRoot 'Test-McpShared.ps1') -Dll $SdkDll -Pipe $pipeName
+    & (Join-Path $PSScriptRoot 'Test-McpShared.ps1') -Dll $SdkDll -Pipe $pipeName -ServicePid ((Get-CimInstance Win32_Service -Filter "Name='$name'").ProcessId)
     Stop-Service $name
     $s=Wait-State 'STOPPED' 1
     Assert ($s.checkpoint -eq 1) 'scm.graceful_stop'
@@ -102,13 +115,34 @@ try {
     try{if(-not $writer.WaitForExit(10000)){throw 'CRASH_WRITER_TIMEOUT'};Assert ($writer.ExitCode -ne 0) 'sqlite.writer_abrupt_exit'}finally{if(-not $writer.HasExited){$writer.Kill()};$writer.Dispose()}
     $after=Read-State
     Assert ($after.checkpoint -eq 1) 'sqlite.uncommitted_checkpoint_not_visible'
+    $active=PipeCall @{action='submit';key='crash-active';delayMs=10000}
+    $wait=PipeCall @{action='submit';key='crash-queued';delayMs=20}
+    Assert ($active.status -eq 'OK' -and $wait.status -eq 'OK') 'ipc.crash_fixture_admitted'
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    do{
+        $running=PipeCall @{action='status';key='crash-active'}
+        if($running.state -eq 'RUNNING'){break}
+        Start-Sleep -Milliseconds 50
+    }while($clock.Elapsed.TotalSeconds -lt 4)
+    Assert ($running.state -eq 'RUNNING') 'ipc.crash_fixture_running'
     $svc=Get-CimInstance Win32_Service -Filter "Name='$name'"
     Assert ($svc.ProcessId -gt 0) 'scm.live_process'
-    Stop-Process -Id $svc.ProcessId -Force
-    (Get-Service $name).WaitForStatus('Stopped',[TimeSpan]::FromSeconds(20))
-    Start-Service $name
+    $oldProcess=$svc.ProcessId
+    Stop-Process -Id $oldProcess -Force
+    # SCM, not the test, restarts the service.
     $c=Wait-State 'NEEDS_RECONCILIATION' 3
-    Assert ($c.checkpoint -eq 1) 'scm.crash_restart_unknown_effect_not_replayed'
+    Assert ($c.checkpoint -eq 1) 'scm.automatic_restart_unknown_effect_not_replayed'
+    $svc=Get-CimInstance Win32_Service -Filter "Name='$name'"
+    Assert ($svc.ProcessId -gt 0 -and $svc.ProcessId -ne $oldProcess) 'scm.recovery_new_process'
+    $recovered=PipeCall @{action='status';key='crash-active'}
+    Assert ($recovered.id -eq $active.id -and $recovered.state -eq 'NEEDS_RECONCILIATION' -and $null -eq $recovered.result) 'ipc.active_job_unknown_effect_preserved'
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    do{
+        $queued=PipeCall @{action='status';key='crash-queued'}
+        if($queued.state -eq 'COMPLETED'){break}
+        Start-Sleep -Milliseconds 50
+    }while($clock.Elapsed.TotalSeconds -lt 8)
+    Assert ($queued.id -eq $wait.id -and $queued.result -eq 'fixture:crash-queued') 'ipc.queued_job_resumed_after_service_crash'
     Stop-Service $name
     $d=Read-State
     Assert ($d.state -eq 'NEEDS_RECONCILIATION') 'unknown_effect_survives_graceful_stop'

@@ -1,4 +1,6 @@
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
@@ -41,14 +43,19 @@ internal static class PipeWire
     }
 
 
-    internal static async Task<string> RoundTripAsync(string name, string payload, CancellationToken token)
+    internal static async Task<string> RoundTripAsync(string name, string payload, uint expectedServerPid, CancellationToken token)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromSeconds(5));
         using var pipe = new NamedPipeClientStream(".", name, PipeDirection.InOut,
             PipeOptions.Asynchronous, TokenImpersonationLevel.Identification);
         await pipe.ConnectAsync(deadline.Token);
+        if (!GetNamedPipeServerProcessId(pipe.SafePipeHandle, out uint actualPid) || actualPid != expectedServerPid)
+            throw new UnauthorizedAccessException("Named pipe server process does not match expected SCM process");
         await WriteFrameAsync(pipe, payload, deadline.Token);
         return await ReadFrameAsync(pipe, deadline.Token);
     }
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint serverProcessId);
 }
