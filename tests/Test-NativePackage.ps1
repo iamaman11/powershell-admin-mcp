@@ -141,7 +141,7 @@ try{
             $line=$p.StandardOutput.ReadLineAsync().WaitAsync([TimeSpan]::FromSeconds(10)).GetAwaiter().GetResult()
             if($null -eq $line){throw 'RPC_EOF'}
             $m=$line|ConvertFrom-Json -AsHashtable
-        }while($m.id -ne $id)
+        }while(-not $m.Contains('id') -or $m.id -ne $id)
         if($m.Contains('error') -or ($m.result.Contains('isError') -and $m.result.isError)){throw 'RPC_FAILURE'}
         return $m.result.structuredContent
     }
