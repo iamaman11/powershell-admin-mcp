@@ -50,3 +50,90 @@ jobs:
           if ((Get-TunnelIdFromText $oldLine) -cne $dummyId) { throw 'AUTO_ID_ROLLBACK_FAILED' }
           if ($null -ne (Get-TunnelIdFromText 'invalid without any ID')) { throw 'AUTO_ID_INVALID_ACCEPTED' }
           Write-Host "TUNNEL_ID_AUTODISCOVERY_TESTS=4/4_PASS"
+
+  r0:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse PowerShell sources before expensive tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          foreach($file in @(Get-ChildItem installer,tests -Filter '*.ps1' -File -Recurse)){
+            $tokens=$null;$errors=$null
+            $null=[System.Management.Automation.Language.Parser]::ParseFile($file.FullName,[ref]$tokens,[ref]$errors)
+            if($errors.Count -gt 0){
+              foreach($err in $errors){Write-Host ("PARSE_FAILURE {0}:{1} {2}" -f $file.Name,$err.Extent.StartLineNumber,$err.ErrorId)}
+              throw 'POWERSHELL_PARSE_FAILED'
+            }
+          }
+          Write-Host 'POWERSHELL_PARSE=PASS'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build pinned SDK and verify wire contract
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet build research/R0SdkProbe/R0SdkProbe.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'SDK_BUILD_FAILED' }
+          ./research/R0SdkProbe/Test-Wire.ps1 -Dll research/R0SdkProbe/bin/Release/net10.0/R0SdkProbe.dll
+      - name: Exercise SCM, SQLite, Job Objects and shared MCP queue
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet publish research/R0NativeProbe/R0NativeProbe.csproj -c Release -r win-x64 --self-contained true -o "${{ runner.temp }}/R0NativeProbe"
+          if ($LASTEXITCODE -ne 0) { throw 'PUBLISH_FAILED' }
+          ./research/R0NativeProbe/Test-Native.ps1 -Exe "${{ runner.temp }}/R0NativeProbe/R0NativeProbe.exe" -SdkDll research/R0SdkProbe/bin/Release/net10.0/R0SdkProbe.dll
+      - name: Publish and verify actual native application R1 status
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet publish src/WindowsAdminMcp/WindowsAdminMcp.csproj -c Release -r win-x64 --self-contained true -o "${{ runner.temp }}/WindowsAdminMcpCandidate"
+          if ($LASTEXITCODE -ne 0) { throw 'R1_PUBLISH_FAILED' }
+          ./tests/Test-NativeStatus.ps1 -Exe "${{ runner.temp }}/WindowsAdminMcpCandidate/WindowsAdminMCP.exe"
+      - name: Exercise actual bounded PowerShell runner before MCP wiring
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet run --project tests/RunnerTests/RunnerTests.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'R2_RUNNER_FAILED' }
+      - name: Verify unified startup definition without registering a live tunnel
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $plan=./installer/NativeStartup.ps1 -Action Plan | ConvertFrom-Json
+          if($plan.mutated -or $plan.service_start -ne 'Automatic' -or $plan.trigger -ne 'MSFT_TaskLogonTrigger' -or $plan.logon -ne 'Interactive' -or $plan.run_level -ne 'Highest' -or $plan.arguments -ne 'tunnel' -or $plan.multiple_instances -ne 'IgnoreNew' -or $plan.restart_count -ne 3){throw 'NATIVE_STARTUP_PLAN_INVALID'}
+          Write-Host 'R6_STARTUP_DEFINITION=PASS (plan only; no task registered)'
+      - name: Build and test offline native installation package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $package=Join-Path "${{ runner.temp }}" 'WindowsAdminMCP-win-x64.zip'
+          $receipt=./installer/New-NativePackage.ps1 -PublishDirectory "${{ runner.temp }}/WindowsAdminMcpCandidate" -Output $package -Commit $env:GITHUB_SHA | ConvertFrom-Json
+          Write-Host ("NATIVE_PACKAGE_SHA256="+$receipt.sha256)
+          ./tests/Test-NativePackage.ps1 -Package $package -Sha256 $receipt.sha256
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: WindowsAdminMCP-offline-package
+          path: |
+            ${{ runner.temp }}/WindowsAdminMCP-win-x64.zip
+            installer/Install-Native.ps1
+            installer/NativeFileSwap.ps1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: WindowsAdminMcp-candidate-win-x64
+          path: "${{ runner.temp }}/WindowsAdminMcpCandidate/"
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r0-package-locks
+          path: |
+            research/**/packages.lock.json
+            src/**/packages.lock.json
+          if-no-files-found: warn
