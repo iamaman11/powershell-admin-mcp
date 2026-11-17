@@ -1,9 +1,14 @@
 using System.Text.Json.Serialization;
 
 [JsonConverter(typeof(JsonStringEnumConverter<JobAction>))]
-public enum JobAction { submit, status, list, logs, cancel }
+public enum JobAction { submit, status, list, logs, cancel, resume }
 [JsonConverter(typeof(JsonStringEnumConverter<JobState>))]
-public enum JobState { QUEUED, RUNNING, CANCEL_REQUESTED, COMPLETED, FAILED, CANCELLED, NEEDS_RECONCILIATION }
+public enum JobState { QUEUED, RUNNING, CANCEL_REQUESTED, WAITING_FOR_RESUME, COMPLETED, FAILED, CANCELLED, NEEDS_RECONCILIATION }
+
+public sealed record JobStep(
+    [property:JsonPropertyName("command")] string Command,
+    [property:JsonPropertyName("timeout_seconds")] int TimeoutSeconds=30,
+    [property:JsonPropertyName("pause_after")] bool PauseAfter=false);
 
 public sealed record JobInfo(
     [property:JsonPropertyName("job_id")] string JobId,
@@ -12,7 +17,10 @@ public sealed record JobInfo(
     [property:JsonPropertyName("command_sha256")] string CommandHash,
     [property:JsonPropertyName("created_utc")] string CreatedUtc,
     [property:JsonPropertyName("updated_utc")] string UpdatedUtc,
-    [property:JsonPropertyName("execution")] ExecutionResult? Execution = null);
+    [property:JsonPropertyName("execution")] ExecutionResult? Execution = null,
+    [property:JsonPropertyName("completed_steps")] int CompletedSteps = 0,
+    [property:JsonPropertyName("total_steps")] int TotalSteps = 1,
+    [property:JsonPropertyName("result_step")] int? ResultStep = null);
 
 public sealed record JobReply(
     [property:JsonPropertyName("status")] StatusCode Status,

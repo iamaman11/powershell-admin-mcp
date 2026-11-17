@@ -166,6 +166,40 @@ try{
     $read=Job $c 33 @{action='logs';job_id=$queued.job.job_id}
     Assert ($read.job.execution.stdout.Trim() -eq 'R4_OUTPUT_FIXTURE_7A98E1') 'r4.dpapi_decrypt_after_restart'
     Write-Host 'R4_ACTUAL_CRASH_RECOVERY=PASS (SCM restart, not physical OS reboot)'
+    # A checkpoint is a committed step result, not a remembered in-memory index.
+    $planMarker=Join-Path $data 'plan-marker.txt'
+    $planPath=$planMarker.Replace("'","''")
+    $steps=@(
+        @{command="[IO.File]::AppendAllText('$planPath','A'); Write-Output 'step-A'";timeout_seconds=10;pause_after=$true},
+        @{command="[IO.File]::AppendAllText('$planPath','B'); Write-Output 'step-B'";timeout_seconds=10}
+    )
+    $plan=Job $b 40 @{action='submit';operation_key='r4-plan';steps=$steps}
+    Assert ($plan.status -eq 'OK' -and $plan.job.total_steps -eq 2) 'r4.plan_accepted'
+    $paused=Wait-JobState $c $plan.job.job_id 'WAITING_FOR_RESUME'
+    Assert ($paused.completed_steps -eq 1 -and $paused.execution.stdout.Trim() -ceq 'step-A' -and [IO.File]::ReadAllText($planMarker) -ceq 'A') 'r4.checkpoint_A_persisted'
+    # Pending step must not run just because the process restarts.
+    Stop-Service $name
+    Start-Service $name
+    $null=Wait-Status $b 'OK'
+    $paused=Wait-JobState $b $plan.job.job_id 'WAITING_FOR_RESUME'
+    Assert ($paused.completed_steps -eq 1 -and [IO.File]::ReadAllText($planMarker) -ceq 'A') 'r4.checkpoint_survives_restart'
+    $samePlan=Job $c 41 @{action='submit';operation_key='r4-plan';steps=$steps}
+    Assert ($samePlan.job.job_id -eq $plan.job.job_id -and $samePlan.job.state -eq 'WAITING_FOR_RESUME') 'r4.plan_idempotency'
+    $deny=Job $b 42 @{action='resume';job_id=$plan.job.job_id;expected_completed_steps=2}
+    Assert ($deny.status -eq 'NOT_RESUMABLE') 'r4.stale_checkpoint_rejected'
+    $deny=Job $b 43 @{action='resume';job_id=$active.job.job_id;expected_completed_steps=1}
+    Assert ($deny.status -eq 'NOT_RESUMABLE') 'r4.unknown_effect_resume_denied'
+    $go=Job $c 44 @{action='resume';job_id=$plan.job.job_id;expected_completed_steps=1}
+    Assert ($go.status -eq 'OK' -and $go.job.state -eq 'QUEUED') 'r4.resume_verified_checkpoint'
+    $done=Wait-JobState $b $plan.job.job_id 'COMPLETED'
+    Assert ($done.completed_steps -eq 2 -and $done.execution.stdout.Trim() -ceq 'step-B' -and [IO.File]::ReadAllText($planMarker) -ceq 'AB') 'r4.step_B_without_replaying_A'
+    $log=Job $c 45 @{action='logs';job_id=$plan.job.job_id;step_index=1}
+    Assert ($log.job.result_step -eq 1 -and $log.job.execution.stdout.Trim() -ceq 'step-A') 'r4.previous_step_output_persisted'
+    # Invalid mixed single/plan payload cannot be admitted.
+    $bad=Job $b 46 @{action='submit';operation_key='r4-invalid';command='Write-Output 1';steps=$steps}
+    Assert ($bad.status -eq 'INVALID_ARGUMENT') 'r4.mixed_payload_rejected'
+    Write-Host 'R4_CHECKPOINT_PLAN=PASS (explicit resume after SCM restart; OS reboot proof pending)'
+
 }finally{
     foreach($p in $clients){
         if(-not $p.HasExited){$p.StandardInput.Close();if(-not $p.WaitForExit(3000)){$p.Kill($true);$p.WaitForExit()}}

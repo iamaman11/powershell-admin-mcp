@@ -83,7 +83,8 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                         response = new(result.Status, correlation, Job: result);
                     }
                     else if (request?.Operation == AdminOperation.Status && request.Action is null &&
-                        request.Command is null && request.Key is null && request.JobId is null)
+                        request.Command is null && request.Key is null && request.JobId is null &&
+                        request.Steps is null && request.StepIndex is null && request.ExpectedCompletedSteps is null)
                     {
                         using var actual = WindowsIdentity.GetCurrent();
                         var status = new AdminStatus(StatusCode.OK, correlation, Environment.ProcessId, Environment.MachineName,

@@ -47,11 +47,12 @@ public sealed class AdminTools
     }
 
     [McpServerTool(Name="powershell_job",UseStructuredContent=true),
-        Description("Durably submit one script, inspect status, list recent jobs, read bounded final logs or cancel. Submit requires stable operation_key; retry only with the same key and payload. Interrupted running jobs can have unknown effects; no automatic replay.")]
+        Description("Durably submit one script OR 1-8 sequential steps (each command, timeout_seconds, pause_after). Inspect status, list recent jobs, read a step's bounded logs, cancel, or resume a paused checkpoint with expected_completed_steps. Submit requires stable operation_key; retry only same key and payload. Resume never replays an interrupted step. A manual pause does not verify an OS reboot.")]
     public static async Task<JobReply> Job(JobAction action,string? operation_key=null,string? job_id=null,
-        string? command=null,int timeout_seconds=30,string? working_directory=null,CancellationToken cancellationToken=default)
+        string? command=null,int timeout_seconds=30,string? working_directory=null,JobStep[]? steps=null,
+        int? step_index=null,int? expected_completed_steps=null,CancellationToken cancellationToken=default)
     {
-        var reply=await Call(new(AdminOperation.Job,action,operation_key,job_id,command,timeout_seconds,working_directory),cancellationToken);
+        var reply=await Call(new(AdminOperation.Job,action,operation_key,job_id,command,timeout_seconds,working_directory,steps,step_index,expected_completed_steps),cancellationToken);
         return reply.Job??new(reply.Code,reply.Correlation,OperationKey:operation_key);
     }
 
