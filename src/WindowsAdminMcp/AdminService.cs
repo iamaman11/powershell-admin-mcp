@@ -20,11 +20,15 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                 PipeAccessRights.FullControl, AccessControlType.Allow));
         return acl;
     }
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public override Task StartAsync(CancellationToken cancellationToken)
     {
         using var identity = WindowsIdentity.GetCurrent();
         if (!identity.IsSystem) throw new InvalidOperationException("LocalSystem required.");
         jobs.Initialize();
+        return base.StartAsync(cancellationToken);
+    }
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
         logger.LogInformation("Administrative service starting. PID {Pid}", Environment.ProcessId);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         Task[] listeners = Enumerable.Range(0, 4).Select(_ => Listen(linked.Token)).Append(jobs.RunAsync(linked.Token)).ToArray();

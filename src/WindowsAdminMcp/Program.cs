@@ -10,6 +10,11 @@ if (args is ["service"])
         throw new InvalidOperationException("Service mode requires SCM.");
     var builder = Host.CreateApplicationBuilder();
     builder.Logging.ClearProviders();
+    builder.Logging.AddEventLog(settings =>
+    {
+        settings.SourceName = "WindowsAdminMCP";
+        settings.Filter = (_, level) => level >= LogLevel.Information;
+    });
     builder.Services.AddWindowsService(options => options.ServiceName = ServiceIdentity.Name);
     builder.Services.AddSingleton<JobCoordinator>();
     builder.Services.AddHostedService<AdminService>();

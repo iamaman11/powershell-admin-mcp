@@ -50,6 +50,8 @@ function Wait-Status($p,[string]$expected){
 }
 try{
     New-Service -Name $name -BinaryPathName ('"'+$Exe+'" service') -StartupType Automatic | Out-Null
+    & sc.exe failure $name reset= 0 actions= restart/1000 | Out-Host
+    if($LASTEXITCODE -ne 0){throw 'SCM_FAILURE_POLICY_FAILED'}
     Start-Service $name
     $a=Connect;$b=Connect;$c=Connect
     $svc=Get-CimInstance Win32_Service -Filter "Name='$name'"
@@ -120,6 +122,50 @@ try{
     $list=Job $c 18 @{action='list'}
     Assert (@($list.jobs|Where-Object {$_.job_id -eq $kill.job.job_id -and $_.state -eq 'NEEDS_RECONCILIATION'}).Count -eq 1) 'r3.list_recovery'
     Write-Host 'R3_NATIVE_JOBS=PASS (actual service and PowerShell, three SDK stdio clients; no live tunnel/reboot)'
+    # Real non-idempotent local side effect, followed by a deliberate interruption.
+    $marker=Join-Path $data 'recovery-marker.txt'
+    $safePath=$marker.Replace("'","''")
+    $scriptA="[IO.File]::AppendAllText('$safePath','A'); Start-Sleep -Seconds 90"
+    $scriptB="[IO.File]::AppendAllText('$safePath','B'); Write-Output 'R4_OUTPUT_FIXTURE_7A98E1'"
+    $active=Job $b 30 @{action='submit';operation_key='r4-crash-active';command=$scriptA;timeout_seconds=120}
+    $queued=Job $c 31 @{action='submit';operation_key='r4-crash-queued';command=$scriptB;timeout_seconds=20}
+    Assert ($active.status -eq 'OK' -and $queued.status -eq 'OK') 'r4.durable_pending_jobs'
+    $deadline=[Diagnostics.Stopwatch]::StartNew()
+    while($deadline.Elapsed.TotalSeconds -lt 10){
+        if((Test-Path -LiteralPath $marker) -and [IO.File]::ReadAllText($marker) -eq 'A'){break}
+        Start-Sleep -Milliseconds 100
+    }
+    Assert ((Test-Path -LiteralPath $marker) -and [IO.File]::ReadAllText($marker) -eq 'A') 'r4.external_effect_observed_before_failure'
+    $pre=(Get-CimInstance Win32_Service -Filter "Name='$name'").ProcessId
+    Stop-Process -Id $pre -Force
+    # Do not start service manually: SCM recovery policy is the owner.
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    do{
+        Start-Sleep -Milliseconds 200
+        $restarted=Status $b 301
+        if($restarted.status -eq 'OK' -and $restarted.service_pid -ne $pre){break}
+    }while($clock.Elapsed.TotalSeconds -lt 20)
+    Assert ($restarted.status -eq 'OK' -and $restarted.service_pid -ne $pre) 'r4.actual_scm_auto_restart'
+    $unknown=Wait-JobState $b $active.job.job_id 'NEEDS_RECONCILIATION'
+    Assert ($null -eq $unknown.execution -and $unknown.job_id -eq $active.job.job_id) 'r4.unknown_effect_not_replayed'
+    $recovered=Wait-JobState $c $queued.job.job_id 'COMPLETED'
+    Assert ($recovered.execution.stdout.Trim() -eq 'R4_OUTPUT_FIXTURE_7A98E1' -and [IO.File]::ReadAllText($marker) -ceq 'AB') 'r4.queued_runs_after_crash_effect_exactly_once_in_fixture'
+    $again=Job $b 32 @{action='submit';operation_key='r4-crash-active';command=$scriptA;timeout_seconds=120}
+    Assert ($again.job.job_id -eq $active.job.job_id -and $again.job.state -eq 'NEEDS_RECONCILIATION') 'r4.retry_cannot_replay_unknown_effect'
+    Stop-Service $name
+    # Read actual persisted database bytes only while SCM service is stopped.
+    $files=Get-ChildItem -LiteralPath $data -File | Where-Object {$_.Name -like 'jobs.db*'}
+    Assert (@($files).Count -gt 0) 'r4.database_exists'
+    foreach($file in $files){
+        $bytes=[IO.File]::ReadAllBytes($file.FullName)
+        $text=[Text.Encoding]::UTF8.GetString($bytes)
+        Assert (-not $text.Contains('R4_OUTPUT_FIXTURE_7A98E1') -and -not $text.Contains('AppendAllText')) 'r4.dpapi_no_fixture_plaintext_in_database'
+    }
+    Start-Service $name
+    $null=Wait-Status $b 'OK'
+    $read=Job $c 33 @{action='logs';job_id=$queued.job.job_id}
+    Assert ($read.job.execution.stdout.Trim() -eq 'R4_OUTPUT_FIXTURE_7A98E1') 'r4.dpapi_decrypt_after_restart'
+    Write-Host 'R4_ACTUAL_CRASH_RECOVERY=PASS (SCM restart, not physical OS reboot)'
 }finally{
     foreach($p in $clients){
         if(-not $p.HasExited){$p.StandardInput.Close();if(-not $p.WaitForExit(3000)){$p.Kill($true);$p.WaitForExit()}}

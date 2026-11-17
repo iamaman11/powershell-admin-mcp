@@ -22,16 +22,31 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
         {
             connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource=StateDirectory.DatabasePath(), Pooling=false }.ToString());
             Db.Open();
+            using(var version=Command("PRAGMA user_version",null))
+            {
+                long v=(long)version.ExecuteScalar()!;
+                if(v==0)
+                {
+                    using var existing=Command("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='jobs'",null);
+                    if((long)existing.ExecuteScalar()! != 0)throw new InvalidOperationException("Unversioned job store; offline migration required.");
+                }
+                else if(v!=1)throw new InvalidOperationException("Unsupported job store version.");
+            }
+            using(var pragmas=Command("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",null))
+                pragmas.ExecuteNonQuery();
+            using var tx=Db.BeginTransaction();
             using var cmd=Command("""
-                PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
                 CREATE TABLE IF NOT EXISTS jobs(
                   seq INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL UNIQUE, op_key TEXT NOT NULL UNIQUE,
-                  payload_hash TEXT NOT NULL, command_hash TEXT NOT NULL, command TEXT, timeout_seconds INTEGER NOT NULL,
-                  cwd TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('QUEUED','RUNNING','CANCEL_REQUESTED','COMPLETED','FAILED','CANCELLED','NEEDS_RECONCILIATION')),
-                  created_utc TEXT NOT NULL, updated_utc TEXT NOT NULL, result TEXT);
+                  payload_hash TEXT NOT NULL, command_hash TEXT NOT NULL, command BLOB, timeout_seconds INTEGER NOT NULL,
+                  cwd BLOB NOT NULL, state TEXT NOT NULL CHECK(state IN ('QUEUED','RUNNING','CANCEL_REQUESTED','COMPLETED','FAILED','CANCELLED','NEEDS_RECONCILIATION')),
+                  created_utc TEXT NOT NULL, updated_utc TEXT NOT NULL, result BLOB);
+                PRAGMA user_version=1;
                 UPDATE jobs SET state='NEEDS_RECONCILIATION', command=NULL, updated_utc=$now WHERE state IN ('RUNNING','CANCEL_REQUESTED');
-                """,null,("$now",Now()));
-            cmd.ExecuteNonQuery();
+                """,tx,("$now",Now()));
+            int recovered=cmd.ExecuteNonQuery();
+            tx.Commit();
+            logger.LogInformation("Job store ready. Recovery changed rows {Recovered}",recovered);
         }
     }
     private void Signal() { if(wake.CurrentCount==0) wake.Release(); }
@@ -68,8 +83,8 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 using var insert=Command("""
                     INSERT INTO jobs(job_id,op_key,payload_hash,command_hash,command,timeout_seconds,cwd,state,created_utc,updated_utc)
                     VALUES($id,$key,$payload,$hash,$script,$timeout,$cwd,'QUEUED',$now,$now)
-                    """,tx,("$id",id),("$key",key),("$payload",payload),("$hash",hash),("$script",script),
-                    ("$timeout",request.TimeoutSeconds),("$cwd",cwd),("$now",now));
+                    """,tx,("$id",id),("$key",key),("$payload",payload),("$hash",hash),("$script",JobDataProtection.Protect(script,id,"command")),
+                    ("$timeout",request.TimeoutSeconds),("$cwd",JobDataProtection.Protect(cwd,id,"cwd")),("$now",now));
                 insert.ExecuteNonQuery();
                 tx.Commit();
                 Signal();
@@ -115,7 +130,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
     }
     private static JobInfo Read(SqliteDataReader r,bool result)=>new(r.GetString(0),r.GetString(1),
         Enum.Parse<JobState>(r.GetString(2)),r.GetString(3),r.GetString(4),r.GetString(5),
-        result&&!r.IsDBNull(6)?JsonSerializer.Deserialize<ExecutionResult>(r.GetString(6),PipeWire.Json):null);
+        result&&!r.IsDBNull(6)?JsonSerializer.Deserialize<ExecutionResult>(JobDataProtection.Open((byte[])r.GetValue(6),r.GetString(0),"result"),PipeWire.Json):null);
     private SqliteCommand Command(string sql,SqliteTransaction? tx,params (string Name,object Value)[] parameters)
     {
         var cmd=Db.CreateCommand();cmd.Transaction=tx;cmd.CommandText=sql;
@@ -138,7 +153,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
             using(var row=cmd.ExecuteReader())
             {
                 if(!row.Read())return null;
-                id=row.GetString(0);script=row.GetString(1);timeout=row.GetInt32(2);cwd=row.GetString(3);
+                id=row.GetString(0);script=JobDataProtection.Open((byte[])row.GetValue(1),id,"command");timeout=row.GetInt32(2);cwd=JobDataProtection.Open((byte[])row.GetValue(3),id,"cwd");
             }
             tx.Commit();
             active=CancellationTokenSource.CreateLinkedTokenSource(stop);activeId=id;
@@ -165,7 +180,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 using var cmd=Command("""
                     UPDATE jobs SET state=$state,result=$result,command=NULL,updated_utc=$now
                     WHERE job_id=$id AND state IN ('RUNNING','CANCEL_REQUESTED')
-                    """,null,("$state",end.ToString()),("$result",JsonSerializer.Serialize(result,PipeWire.Json)),("$now",Now()),("$id",work.Id));
+                    """,null,("$state",end.ToString()),("$result",JobDataProtection.Protect(JsonSerializer.Serialize(result,PipeWire.Json),work.Id,"result")),("$now",Now()),("$id",work.Id));
                 if(cmd.ExecuteNonQuery()!=1)throw new InvalidOperationException("Lost job transition");
                 active=null;activeId=null;work.Cancel.Dispose();
             }
