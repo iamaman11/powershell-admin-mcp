@@ -67,6 +67,7 @@ function Read-Manifest($dir){
 $archivePath=(Resolve-Path -LiteralPath $PackagePath).Path
 $stream=[IO.File]::Open($archivePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
 $incoming=$null
+$swapAttempted=$false
 try{
     if([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stream)) -ne $ExpectedSha256){throw 'PACKAGE_SHA256_MISMATCH'}
     $stream.Position=0
@@ -87,6 +88,14 @@ try{
         }
         [IO.Compression.ZipFileExtensions]::ExtractToDirectory($archive,$incoming)
     }finally{$archive.Dispose()}
+    # The extracted files may inherit the elevated user's default owner.
+    # Normalize only the private incoming tree before checking its complete ACL.
+    foreach($item in (Get-ChildItem -LiteralPath $incoming -Recurse -Force)){
+        if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'PACKAGE_REPARSE_POINT'}
+        $acl=Get-Acl -LiteralPath $item.FullName
+        $acl.SetOwner($admin)
+        Set-Acl -LiteralPath $item.FullName -AclObject $acl
+    }
     $m=Read-Manifest $incoming
     if($Action -eq 'Verify'){
         [pscustomobject]@{status='VERIFIED';commit=$m.commit;files=$m.files.Count;installed=$false}|ConvertTo-Json -Compress
@@ -102,7 +111,6 @@ try{
     if($service -and ($service.State -ne 'Stopped' -or $service.PathName -ine $binding -or $service.StartName -ne 'LocalSystem')){throw 'SCM_MAINTENANCE_REQUIRED'}
     if(-not(Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'))){throw 'MACHINE_POWERSHELL_REQUIRED'}
     if(-not(Test-Path -LiteralPath $root)){New-Protected $root}else{Assert-Protected $root}
-    if(Test-Path -LiteralPath (Join-Path $root '.rollback')){throw 'UNACCEPTED_PREVIOUS_INSTALLATION'}
     foreach($name in @('native','client','manifest.json')){
         $p=Join-Path $root $name
         if(Test-Path -LiteralPath $p){Assert-Protected $p}
@@ -112,10 +120,12 @@ try{
         if($old.commit -eq $m.commit -and $old.files.Count -eq $m.files.Count -and $service){
             $same=$true
             foreach($name in $m.files.Keys){if(-not $old.files.Contains($name) -or $old.files[$name] -ne $m.files[$name]){$same=$false;break}}
-            if($same){[pscustomobject]@{status='NOOP';commit=$m.commit;autostart=$false}|ConvertTo-Json -Compress;return}
+            if($same){[pscustomobject]@{status='NOOP';commit=$m.commit;rollback_retained=(Test-Path -LiteralPath (Join-Path $root '.rollback'));autostart=$false}|ConvertTo-Json -Compress;return}
         }
     }
+    if(Test-Path -LiteralPath (Join-Path $root '.rollback')){throw 'UNACCEPTED_PREVIOUS_INSTALLATION'}
     $script:createdService=$false
+    $swapAttempted=$true
     Invoke-NativeFileSwap -Root $root -Incoming $incoming -Validate {
         $null=Read-Manifest $root
         if(-not $service){
@@ -134,7 +144,7 @@ try{
 }finally{
     $stream.Dispose()
     # If rollback itself failed, keep the incoming files for offline recovery.
-    if($incoming -and (Test-Path -LiteralPath $incoming) -and -not(Test-Path -LiteralPath (Join-Path $root '.rollback'))){
+    if($incoming -and (Test-Path -LiteralPath $incoming) -and (-not $swapAttempted -or -not(Test-Path -LiteralPath (Join-Path $root '.rollback')))){
         Remove-Item -LiteralPath $incoming -Recurse -Force
     }elseif($incoming -and (Test-Path -LiteralPath $incoming) -and @(Get-ChildItem -LiteralPath $incoming -Force).Count -eq 0){
         Remove-Item -LiteralPath $incoming
