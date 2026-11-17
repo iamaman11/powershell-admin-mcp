@@ -28,7 +28,7 @@ else if (args is ["doctor"])
 {
     var report=await Doctor.ObserveAsync();
     Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(report,PipeWire.Json));
-    Environment.ExitCode=report.Status==DoctorState.DEGRADED?1:0;
+    Environment.ExitCode=report.Status==DoctorState.OK?0:1;
 }
 else if (args is ["doctor", "boot"])
 {

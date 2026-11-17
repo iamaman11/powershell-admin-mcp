@@ -23,7 +23,7 @@ public sealed record JobInfo(
     [property:JsonPropertyName("completed_steps")] int CompletedSteps = 0,
     [property:JsonPropertyName("total_steps")] int TotalSteps = 1,
     [property:JsonPropertyName("result_step")] int? ResultStep = null,
-    [property:JsonPropertyName("reboot_evidence")] BootEvidenceCode? RebootEvidence = null);
+    [property:JsonPropertyName("reboot_evidence"), JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] BootEvidenceCode? RebootEvidence = null);
 
 public sealed record JobReply(
     [property:JsonPropertyName("status")] StatusCode Status,

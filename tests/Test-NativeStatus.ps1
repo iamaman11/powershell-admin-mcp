@@ -239,8 +239,19 @@ try{
     Write-Host 'R5_SCREENSHOT_CONTRACT=PASS (no physical desktop capture in CI)'
 
     # Native CLI diagnostics use the same service and complete store counts.
-    $rawDoctor=& $Exe doctor
-    $doctorExit=$LASTEXITCODE
+    $doctorStart=[Diagnostics.ProcessStartInfo]::new($Exe)
+    $doctorStart.ArgumentList.Add('doctor')
+    $doctorStart.UseShellExecute=$false
+    $doctorStart.RedirectStandardOutput=$true
+    $doctorStart.RedirectStandardError=$true
+    $doctorProc=[Diagnostics.Process]::Start($doctorStart)
+    try{
+        $out=$doctorProc.StandardOutput.ReadToEndAsync()
+        $err=$doctorProc.StandardError.ReadToEndAsync()
+        if(-not $doctorProc.WaitForExit(15000)){throw 'DOCTOR_TIMEOUT'}
+        $rawDoctor=$out.GetAwaiter().GetResult()
+        $doctorExit=$doctorProc.ExitCode
+    }finally{if(-not $doctorProc.HasExited){$doctorProc.Kill($true);$doctorProc.WaitForExit()};$doctorProc.Dispose()}
     $doctor=$rawDoctor|ConvertFrom-Json -AsHashtable
     Assert ($doctor.schemaVersion -eq 1 -and $doctor.status -eq 'DEGRADED' -and $doctorExit -eq 1) 'r6.doctor_reports_isolated_install_degraded'
     Assert ($doctor.service.service_pid -eq (Get-CimInstance Win32_Service -Filter "Name='$name'").ProcessId -and $doctor.store.schemaVersion -eq 3) 'r6.doctor_authoritative_service_store'

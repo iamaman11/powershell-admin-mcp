@@ -145,10 +145,10 @@ try
 {
     string database=Path.Combine(migrationRoot,"jobs.db");
     string id=Guid.NewGuid().ToString("N"), key="v2-completed-fixture";
-    string command="Write-Output 'v2 preserved'", cwd=Environment.SystemDirectory;
+    string command="Write-Output 'v2 preserved'", v2Cwd=Environment.SystemDirectory;
     string Hash(string text)=>Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
     // Same anonymous object/property order and defaults as schema v2.
-    string payload=Hash(System.Text.Json.JsonSerializer.Serialize(new {steps=new[] {new {command,timeout_seconds=30,pause_after=false}},cwd}));
+    string payload=Hash(System.Text.Json.JsonSerializer.Serialize(new {steps=new[] {new {command,timeout_seconds=30,pause_after=false}},cwd=v2Cwd}));
     using(var db=new Microsoft.Data.Sqlite.SqliteConnection("Data Source="+database+";Pooling=False"))
     {
         db.Open();
@@ -181,7 +181,7 @@ try
         row.Parameters.AddWithValue("$key",key);
         row.Parameters.AddWithValue("$payload",payload);
         row.Parameters.AddWithValue("$hash",Hash(command));
-        row.Parameters.AddWithValue("$cwd",JobDataProtection.Protect(cwd,id,"cwd"));
+        row.Parameters.AddWithValue("$cwd",JobDataProtection.Protect(v2Cwd,id,"cwd"));
         row.Parameters.AddWithValue("$now",DateTimeOffset.UtcNow.ToString("O"));
         row.Parameters.AddWithValue("$result",JobDataProtection.Protect(System.Text.Json.JsonSerializer.Serialize(
             new ExecutionResult(ExecutionState.COMPLETED,Hash(command),12,0,"v2 preserved"),PipeWire.Json),id,"step/1/result"));
@@ -193,7 +193,7 @@ try
         var saved=store.Dispatch(new(AdminOperation.Job,JobAction.logs,JobId:id),"migration");
         Check(saved.Status==StatusCode.OK && saved.Job?.State==JobState.COMPLETED &&
             saved.Job.Execution?.Stdout=="v2 preserved","r4.real_v2_migration_preserves_encrypted_result");
-        var duplicate=store.Dispatch(new(AdminOperation.Job,JobAction.submit,Key:key,Command:command,WorkingDirectory:cwd),"migration");
+        var duplicate=store.Dispatch(new(AdminOperation.Job,JobAction.submit,Key:key,Command:command,WorkingDirectory:v2Cwd),"migration");
         Check(duplicate.Status==StatusCode.OK && duplicate.Job?.JobId==id,"r4.v2_payload_hash_unchanged");
         var counts=store.Summary();
         Check(counts.SchemaVersion==3 && counts.Total==1 && counts.Completed==1,"r4.migration_store_counts");

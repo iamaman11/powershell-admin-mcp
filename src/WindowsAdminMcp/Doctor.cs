@@ -47,9 +47,19 @@ internal static class Doctor
             pwsh?DoctorAction.NONE:DoctorAction.VERIFY_INSTALLATION);
         var response=await AdminTools.Diagnostics(CancellationToken.None);
         bool service=response.Code==StatusCode.OK && response.Info is {Status:StatusCode.OK,ExecutionSid:"S-1-5-18",ServicePid:int};
+        if(service)
+        {
+            try
+            {
+                using var process=Process.GetProcessById(response.Info!.ServicePid!.Value);
+                service=string.Equals(process.MainModule?.FileName,Environment.ProcessPath,StringComparison.OrdinalIgnoreCase);
+            }
+            catch(Exception e) when(e is Win32Exception or InvalidOperationException or ArgumentException or UnauthorizedAccessException or System.Security.SecurityException)
+            {service=false;}
+        }
         Add(DoctorComponent.Service,service?DoctorState.OK:DoctorState.DEGRADED,
             service?DoctorReason.OBSERVED:DoctorReason.SERVICE_NOT_CONFIRMED,service?DoctorAction.NONE:DoctorAction.CHECK_SERVICE);
-        var store=response.Code==StatusCode.OK?response.Store:null;
+        var store=service?response.Store:null;
         var storeReason=store is null?DoctorReason.STORE_NOT_CONFIRMED:
             store.NeedsReconciliation>0?DoctorReason.RECONCILIATION_REQUIRED:
             store.Total>=store.TotalLimit || store.Queued+store.Running+store.CancelRequested+store.WaitingForResume+store.WaitingForReboot>=store.ActiveLimit
