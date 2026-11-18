@@ -27,7 +27,15 @@ Stop disconnects the interactive tunnel but does not stop the durable system ser
 
 ## Install, update, trial and rollback
 
-Use the CI package ZIP and its published SHA-256 from the exact accepted commit, not source-script installation. From a trusted checkout:
+For an existing installation, after changes are merged into `main` and its push CI succeeds, the standard interactive elevated PowerShell 7 command from a **clean, current main checkout** is:
+
+```powershell
+.\\WindowsAdminMCP.ps1 -Action update
+```
+
+It verifies the exact main commit and matching successful CI, downloads and verifies the official package, drains idle work, replaces files offline, prepares and starts the new trial, and checks local readiness. It intentionally does **not** accept the candidate remotely; exercise all eight MCP tools before explicit acceptance. If jobs are active or local clients hold binaries, the command stops with an explanatory error; resolve those conditions, then rerun. Never use an unrelated application directory as the checkout.
+
+Manual initial-install and recovery entry points remain available. Use the CI package ZIP and its published SHA-256 from the exact accepted commit, not source-script installation. From a trusted checkout:
 
 ```powershell
 .\Install-WindowsAdminMCP.ps1 -Action Verify -PackagePath <zip> -ExpectedSha256 <sha256>
@@ -35,7 +43,7 @@ Use the CI package ZIP and its published SHA-256 from the exact accepted commit,
 .\Install-WindowsAdminMCP.ps1 -Action Prepare -ExpectedCommit <commit>
 ```
 
-For an existing install, use the independent local console to stop the tunnel and service intentionally and run `Maintenance -ExpectedCommit <installed-commit>` before file replacement. Close existing local stdio clients after finishing their jobs; an idle frontend can hold native DLLs and blocks replacement with `ACTIVE_FRONTEND_MAINTENANCE_REQUIRED`. The installer never kills clients. Prepare creates the one demand-start trial task and configures SCM recovery: restart after 5/15/60 seconds, then stop retrying, with a 24-hour failure-count reset and non-crash failure handling. It never reboots Windows or runs a recovery command. Native recovery readback is included in startup readiness; configuring non-crash handling does not prove its behavior before a future Windows restart. Start via the native operator; verify all four tools externally, refresh the existing connector catalog, check actual service and vendor, then run `Accept -ExpectedCommit <commit> -RemoteAcceptanceConfirmed` only after real client acceptance. This enables normal startup. The installer never performs live replacement. `Rollback` is offline only and refuses an older binary that cannot read the current store. Schema 2/3 is backed up before transactional migration to 4; **never restore stale database backups automatically**. Same-schema rollback must preserve jobs and idempotency keys.
+For an existing install, use the independent local console to stop the tunnel and service intentionally and run `Maintenance -ExpectedCommit <installed-commit>` before file replacement. Close existing local stdio clients after finishing their jobs; an idle frontend can hold native DLLs and blocks replacement with `ACTIVE_FRONTEND_MAINTENANCE_REQUIRED`. The installer never kills clients. Prepare creates the one demand-start trial task and configures SCM recovery: restart after 5/15/60 seconds, then stop retrying, with a 24-hour failure-count reset and non-crash failure handling. It never reboots Windows or runs a recovery command. Native recovery readback is included in startup readiness; configuring non-crash handling does not prove its behavior before a future Windows restart. Start via the native operator; verify all eight tools externally, refresh the existing connector catalog, check actual service and vendor, then run `Accept -ExpectedCommit <commit> -RemoteAcceptanceConfirmed` only after real client acceptance. This enables normal startup. The installer never performs live replacement. `Rollback` is offline only and refuses an older binary that cannot read the current store. Schema 2/3 is backed up before transactional migration to 4; **never restore stale database backups automatically**. Same-schema rollback must preserve jobs and idempotency keys.
 
 ## Tools
 
