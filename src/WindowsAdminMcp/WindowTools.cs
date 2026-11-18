@@ -15,6 +15,7 @@ public enum WindowListCode
 
 public sealed record WindowSummary(
     [property: JsonPropertyName("window_id")] string WindowId,
+    [property: JsonPropertyName("hwnd")] long Handle,
     [property: JsonPropertyName("process_id")] int ProcessId,
     [property: JsonPropertyName("process_name")] string ProcessName,
     [property: JsonPropertyName("title")] string Title,
@@ -108,7 +109,7 @@ internal static class WindowCatalog
                 if (process.SessionId != session) return true;
                 var identity = new WindowIdentity(hwnd.ToInt64(), process.Id,
                     process.StartTime.ToFileTimeUtc(), session);
-                windows.Add(new(FormatId(identity), process.Id, process.ProcessName,
+                windows.Add(new(FormatId(identity), identity.Handle, process.Id, process.ProcessName,
                     title.ToString(), session, hwnd == foreground));
             }
             catch (Exception e) when (e is ArgumentException or InvalidOperationException or
