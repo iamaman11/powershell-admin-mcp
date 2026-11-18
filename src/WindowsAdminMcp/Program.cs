@@ -48,6 +48,50 @@ else if (args is ["doctor", "boot"])
     Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(boot, PipeWire.Json));
     Environment.ExitCode = boot.Status == BootEvidenceCode.FULL_BOOT_OBSERVED ? 0 : 1;
 }
+else if (args is ["window-inspect-worker", var windowId, var depthText, var maxText])
+{
+    // Short-lived on-demand UIA reader; independently validates USER desktop.
+    WindowInspectResult result = int.TryParse(depthText, out int depth) &&
+        int.TryParse(maxText, out int maxElements)
+        ? WindowInspector.InspectInWorker(windowId, depth, maxElements)
+        : new(WindowInspectCode.INVALID_ARGUMENT, []);
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, PipeWire.Json));
+}
+else if (args is ["window-capture-worker", var captureId, var widthText])
+{
+    // Runs only on the authorized USER desktop; WGC never calls desktop CopyFromScreen.
+    var wire = int.TryParse(widthText, out int maxWidth)
+        ? await WindowCapture.CaptureInWorkerAsync(captureId, maxWidth)
+        : new WindowCaptureWire(new(WindowCaptureCode.INVALID_ARGUMENT));
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(wire, PipeWire.Json));
+}
+else if (args is ["window-action-worker"])
+{
+    // No action values in process arguments. Parent sends bounded JSON via stdin.
+    WindowActionResult result;
+    try
+    {
+        char[] chars = new char[16001];
+        int length = 0;
+        while (length < chars.Length)
+        {
+            int read = await Console.In.ReadAsync(chars.AsMemory(length));
+            if (read == 0) break;
+            length += read;
+        }
+        var request = length <= 16000
+            ? System.Text.Json.JsonSerializer.Deserialize<WindowActionRequest>(
+                new string(chars, 0, length), PipeWire.Json)
+            : null;
+        result = request is null ? new(WindowActionCode.INVALID_ARGUMENT) :
+            WindowAction.InvokeInWorker(request);
+    }
+    catch (System.Text.Json.JsonException)
+    {
+        result = new(WindowActionCode.INVALID_ARGUMENT);
+    }
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, PipeWire.Json));
+}
 else if (args is ["stdio"])
 {
     // The SDK frontend is not a runtime credential owner.
@@ -59,7 +103,7 @@ else if (args is ["stdio"])
     builder.Services.AddMcpServer(options =>
     {
         options.ServerInfo = new() { Name = "windows-admin-mcp", Version = BuildIdentity.McpVersion };
-    }).WithStdioServerTransport().WithTools<AdminTools>();
+    }).WithStdioServerTransport().WithTools<AdminTools>().WithTools<WindowTools>();
     await builder.Build().RunAsync();
 }
 else

@@ -29,6 +29,144 @@ using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent())
 }
 Check(AdminTools.ExecWaitBudget(120)==TimeSpan.FromSeconds(90) && AdminTools.ExecWaitBudget(85)==TimeSpan.FromSeconds(90) &&
     AdminTools.ExecWaitBudget(10)==TimeSpan.FromSeconds(15), "transport.exec_wait_budget");
+var testWindowIdentity = new WindowIdentity(0x12345, 4242, 133700000000000000, 1);
+string testWindowId = WindowCatalog.FormatId(testWindowIdentity);
+Check(WindowCatalog.TryParseId(testWindowId, out var decodedWindowId) && decodedWindowId == testWindowIdentity &&
+    !WindowCatalog.TryParseId("w1:bad:token", out _) &&
+    !WindowCatalog.TryParseId("w1:0:1:1:1", out _), "windows.stable_ref_contract");
+var invalidWindowLimit = await WindowTools.ListWindows(max_windows: 0);
+Check(invalidWindowLimit.Status == WindowListCode.INVALID_ARGUMENT && invalidWindowLimit.Windows.Length == 0,
+    "windows.bounded_argument_validation");
+Check(!WindowCatalog.TryParseId(new string('x', 256), out _), "windows.reject_unbounded_ref");
+Check(WindowCatalog.ResolveId(testWindowId, 2, out _) == WindowResolveCode.WRONG_SESSION,
+    "windows.reject_cross_session_ref");
+var staleWindowId = WindowCatalog.FormatId(new WindowIdentity(long.MaxValue, 4242, 133700000000000000, 1));
+Check(WindowCatalog.ResolveId(staleWindowId, 1, out _) == WindowResolveCode.STALE_WINDOW,
+    "windows.reject_stale_hwnd");
+Check(WindowInspector.ValidArguments(testWindowId, 0, 1) &&
+    WindowInspector.ValidArguments(testWindowId, 5, 100) &&
+    !WindowInspector.ValidArguments(testWindowId, 6, 50) &&
+    !WindowInspector.ValidArguments(testWindowId, 3, 101) &&
+    !WindowInspector.ValidArguments("invalid", 3, 60), "windows.inspect_bounded_arguments");
+Check(WindowInspector.InspectCore(IntPtr.Zero, 1, 20).Status == WindowInspectCode.INVALID_ARGUMENT,
+    "windows.inspect_reject_null_hwnd");
+var invalidInspect = await WindowTools.InspectWindow("invalid");
+Check(invalidInspect.Status == WindowInspectCode.INVALID_ARGUMENT, "windows.inspect_reject_bad_ref_before_ipc");
+string freshElementId = "e1:" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString("x") +
+    ":0123456789abcdef0123456789abcdef";
+Check(WindowInspector.TryParseElementRef(freshElementId, out _) &&
+    !WindowInspector.TryParseElementRef("bad", out _) &&
+    !WindowInspector.TryParseElementRef("e1:1:0123456789abcdef0123456789abcdef", out _),
+    "windows.action_fresh_reference_and_stale_rejection");
+Check(WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.INVOKE, null)) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.INVOKE, "unexpected")) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.SET_VALUE, new string('x', 4097))),
+    "windows.action_bounded_arguments");
+var invalidAction = await WindowTools.InvokeElement("bad", "bad", WindowActionKind.INVOKE, confirm: true);
+Check(invalidAction.Status == WindowActionCode.INVALID_ARGUMENT, "windows.action_reject_bad_ref_before_ipc");
+var missingConfirmation = await WindowTools.InvokeElement(testWindowId, freshElementId, WindowActionKind.INVOKE);
+Check(missingConfirmation.Status == WindowActionCode.CONFIRMATION_REQUIRED,
+    "windows.action_requires_explicit_confirmation");
+// This is an owned throwaway fixture. No real user window or screen pixels are read.
+var uiaDesktop = DesktopCapture.ObserveDesktop(Process.GetCurrentProcess().SessionId);
+if (uiaDesktop.Code == CaptureCode.COMPLETED)
+{
+    var ready = new TaskCompletionSource<(IntPtr Handle, System.Windows.Forms.Form Form, System.Windows.Forms.TextBox Input)>(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    int clickCount = 0;
+    var uiThread = new Thread(() =>
+    {
+        try
+        {
+            using var form = new System.Windows.Forms.Form { Text = "CI_UIA_OWNED_WINDOW", Width = 330, Height = 180 };
+            using var button = new System.Windows.Forms.Button
+                { Text = "CI_UIA_OWNED_BUTTON", AccessibleName = "CI_UIA_OWNED_BUTTON", Width = 250 };
+            using var input = new System.Windows.Forms.TextBox
+                { Text = "CI_UIA_SECRET_FIXTURE", AccessibleName = "CI_UIA_INPUT_NAME", Top = 40, Width = 250 };
+            using var cover = new System.Windows.Forms.Form
+                { Text = "CI_UIA_COVER", FormBorderStyle = System.Windows.Forms.FormBorderStyle.None,
+                  TopMost = true, ShowInTaskbar = false };
+            button.Click += (_, _) => Interlocked.Increment(ref clickCount);
+            form.Controls.Add(button);
+            form.Controls.Add(input);
+            form.Shown += (_, _) =>
+            {
+                cover.BackColor = System.Drawing.Color.Magenta;
+                cover.Bounds = form.Bounds;
+                cover.Show();
+                ready.TrySetResult((form.Handle, form, input));
+            };
+            System.Windows.Forms.Application.Run(form);
+        }
+        catch (Exception error) { ready.TrySetException(error); }
+    }) { IsBackground = true };
+    uiThread.SetApartmentState(ApartmentState.STA);
+    uiThread.Start();
+    System.Windows.Forms.Form? ownedForm = null;
+    try
+    {
+        var created = await ready.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        ownedForm = created.Form;
+        using var current = Process.GetCurrentProcess();
+        var realWindowId = WindowCatalog.FormatId(new WindowIdentity(created.Handle.ToInt64(),
+            current.Id, current.StartTime.ToFileTimeUtc(), current.SessionId));
+        var result = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 40, realWindowId))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        Check(result.Status == WindowInspectCode.COMPLETED &&
+            result.Elements.Any(e => e.Name == "CI_UIA_OWNED_BUTTON") &&
+            result.Elements.Any(e => e.Role.Contains("Edit", StringComparison.Ordinal) &&
+                                     e.Name == "[redacted]") &&
+            result.Elements.All(e => !e.Name.Contains("CI_UIA_SECRET_FIXTURE", StringComparison.Ordinal)),
+            "windows.inspect_owned_occluded_winforms_tree_and_redaction");
+        Check(result.ElementRefExpiresUtc > DateTimeOffset.UtcNow &&
+            result.Elements.All(e => WindowInspector.TryParseElementRef(e.ElementId, out _)),
+            "windows.action_inspection_returns_fresh_selectors");
+        if (Windows.Graphics.Capture.GraphicsCaptureSession.IsSupported())
+        {
+            var image = await WindowCapture.CaptureCoreAsync(created.Handle, realWindowId, 640)
+                .WaitAsync(TimeSpan.FromSeconds(10));
+            Check(image.Result.Status == WindowCaptureCode.COMPLETED &&
+                image.Png is { Length: > 100 } && image.Png.Length <= 2_000_000 &&
+                image.Png[0] == 137 && image.Png[1] == 80 &&
+                image.Result.Width is > 0 and <= 640,
+                "windows.capture_owned_occluded_winforms_png");
+            using var pngData = new MemoryStream(image.Png!);
+            using var capturedBitmap = new System.Drawing.Bitmap(pngData);
+            int magenta = 0;
+            for (int y = 0; y < capturedBitmap.Height; y += 10)
+                for (int x = 0; x < capturedBitmap.Width; x += 10)
+                {
+                    var pixel = capturedBitmap.GetPixel(x, y);
+                    if (pixel.R > 230 && pixel.G < 40 && pixel.B > 230) magenta++;
+                }
+            Check(magenta == 0, "windows.capture_target_not_magenta_cover");
+        }
+        else Console.WriteLine("NOT_TESTED windows.capture_owned_occluded_winforms_png wgc_unsupported");
+        var buttonTarget = result.Elements.Single(e => e.Name == "CI_UIA_OWNED_BUTTON");
+        var click = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, buttonTarget.ElementId, WindowActionKind.INVOKE, null)))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        Check(click.Status == WindowActionCode.COMPLETED &&
+            Volatile.Read(ref clickCount) == 1, "windows.action_invoke_occluded_button");
+        var inputTarget = result.Elements.Single(e => e.Role.Contains("Edit", StringComparison.Ordinal));
+        var edit = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, inputTarget.ElementId, WindowActionKind.SET_VALUE,
+                "CI_UIA_UPDATED_VALUE"))).WaitAsync(TimeSpan.FromSeconds(5));
+        var edited = (string)created.Form.Invoke(new Func<string>(() => created.Input.Text));
+        Check(edit.Status == WindowActionCode.COMPLETED && edited == "CI_UIA_UPDATED_VALUE",
+            "windows.action_set_value_occluded_edit");
+    }
+    finally
+    {
+        if (ownedForm is { IsDisposed: false, IsHandleCreated: true })
+        {
+            try { ownedForm.BeginInvoke(new Action(ownedForm.Close)); }
+            catch (InvalidOperationException) { }
+        }
+        uiThread.Join(2000);
+    }
+}
+else Console.WriteLine($"NOT_TESTED windows.inspect_owned_occluded_winforms_tree desktop={uiaDesktop.Code}");
 var simple = await Run("Write-Output 'hello'");
 Check(simple.Status == ExecutionState.COMPLETED && simple.ExitCode == 0 && simple.Stdout.Trim() == "hello", "r2.stdout_exit");
 string prefix = "Write-Output 'Проверка Unicode 🚀'\n#";

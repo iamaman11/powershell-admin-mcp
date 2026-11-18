@@ -27,7 +27,15 @@ Stop disconnects the interactive tunnel but does not stop the durable system ser
 
 ## Install, update, trial and rollback
 
-Use the CI package ZIP and its published SHA-256 from the exact accepted commit, not source-script installation. From a trusted checkout:
+For an existing installation, after changes are merged into `main` and its push CI succeeds, the standard interactive elevated PowerShell 7 command from a **clean, current main checkout** is:
+
+```powershell
+.\\WindowsAdminMCP.ps1 -Action update
+```
+
+It verifies the exact main commit and matching successful CI, downloads and verifies the official package, drains idle work, replaces files offline, prepares and starts the new trial, and checks local readiness. It intentionally does **not** accept the candidate remotely; exercise all eight MCP tools before explicit acceptance. If jobs are active or local clients hold binaries, the command stops with an explanatory error; resolve those conditions, then rerun. Never use an unrelated application directory as the checkout.
+
+Manual initial-install and recovery entry points remain available. Use the CI package ZIP and its published SHA-256 from the exact accepted commit, not source-script installation. From a trusted checkout:
 
 ```powershell
 .\Install-WindowsAdminMCP.ps1 -Action Verify -PackagePath <zip> -ExpectedSha256 <sha256>
@@ -35,7 +43,7 @@ Use the CI package ZIP and its published SHA-256 from the exact accepted commit,
 .\Install-WindowsAdminMCP.ps1 -Action Prepare -ExpectedCommit <commit>
 ```
 
-For an existing install, use the independent local console to stop the tunnel and service intentionally and run `Maintenance -ExpectedCommit <installed-commit>` before file replacement. Close existing local stdio clients after finishing their jobs; an idle frontend can hold native DLLs and blocks replacement with `ACTIVE_FRONTEND_MAINTENANCE_REQUIRED`. The installer never kills clients. Prepare creates the one demand-start trial task and configures SCM recovery: restart after 5/15/60 seconds, then stop retrying, with a 24-hour failure-count reset and non-crash failure handling. It never reboots Windows or runs a recovery command. Native recovery readback is included in startup readiness; configuring non-crash handling does not prove its behavior before a future Windows restart. Start via the native operator; verify all four tools externally, refresh the existing connector catalog, check actual service and vendor, then run `Accept -ExpectedCommit <commit> -RemoteAcceptanceConfirmed` only after real client acceptance. This enables normal startup. The installer never performs live replacement. `Rollback` is offline only and refuses an older binary that cannot read the current store. Schema 2/3 is backed up before transactional migration to 4; **never restore stale database backups automatically**. Same-schema rollback must preserve jobs and idempotency keys.
+For an existing install, use the independent local console to stop the tunnel and service intentionally and run `Maintenance -ExpectedCommit <installed-commit>` before file replacement. Close existing local stdio clients after finishing their jobs; an idle frontend can hold native DLLs and blocks replacement with `ACTIVE_FRONTEND_MAINTENANCE_REQUIRED`. The installer never kills clients. Prepare creates the one demand-start trial task and configures SCM recovery: restart after 5/15/60 seconds, then stop retrying, with a 24-hour failure-count reset and non-crash failure handling. It never reboots Windows or runs a recovery command. Native recovery readback is included in startup readiness; configuring non-crash handling does not prove its behavior before a future Windows restart. Start via the native operator; verify all eight tools externally, refresh the existing connector catalog, check actual service and vendor, then run `Accept -ExpectedCommit <commit> -RemoteAcceptanceConfirmed` only after real client acceptance. This enables normal startup. The installer never performs live replacement. `Rollback` is offline only and refuses an older binary that cannot read the current store. Schema 2/3 is backed up before transactional migration to 4; **never restore stale database backups automatically**. Same-schema rollback must preserve jobs and idempotency keys.
 
 ## Tools
 
@@ -45,6 +53,12 @@ If physical acceptance rejects an unaccepted schema-4 candidate, use offline `In
 - powershell_exec: durable single step, execution timeout 1–120 s, synchronous wait capped at 90 s from entry. PENDING carries job_id; inspect it, don't resubmit with a different key.
 - powershell_job: submit (1–8 steps, each timeout 1–3600 s), status by job_id or operation_key, logs (step_index **1-based**, 1..total_steps), list with state_filter/page_size (1–100)/before_seq cursor, cancel, resume, reconcile, prune.
 - powershell_screenshot: PNG ImageContent; bounded region and image size. Requires authorized default physical console; never unlocks or switches sessions. Returns typed reason and local timing on failure.
+- windows.list_windows (draft candidate): lists up to 100 titled, visible top-level windows on the authorized physical USER desktop, including covered windows. Each `window_id` binds HWND, PID, process start and session. Never changes focus.
+- windows.inspect_window (draft candidate): reads a bounded UI Automation control tree without activating elements; depth 3 / 60 nodes by default, hard cap depth 5 / 100 nodes. Names of password, Edit and Document fields are redacted, and input **values are never returned**. Each element has an `element_id` valid for 30 seconds; `path`/`parent_index` are snapshot diagnostics, not selectors. Provider access runs in a disposable 5-second worker.
+- windows.capture_window (draft candidate): captures **only** the selected HWND with Windows Graphics Capture, including when the window is covered. Requires `window_id` and authorized USER desktop. Output is a PNG ImageContent with structured status, max width 256–1920 (default 1280), max 2 MB and 1080 pixel height. GPU access runs in a 10-second killable worker. Minimized, capture-protected, locked/remote or unsupported windows can fail explicitly. There is no silent desktop-screenshot fallback.
+- windows.invoke_element (draft candidate): performs one UI Automation `INVOKE` (button/link/menu), `SET_VALUE` (Edit), `SELECT` (list/tab/radio) or `TOGGLE` (checkbox). Requires the current `window_id`, a fresh `element_id` from `inspect_window`, and explicit `confirm=true`. It validates USER session, desktop, HWND ownership, element fingerprint, control type and supported UIA pattern. No mouse, keyboard, `SetForegroundWindow` or `SetFocus` calls; an individual UIA provider can nevertheless change focus, which is reported by `foreground_changed`. The optional `value` is ≤4096 characters and is sent to the 5-second child through stdin, never in process arguments or the Windows Application event log. Intent and result records use event source `WindowsAdminMCP`; failed intent logging blocks dispatch. Timeout and provider exceptions report **unknown effect**, so never auto-retry.
+
+All four window tools reject SYSTEM, other sessions, non-default/unavailable desktop access and stale window identities. Not every Windows application implements UI Automation or permits capture; never interpret an unsupported action as a successful click. Chrome tab automation remains a separate Chrome DevTools MCP integration, not an implicit browser permission.
 
 All commands are trusted administrative PowerShell, not sandboxed. Timeout/cancel may leave side effects. A disconnected request does not grant permission to replay. USER worker loss records unknown effect; jobs are not automatically retried.
 

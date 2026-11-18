@@ -27,7 +27,7 @@ function Send($p,$id,$method,$params){
     $m=@{jsonrpc='2.0';id=$id;method=$method;params=$params}
     $p.StandardInput.WriteLine(($m|ConvertTo-Json -Depth 12 -Compress));$p.StandardInput.Flush()
 }
-function Receive($p,$id,[int]$timeout=10){
+function Receive($p,$id,[int]$timeout=10,[switch]$AllowToolError){
     $watch=[Diagnostics.Stopwatch]::StartNew()
     while($true){
         $remaining=[TimeSpan]::FromSeconds($timeout)-$watch.Elapsed
@@ -36,7 +36,7 @@ function Receive($p,$id,[int]$timeout=10){
         if($null -eq $line){throw 'UNEXPECTED_EOF'}
         $m=$line|ConvertFrom-Json -AsHashtable
         if($m.Contains('id') -and $m.id -eq $id){
-            if($m.Contains('error') -or ($m.result.Contains('isError') -and $m.result.isError)){throw "RPC_FAILURE $line"}
+            if($m.Contains('error') -or ($m.result.Contains('isError') -and $m.result.isError -and -not $AllowToolError)){throw "RPC_FAILURE $line"}
             return $m.result
         }
     }
@@ -64,7 +64,7 @@ try{
     foreach($p in @($a,$b,$c)){
         Send $p 1 'tools/list' @{_meta=$meta}
         $list=Receive $p 1
-        Assert (@($list.tools).Count -eq 4 -and @($list.tools.name|Where-Object {$_ -in @('powershell_status','powershell_exec','powershell_job','powershell_screenshot')}).Count -eq 4) 'r5.exactly_four_tools'
+        Assert (@($list.tools).Count -eq 8 -and @($list.tools.name|Where-Object {$_ -in @('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element')}).Count -eq 8) 'r5.window_tools_including_inspect'
         Assert (@($list.tools|Where-Object {$_.name -eq 'powershell_status' -and $_.Contains('outputSchema')}).Count -eq 1) 'r1.typed_status_schema'
         $v=Wait-Status $p 'OK'
         Assert ($v.service_pid -eq $svc.ProcessId -and $v.execution_sid -eq 'S-1-5-18' -and $v.elevated) 'r1.scm_pid_and_real_execution_identity'
@@ -73,6 +73,36 @@ try{
             $v.frontend.session_id -eq $p.SessionId -and $v.command_context -in @('SYSTEM','UNCONFIRMED') -and
             $v.versions.mcp_version -eq '0.8.1-dev' -and $v.versions.store_schema -eq 4 -and $v.timing.ipc_ms -ge 0) 'hardening.separate_frontend_and_runner_identity'
     }
+    Send $a 31 'tools/call' @{name='windows.list_windows';arguments=@{max_windows=0};_meta=$meta}
+    $invalidWindowList=(Receive $a 31).structuredContent
+    Assert ($invalidWindowList.status -eq 'INVALID_ARGUMENT' -and @($invalidWindowList.windows).Count -eq 0) 'windows.mcp_invalid_limit'
+    Send $a 32 'tools/call' @{name='windows.list_windows';arguments=@{max_windows=1};_meta=$meta}
+    $restrictedWindowList=(Receive $a 32).structuredContent
+    Assert ($restrictedWindowList.status -eq 'USER_CONTEXT_UNAVAILABLE' -and @($restrictedWindowList.windows).Count -eq 0) 'windows.reject_unbound_ci_frontend'
+    Send $a 33 'tools/call' @{name='windows.inspect_window';arguments=@{window_id='bad';max_depth=3};_meta=$meta}
+    $badInspect=(Receive $a 33).structuredContent
+    Assert ($badInspect.status -eq 'INVALID_ARGUMENT' -and @($badInspect.elements).Count -eq 0) 'windows.mcp_invalid_inspect_id'
+    Send $a 34 'tools/call' @{name='windows.inspect_window';arguments=@{window_id='w1:7fffffffffffffff:1092:1dbaf8d88b62800:1';max_depth=3};_meta=$meta}
+    $restrictedInspect=(Receive $a 34).structuredContent
+    Assert ($restrictedInspect.status -eq 'USER_CONTEXT_UNAVAILABLE' -and @($restrictedInspect.elements).Count -eq 0) 'windows.inspect_reject_unbound_ci_frontend'
+    Send $a 37 'tools/call' @{name='windows.capture_window';arguments=@{window_id='bad';max_width=1280};_meta=$meta}
+    $badCapture=(Receive $a 37 -AllowToolError).structuredContent
+    Assert ($badCapture.status -eq 'INVALID_ARGUMENT') 'windows.capture_reject_bad_window_id'
+    Send $a 38 'tools/call' @{name='windows.capture_window';arguments=@{window_id='w1:7fffffffffffffff:1092:1dbaf8d88b62800:1';max_width=1280};_meta=$meta}
+    $restrictedCapture=(Receive $a 38 -AllowToolError).structuredContent
+    Assert ($restrictedCapture.status -eq 'USER_CONTEXT_UNAVAILABLE') 'windows.capture_reject_unbound_ci_frontend'
+    $invalidCaptureWorker=(& $Exe window-capture-worker 'bad' 1280 | ConvertFrom-Json)
+    Assert ($invalidCaptureWorker.result.status -eq 'INVALID_ARGUMENT') 'windows.invalid_capture_worker_args'
+    Send $a 35 'tools/call' @{name='windows.invoke_element';arguments=@{window_id='bad';element_id='bad';action='INVOKE';confirm=$true};_meta=$meta}
+    $badAction=(Receive $a 35).structuredContent
+    Assert ($badAction.status -eq 'INVALID_ARGUMENT' -and -not $badAction.effect_unknown) 'windows.mcp_invalid_action_ref'
+    Send $a 36 'tools/call' @{name='windows.invoke_element';arguments=@{window_id='w1:7fffffffffffffff:1092:1dbaf8d88b62800:1';element_id='e1:1:00000000000000000000000000000000';action='INVOKE';confirm=$false};_meta=$meta}
+    $unconfirmedAction=(Receive $a 36).structuredContent
+    Assert ($unconfirmedAction.status -in @('INVALID_ARGUMENT','CONFIRMATION_REQUIRED')) 'windows.action_requires_confirmation'
+    $invalidActionWorker=('{}' | & $Exe window-action-worker | ConvertFrom-Json)
+    Assert ($invalidActionWorker.status -eq 'INVALID_ARGUMENT') 'windows.invalid_worker_payload'
+    $inspectorWorker=(& $Exe window-inspect-worker 'bad' 3 60 | ConvertFrom-Json)
+    Assert ($inspectorWorker.status -eq 'INVALID_ARGUMENT' -and @($inspectorWorker.elements).Count -eq 0) 'windows.inspect_worker_wire'
     foreach($p in @($a,$b,$c)){Send $p 2 'tools/call' @{name='powershell_status';arguments=@{};_meta=$meta}}
     $results=@(foreach($p in @($a,$b,$c)){(Receive $p 2).structuredContent})
     Assert (@($results|Where-Object {$_.status -eq 'OK' -and $_.service_pid -eq $svc.ProcessId}).Count -eq 3) 'r1.one_service_three_stdio_clients'
