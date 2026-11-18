@@ -340,6 +340,18 @@ try
     var lease=routing.DispatchWorker(new(WorkerAction.poll),owner).Work;
     Check(lease is not null && lease.JobId==admission.Job?.JobId,"user.owner_claim");
     if(lease is null)throw new InvalidOperationException("Missing fixture lease");
+    var secondAdmission=routing.Dispatch(req with {Key="user-job-two",Command="Write-Output 2"},"fixture",owner.Sid,owner);
+    var secondLease=routing.DispatchWorker(new(WorkerAction.poll),owner).Work;
+    Check(secondLease is not null && secondLease.JobId==secondAdmission.Job?.JobId && secondLease.LeaseId!=lease.LeaseId,
+        "user.two_independent_leases");
+    if(secondLease is null)throw new InvalidOperationException("Missing second fixture lease.");
+    Check(routing.Dispatch(new(AdminOperation.Job,JobAction.cancel,JobId:secondLease.JobId),"fixture",owner.Sid,owner).Job?.State==JobState.CANCEL_REQUESTED,
+        "user.cancel_individual_lease");
+    Check(routing.DispatchWorker(new(WorkerAction.heartbeat,secondLease.LeaseId),owner).CancelRequested &&
+        !routing.DispatchWorker(new(WorkerAction.heartbeat,lease.LeaseId),owner).CancelRequested,"user.cancel_not_cross_job");
+    string secondHash=Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(secondLease.Command))).ToLowerInvariant();
+    Check(routing.DispatchWorker(new(WorkerAction.complete,secondLease.LeaseId,new(ExecutionState.CANCELLED_UNKNOWN_EFFECT,secondHash,100)),owner).Status==StatusCode.OK,
+        "user.second_lease_independent_completion");
     Check(routing.DispatchWorker(new(WorkerAction.heartbeat,lease.LeaseId),other).Status==StatusCode.LEASE_LOST,"user.no_other_session_heartbeat");
     string hash=Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(lease.Command))).ToLowerInvariant();
     var result=new ExecutionResult(ExecutionState.COMPLETED,hash,100,0,"user fixture");

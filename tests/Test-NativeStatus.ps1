@@ -122,6 +122,51 @@ try{
     $boundaryId=$boundary.job_id
     $boundaryResult=Wait-JobState $b $boundaryId 'COMPLETED'
     Assert ($boundaryResult.execution.stdout.Trim() -ceq 'BOUNDARY_OK' -and $boundaryResult.execution.audit_persisted) 'hardening.boundary_result_saved'
+    # Real workload overlap: six distinct live PowerShell trees, three SDK
+    # frontends, then a seventh independent short command before releasing them.
+    $parallelDir=Join-Path $data 'parallel-fixture'
+    [IO.Directory]::CreateDirectory($parallelDir)|Out-Null
+    $release=Join-Path $parallelDir 'release'
+    $safeRelease=$release.Replace("'","''")
+    $runs=@()
+    for($i=0;$i -lt 6;$i++){
+        $ready=Join-Path $parallelDir ('ready-'+$i)
+        $safeReady=$ready.Replace("'","''")
+        $command="[IO.File]::WriteAllText('$safeReady',[string]`$PID); while(-not [IO.File]::Exists('$safeRelease')){Start-Sleep -Milliseconds 100}; Write-Output 'parallel-$i'"
+        $admitted=Job @($a,$b,$c)[$i%3] (3000+$i) @{action='submit';operation_key=('parallel-many-'+$i);command=$command;timeout_seconds=60}
+        Assert ($admitted.status -eq 'OK' -and $admitted.job.job_id) ('parallel.admitted.'+$i)
+        $runs+=@{id=$admitted.job.job_id;ready=$ready;marker=('parallel-'+$i)}
+    }
+    $parallelClock=[Diagnostics.Stopwatch]::StartNew()
+    try{
+        do{
+            $readyCount=@($runs|Where-Object {Test-Path -LiteralPath $_.ready}).Count
+            if($readyCount -eq 6){break}
+            Start-Sleep -Milliseconds 100
+        }while($parallelClock.Elapsed.TotalSeconds -lt 25)
+        if($readyCount -ne 6){
+            $details=Job $b 3100 @{action='list';page_size=100}
+            Write-Host ('PARALLEL_CAPACITY '+($details.store.budget|ConvertTo-Json -Compress))
+            throw 'PARALLEL_SIX_PROCESSES_NOT_OBSERVED'
+        }
+        $processIds=@($runs|ForEach-Object {[int](Get-Content -LiteralPath $_.ready -Raw)})
+        Assert (@($processIds|Select-Object -Unique).Count -eq 6 -and @($processIds|ForEach-Object {Get-Process -Id $_ -ErrorAction SilentlyContinue}).Count -eq 6) 'parallel.six_real_live_powershell_processes'
+        $fast=ToolCall $c 3101 'powershell_exec' @{operation_key='parallel-seventh';command="Write-Output 'SEVENTH'";timeout_seconds=10}
+        Assert ($fast.status -eq 'COMPLETED' -and $fast.stdout.Trim() -ceq 'SEVENTH') 'parallel.seventh_completes_while_six_active'
+        $ack=Job $b 3102 @{action='cancel';job_id=$runs[0].id}
+        Assert ($ack.status -eq 'OK' -and $ack.job.state -eq 'CANCEL_REQUESTED') 'parallel.cancel_one'
+        $interrupted=Wait-JobState $c $runs[0].id 'NEEDS_RECONCILIATION'
+        Assert ($interrupted.execution.status -eq 'CANCELLED_UNKNOWN_EFFECT') 'parallel.cancelled_tree_unknown_not_replayed'
+        $remaining=Job $b 3103 @{action='status';job_id=$runs[1].id}
+        Assert ($remaining.job.state -eq 'RUNNING') 'parallel.cancel_does_not_interrupt_other_job'
+        Assert (-not (Get-Process -Id $processIds[0] -ErrorAction SilentlyContinue)) 'parallel.cancelled_pid_gone'
+    }finally{
+        [IO.File]::WriteAllText($release,'release')
+    }
+    for($i=1;$i -lt 6;$i++){
+        $done=Wait-JobState $b $runs[$i].id 'COMPLETED'
+        Assert ($done.execution.stdout.Trim() -ceq $runs[$i].marker -and $done.execution.audit_persisted) ('parallel.distinct_saved_result.'+$i)
+    }
     $first=Job $a 12 @{action='submit';operation_key='shared';resource_key='fixture-fifo';command="Start-Sleep -Seconds 12; Write-Output 'first'";timeout_seconds=20}
     Assert ($first.status -eq 'OK' -and $first.job.state -eq 'QUEUED') 'r3.durable_admission'
     $null=Wait-JobState $b $first.job.job_id 'RUNNING'

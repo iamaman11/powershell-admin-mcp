@@ -74,6 +74,7 @@ internal static class AcceptanceEvidence
                 !MatchesJob(l,r.LongJobId,r.RunId+"-long","Start-Sleep -Seconds 130; Write-Output '"+longMarker+"'",longMarker,since,130000) ||
                 q.Status!=StatusCode.OK || q.Job is not {State:JobState.CANCELLED,CompletedSteps:0,TotalSteps:1} queued ||
                 queued.JobId!=r.CancelledJobId || queued.OperationKey!=r.RunId+"-queue" ||
+                queued.ResourceKey!=l.Job?.ResourceKey || queued.ResourceKey!=("accept-"+r.RunId).ToLowerInvariant() ||
                 !DateTimeOffset.TryParse(queued.CreatedUtc,out var created) || created<since)
                 return new(EvidenceCode.LOCAL_JOB_MISMATCH,r.RunId,ReceiptSha256:hash);
             return new(EvidenceCode.MATCHED,r.RunId,true,r.ScreenshotCorrelationId is not null,hash);

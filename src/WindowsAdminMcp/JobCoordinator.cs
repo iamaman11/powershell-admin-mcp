@@ -748,7 +748,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 clear.ExecuteNonQuery();
             }
             tx.Commit(); // output and checkpoint become visible together
-                        if(!active.Remove(work.Id))throw new InvalidOperationException("Missing active execution.");
+            if(!active.Remove(work.Id))throw new InvalidOperationException("Missing active execution.");
             foreach(var lease in leases.Values.Where(l=>l.Work.Id==work.Id).ToArray())leases.Remove(lease.Id);
             work.Cancel.Dispose();Signal();
         }

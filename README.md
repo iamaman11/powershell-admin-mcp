@@ -85,7 +85,7 @@ Doctor is read-only. Without external evidence Remote/Desktop remain NOT_TESTED.
 }
 ```
 
-Run short command Write-Output 'WADMIN-ACCEPT-<runId>-SHORT' with key <runId>-exec; long command Start-Sleep -Seconds 130; Write-Output 'WADMIN-ACCEPT-<runId>-LONG' with key <runId>-long; queue and cancel a harmless step with key <runId>-queue before long completes. Record actual UUIDs, client-side latencies and exact success/error status. Screenshot fields are optional if not tested.
+Run short command Write-Output 'WADMIN-ACCEPT-<runId>-SHORT' with key <runId>-exec; long command Start-Sleep -Seconds 130; Write-Output 'WADMIN-ACCEPT-<runId>-LONG' with key <runId>-long; submit the long and queued steps with the same resource_key accept-<runId>; cancel the harmless queued step with key <runId>-queue before long completes. Independently submit a short command while the long job is active to confirm actual concurrent dispatch. Record actual UUIDs, client-side latencies and exact success/error status. Screenshot fields are optional if not tested.
 
 ## Acceptance boundaries
 
