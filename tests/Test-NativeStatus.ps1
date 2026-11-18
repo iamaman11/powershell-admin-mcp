@@ -64,7 +64,7 @@ try{
     foreach($p in @($a,$b,$c)){
         Send $p 1 'tools/list' @{_meta=$meta}
         $list=Receive $p 1
-        Assert (@($list.tools).Count -eq 5 -and @($list.tools.name|Where-Object {$_ -in @('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows')}).Count -eq 5) 'r5.window_catalog_tools'
+        Assert (@($list.tools).Count -eq 6 -and @($list.tools.name|Where-Object {$_ -in @('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window')}).Count -eq 6) 'r5.window_catalog_tools'
         Assert (@($list.tools|Where-Object {$_.name -eq 'powershell_status' -and $_.Contains('outputSchema')}).Count -eq 1) 'r1.typed_status_schema'
         $v=Wait-Status $p 'OK'
         Assert ($v.service_pid -eq $svc.ProcessId -and $v.execution_sid -eq 'S-1-5-18' -and $v.elevated) 'r1.scm_pid_and_real_execution_identity'
@@ -79,6 +79,12 @@ try{
     Send $a 32 'tools/call' @{name='windows.list_windows';arguments=@{max_windows=1};_meta=$meta}
     $restrictedWindowList=(Receive $a 32).structuredContent
     Assert ($restrictedWindowList.status -eq 'USER_CONTEXT_UNAVAILABLE' -and @($restrictedWindowList.windows).Count -eq 0) 'windows.reject_unbound_ci_frontend'
+    Send $a 33 'tools/call' @{name='windows.inspect_window';arguments=@{window_id='bad';max_depth=3};_meta=$meta}
+    $badInspect=(Receive $a 33).structuredContent
+    Assert ($badInspect.status -eq 'INVALID_ARGUMENT' -and @($badInspect.elements).Count -eq 0) 'windows.mcp_invalid_inspect_id'
+    Send $a 34 'tools/call' @{name='windows.inspect_window';arguments=@{window_id='w1:7fffffffffffffff:1092:1dbaf8d88b62800:1';max_depth=3};_meta=$meta}
+    $restrictedInspect=(Receive $a 34).structuredContent
+    Assert ($restrictedInspect.status -eq 'USER_CONTEXT_UNAVAILABLE' -and @($restrictedInspect.elements).Count -eq 0) 'windows.inspect_reject_unbound_ci_frontend'
     foreach($p in @($a,$b,$c)){Send $p 2 'tools/call' @{name='powershell_status';arguments=@{};_meta=$meta}}
     $results=@(foreach($p in @($a,$b,$c)){(Receive $p 2).structuredContent})
     Assert (@($results|Where-Object {$_.status -eq 'OK' -and $_.service_pid -eq $svc.ProcessId}).Count -eq 3) 'r1.one_service_three_stdio_clients'
@@ -288,81 +294,4 @@ try{
     $done=Wait-JobState $b $plan.job.job_id 'COMPLETED'
     Assert ($done.completed_steps -eq 2 -and $done.execution.stdout.Trim() -ceq 'step-B' -and [IO.File]::ReadAllText($planMarker) -ceq 'AB') 'r4.step_B_without_replaying_A'
     $log=Job $c 45 @{action='logs';job_id=$plan.job.job_id;step_index=1}
-    Assert ($log.job.result_step -eq 1 -and $log.job.execution.stdout.Trim() -ceq 'step-A') 'r4.previous_step_output_persisted'
-    # Invalid mixed single/plan payload cannot be admitted.
-    $bad=Job $b 46 @{action='submit';operation_key='r4-invalid';command='Write-Output 1';steps=$steps}
-    Assert ($bad.status -eq 'INVALID_ARGUMENT') 'r4.mixed_payload_rejected'
-    Write-Host 'R4_CHECKPOINT_PLAN=PASS (explicit resume after SCM restart; OS reboot proof pending)'
-
-    # External reboot boundary: no physical reboot in CI. A real SCM restart
-    # must not release it; completed effects and outputs remain durable.
-    $bootMarker=Join-Path $data 'boot-marker.txt'
-    $bootPath=$bootMarker.Replace("'","''")
-    $bootSteps=@(
-        @{command="[IO.File]::AppendAllText('$bootPath','A'); Write-Output 'boot-step-A'";timeout_seconds=10;reboot_after=$true},
-        @{command="if([IO.File]::ReadAllText('$bootPath') -cne 'A'){throw 'POSTCONDITION_FAILED'}; Write-Output 'verified'";timeout_seconds=10;verify_after_reboot=$true},
-        @{command="[IO.File]::AppendAllText('$bootPath','B'); Write-Output 'boot-step-B'";timeout_seconds=10}
-    )
-    $missingCheck=@(@{command='Write-Output 1';reboot_after=$true},@{command='Write-Output 2'})
-    $invalidBoot=Job $b 81 @{action='submit';operation_key='r4-boot-invalid';steps=$missingCheck}
-    Assert ($invalidBoot.status -eq 'INVALID_ARGUMENT') 'r4.reboot_requires_declared_postcondition'
-    $boot=Job $b 82 @{action='submit';operation_key='r4-boot-boundary';steps=$bootSteps}
-    Assert ($boot.status -eq 'OK') 'r4.reboot_plan_admitted'
-    $waiting=Wait-JobState $b $boot.job.job_id 'WAITING_FOR_REBOOT'
-    Assert ($waiting.completed_steps -eq 1 -and $waiting.execution.stdout.Trim() -ceq 'boot-step-A' -and [IO.File]::ReadAllText($bootMarker) -ceq 'A') 'r4.reboot_checkpoint_committed'
-    $deny=Job $c 83 @{action='resume';job_id=$boot.job.job_id;expected_completed_steps=1}
-    Assert ($deny.status -eq 'NOT_RESUMABLE') 'r4.manual_resume_cannot_bypass_reboot'
-    Stop-Service $name
-    Start-Service $name
-    $null=Wait-Status $b 'OK'
-    $waiting=Wait-JobState $c $boot.job.job_id 'WAITING_FOR_REBOOT'
-    Assert ($waiting.completed_steps -eq 1 -and $waiting.reboot_evidence -eq 'SAME_BOOT' -and [IO.File]::ReadAllText($bootMarker) -ceq 'A') 'r4.scm_restart_does_not_release_reboot'
-    $same=Job $b 84 @{action='submit';operation_key='r4-boot-boundary';steps=$bootSteps}
-    Assert ($same.job.job_id -eq $boot.job.job_id -and $same.job.state -eq 'WAITING_FOR_REBOOT') 'r4.reboot_checkpoint_idempotent'
-    $cancelBoot=Job $c 85 @{action='cancel';job_id=$boot.job.job_id}
-    Assert ($cancelBoot.status -eq 'OK' -and $cancelBoot.job.state -eq 'CANCELLED' -and [IO.File]::ReadAllText($bootMarker) -ceq 'A') 'r4.cancel_waiting_reboot'
-    Write-Host 'R4_DURABLE_REBOOT_BOUNDARY=PASS (same kernel session; positive actual reboot still NOT_TESTED)'
-
-    Send $b 70 'tools/call' @{name='powershell_screenshot';arguments=@{width=1};_meta=$meta}
-    # This is a tool-level error, not a JSON-RPC failure.
-    $line=$b.StandardOutput.ReadLineAsync().WaitAsync([TimeSpan]::FromSeconds(10)).GetAwaiter().GetResult()
-    $bad=$line|ConvertFrom-Json -AsHashtable
-    Assert ($bad.id -eq 70 -and $bad.result.isError -and $bad.result.structuredContent.status -eq 'INVALID_ARGUMENT') 'r5.invalid_region_typed'
-    $still=Status $c 71
-    Assert ($still.status -eq 'OK') 'r5.status_after_screenshot_error'
-    Write-Host 'R5_SCREENSHOT_CONTRACT=PASS (no physical desktop capture in CI)'
-
-    # Native CLI diagnostics use the same service and complete store counts.
-    $doctorStart=[Diagnostics.ProcessStartInfo]::new($Exe)
-    $doctorStart.ArgumentList.Add('doctor')
-    $doctorStart.UseShellExecute=$false
-    $doctorStart.RedirectStandardOutput=$true
-    $doctorStart.RedirectStandardError=$true
-    $doctorProc=[Diagnostics.Process]::Start($doctorStart)
-    try{
-        $out=$doctorProc.StandardOutput.ReadToEndAsync()
-        $err=$doctorProc.StandardError.ReadToEndAsync()
-        if(-not $doctorProc.WaitForExit(15000)){throw 'DOCTOR_TIMEOUT'}
-        $rawDoctor=$out.GetAwaiter().GetResult()
-        $doctorExit=$doctorProc.ExitCode
-    }finally{if(-not $doctorProc.HasExited){$doctorProc.Kill($true);$doctorProc.WaitForExit()};$doctorProc.Dispose()}
-    $doctor=$rawDoctor|ConvertFrom-Json -AsHashtable
-    Assert ($doctor.schemaVersion -eq 1 -and $doctor.status -eq 'DEGRADED' -and $doctorExit -eq 1) 'r6.doctor_reports_isolated_install_degraded'
-    Assert ($doctor.service.service_pid -eq (Get-CimInstance Win32_Service -Filter "Name='$name'").ProcessId -and $doctor.store.schemaVersion -eq 4) 'r6.doctor_authoritative_service_store'
-    Assert ($doctor.store.total -gt 0 -and $doctor.store.waitingForReboot -eq 0 -and $doctor.store.needsReconciliation -ge 1) 'r6.doctor_total_state_counts'
-    Assert (@($doctor.checks|Where-Object {$_.component -eq 'Remote' -and $_.status -eq 'NOT_TESTED'}).Count -eq 1) 'r6.doctor_no_false_remote_acceptance'
-    $performance=& (Join-Path $PSScriptRoot 'Test-NativePerformance.ps1') -Exe $Exe -DurationSeconds 12 -ExerciseJobs|ConvertFrom-Json
-    Assert ($performance.status -eq 'PASS' -and $performance.status_latency.count -ge 12 -and
-        $performance.admission_latency.count -eq 12 -and $performance.cancel_latency.count -eq 12) 'r7.bounded_performance_fixture'
-    Write-Host ('PERFORMANCE_BASELINE='+($performance|ConvertTo-Json -Depth 8 -Compress))
-
-
-
-}finally{
-    foreach($p in $clients){
-        if(-not $p.HasExited){$p.StandardInput.Close();if(-not $p.WaitForExit(3000)){$p.Kill($true);$p.WaitForExit()}}
-        $p.Dispose()
-    }
-    if(Get-Service $name -ErrorAction SilentlyContinue){Stop-Service $name -ErrorAction SilentlyContinue;sc.exe delete $name|Out-Host}
-    if(Test-Path -LiteralPath $data){Remove-Item -LiteralPath $data -Recurse -Force}
-}
+    Assert ($log.job.result_step -
