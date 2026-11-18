@@ -60,6 +60,7 @@ public sealed class WindowTools
 }
 
 internal readonly record struct WindowIdentity(long Handle, int ProcessId, long StartFileTimeUtc, int SessionId);
+internal enum WindowResolveCode { OK, INVALID_ARGUMENT, WRONG_SESSION, STALE_WINDOW, ACCESS_DENIED }
 
 internal static class WindowCatalog
 {
@@ -69,7 +70,7 @@ internal static class WindowCatalog
     internal static bool TryParseId(string? text, out WindowIdentity identity)
     {
         identity = default;
-        if (text is null) return false;
+        if (text is null || text.Length > 128) return false;
         var fields = text.Split(':');
         if (fields.Length != 5 || fields[0] != "w1" ||
             !long.TryParse(fields[1], NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out var hwnd) ||
@@ -81,6 +82,37 @@ internal static class WindowCatalog
 
         identity = new(hwnd, pid, started, session);
         return true;
+    }
+
+    // Recheck the actual HWND owner before any future inspection or UI action.
+    // A handle alone is not an identity and can be reused after a window closes.
+    internal static WindowResolveCode ResolveId(string? token, int session, out IntPtr hwnd)
+    {
+        hwnd = IntPtr.Zero;
+        if (!TryParseId(token, out var id)) return WindowResolveCode.INVALID_ARGUMENT;
+        if (session <= 0 || id.SessionId != session) return WindowResolveCode.WRONG_SESSION;
+
+        var candidate = new IntPtr(id.Handle);
+        if (!IsWindow(candidate)) return WindowResolveCode.STALE_WINDOW;
+        GetWindowThreadProcessId(candidate, out uint pid);
+        if (pid == 0 || pid != id.ProcessId) return WindowResolveCode.STALE_WINDOW;
+        try
+        {
+            using var process = Process.GetProcessById(id.ProcessId);
+            if (process.SessionId != session || process.StartTime.ToFileTimeUtc() != id.StartFileTimeUtc)
+                return WindowResolveCode.STALE_WINDOW;
+        }
+        catch (Win32Exception) { return WindowResolveCode.ACCESS_DENIED; }
+        catch (System.Security.SecurityException) { return WindowResolveCode.ACCESS_DENIED; }
+        catch (ArgumentException) { return WindowResolveCode.STALE_WINDOW; }
+        catch (InvalidOperationException) { return WindowResolveCode.STALE_WINDOW; }
+
+        // Recheck after process readback to reduce close/reuse races.
+        if (!IsWindow(candidate)) return WindowResolveCode.STALE_WINDOW;
+        GetWindowThreadProcessId(candidate, out pid);
+        if (pid != id.ProcessId) return WindowResolveCode.STALE_WINDOW;
+        hwnd = candidate;
+        return WindowResolveCode.OK;
     }
 
     internal static WindowListResult List(int limit, int session)
@@ -142,6 +174,10 @@ internal static class WindowCatalog
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindow(IntPtr hwnd);
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
