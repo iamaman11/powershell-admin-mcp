@@ -67,7 +67,7 @@ try {
     foreach($entry in @(@{p=$a;modern=$false},@{p=$b;modern=$true},@{p=$c;modern=$true})){
         $params=@{};if($entry.modern){$params._meta=$meta}
         $list=Call $entry.p 2 'tools/list' $params
-        Assert (@($list.tools).Count -eq 5 -and @($list.tools.name|Where-Object {$_ -in @('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows')}).Count -eq 5) 'installed.four_tools'
+        Assert (@($list.tools).Count -eq 5 -and @($list.tools.name|Where-Object {$_ -in @('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows')}).Count -eq 5) 'installed.window_catalog_tools'
         $status=(Tool $entry.p 3 'powershell_status' @{} $entry.modern).structuredContent
         Assert ($status.status -eq 'OK' -and $status.service_pid -eq $expectedPid -and $status.execution_sid -eq 'S-1-5-18') 'installed.shared_service'
     }
