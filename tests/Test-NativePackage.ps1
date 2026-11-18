@@ -329,7 +329,7 @@ try{
             Check ($failed -and (Test-Path (Join-Path $root '.rollback\journal.json')) -and -not(Test-Path (Join-Path $root ('.trial-backup-'+$candidateCommit))) -and (Get-Content (Join-Path $root 'manifest.json') -Raw|ConvertFrom-Json).commit -eq $candidateCommit) 'r6.failed_forward_repair_restores_prior_trial_journal'
         }finally{$held.Dispose()}
         $repair=& $installer -Action Install -PackagePath $replacementZip -ExpectedSha256 $repairDigest -ReplaceUnaccepted|ConvertFrom-Json
-        Check ($repair.status -eq 'INSTALLED_OFFLINE' -and $repair.commit -eq $manifest.commit -and -not $repair.autostart -and (Test-Path (Join-Path $root '.trial-backup-1111111111111111111111111111111111111111\journal.json'))) 'r6.forward_trial_repair_retains_backup_without_acceptance'
+        Check ($repair.status -eq 'INSTALLED_OFFLINE' -and $repair.commit -eq $manifest.commit -and -not $repair.autostart -and (Test-Path (Join-Path $root ('.trial-backup-'+$candidateCommit+'\journal.json')))) 'r6.forward_trial_repair_retains_backup_without_acceptance'
         $read=Read-SavedJob
         Check ($read.job.job_id -eq $saved.job_id -and $read.job.execution.stdout.Trim() -ceq 'upgrade-preserved') 'r6.forward_trial_repair_preserves_jobs'
     }finally{
