@@ -111,7 +111,7 @@ internal static class DesktopCapture
         return null;
     }
 
-    private static (CaptureCode Code,int? NativeError) ObserveDesktop(int session)
+    internal static (CaptureCode Code,int? NativeError) ObserveDesktop(int session)
     {
         if(session==0)return (CaptureCode.SESSION_ZERO,null);
         if(!Environment.UserInteractive)return (CaptureCode.NON_INTERACTIVE_SESSION,null);
