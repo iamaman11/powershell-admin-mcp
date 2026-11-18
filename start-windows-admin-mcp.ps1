@@ -1,3 +1,3 @@
-# Compatibility alias. The only operator entrypoint is WindowsAdminMCP.ps1.
+# Former v0.7 launcher. Forward only to the native operator, never launch old MCP.
 $ErrorActionPreference='Stop'
-& (Join-Path $PSScriptRoot 'WindowsAdminMCP.ps1') -Action start
+& (Join-Path $env:ProgramFiles 'WindowsAdminMCP\native\WindowsAdminMCP.ps1') -Action start

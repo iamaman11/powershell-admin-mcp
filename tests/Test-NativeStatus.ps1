@@ -27,9 +27,12 @@ function Send($p,$id,$method,$params){
     $m=@{jsonrpc='2.0';id=$id;method=$method;params=$params}
     $p.StandardInput.WriteLine(($m|ConvertTo-Json -Depth 12 -Compress));$p.StandardInput.Flush()
 }
-function Receive($p,$id){
+function Receive($p,$id,[int]$timeout=10){
+    $watch=[Diagnostics.Stopwatch]::StartNew()
     while($true){
-        $line=$p.StandardOutput.ReadLineAsync().WaitAsync([TimeSpan]::FromSeconds(10)).GetAwaiter().GetResult()
+        $remaining=[TimeSpan]::FromSeconds($timeout)-$watch.Elapsed
+        if($remaining.TotalMilliseconds -le 0){throw 'RECEIVE_TIMEOUT'}
+        $line=$p.StandardOutput.ReadLineAsync().WaitAsync($remaining).GetAwaiter().GetResult()
         if($null -eq $line){throw 'UNEXPECTED_EOF'}
         $m=$line|ConvertFrom-Json -AsHashtable
         if($m.Contains('id') -and $m.id -eq $id){
@@ -68,7 +71,7 @@ try{
         $caller=[Security.Principal.WindowsIdentity]::GetCurrent()
         Assert ($v.frontend.pid -eq $p.Id -and $v.frontend.sid -eq $caller.User.Value -and
             $v.frontend.session_id -eq $p.SessionId -and $v.command_context -in @('SYSTEM','UNCONFIRMED') -and
-            $v.versions.mcpVersion -eq '0.8.1-dev' -and $v.versions.storeSchema -eq 4 -and $v.timing.ipc_ms -ge 0) 'hardening.separate_frontend_and_runner_identity'
+            $v.versions.mcp_version -eq '0.8.1-dev' -and $v.versions.store_schema -eq 4 -and $v.timing.ipc_ms -ge 0) 'hardening.separate_frontend_and_runner_identity'
     }
     foreach($p in @($a,$b,$c)){Send $p 2 'tools/call' @{name='powershell_status';arguments=@{};_meta=$meta}}
     $results=@(foreach($p in @($a,$b,$c)){(Receive $p 2).structuredContent})
@@ -98,6 +101,8 @@ try{
     }
     $x=ToolCall $a 10 'powershell_exec' @{command="Write-Output 'real-exec'; [Security.Principal.WindowsIdentity]::GetCurrent().User.Value";timeout_seconds=10;operation_key='short'}
     Assert ($x.status -eq 'COMPLETED' -and $x.stdout.Contains('real-exec') -and $x.stdout.Contains('S-1-5-18') -and $x.audit_persisted) 'r3.actual_exec_service_context'
+    $unavailable=Job $a 119 @{action='submit';operation_key='no-user-worker';command="Write-Output 'MUST_NOT_RUN'";execution_context='USER'}
+    Assert ($unavailable.status -eq 'USER_CONTEXT_UNAVAILABLE' -and (-not $unavailable.Contains('job') -or $null -eq $unavailable.job)) 'hardening.no_silent_system_fallback'
     $prefix="Write-Output 'Проверка 🚀'"+[char]10+'#'
     $long=$prefix+('x'*(11982-$prefix.Length))
     $shortLog=Job $b 101 @{action='logs';operation_key='short';step_index=1}
@@ -111,12 +116,10 @@ try{
     # and continue to completion through the same durable job API.
     $boundaryClock=[Diagnostics.Stopwatch]::StartNew()
     Send $a 103 'tools/call' @{name='powershell_exec';arguments=@{command="Start-Sleep -Seconds 100; Write-Output 'BOUNDARY_OK'";timeout_seconds=120;operation_key='boundary-exec'};_meta=$meta}
-    $boundaryLine=$a.StandardOutput.ReadLineAsync().WaitAsync([TimeSpan]::FromSeconds(110)).GetAwaiter().GetResult()
-    $boundary=$boundaryLine|ConvertFrom-Json -AsHashtable
-    Assert ($boundary.id -eq 103 -and -not $boundary.Contains('error') -and (-not $boundary.result.Contains('isError') -or -not $boundary.result.isError) -and
-        $boundary.result.structuredContent.status -eq 'PENDING' -and $boundary.result.structuredContent.job_id -and
-        -not $boundary.result.structuredContent.audit_persisted -and $boundaryClock.Elapsed.TotalSeconds -lt 110) 'hardening.exec_boundary_pending_before_tunnel_deadline'
-    $boundaryId=$boundary.result.structuredContent.job_id
+    $boundary=(Receive $a 103 110).structuredContent
+    Assert ($boundary.status -eq 'PENDING' -and $boundary.job_id -and
+        -not $boundary.audit_persisted -and $boundaryClock.Elapsed.TotalSeconds -lt 110) 'hardening.exec_boundary_pending_before_tunnel_deadline'
+    $boundaryId=$boundary.job_id
     $boundaryResult=Wait-JobState $b $boundaryId 'COMPLETED'
     Assert ($boundaryResult.execution.stdout.Trim() -ceq 'BOUNDARY_OK' -and $boundaryResult.execution.audit_persisted) 'hardening.boundary_result_saved'
     $first=Job $a 12 @{action='submit';operation_key='shared';command="Start-Sleep -Seconds 5; Write-Output 'first'";timeout_seconds=20}

@@ -26,7 +26,7 @@ function Get-State {
     $svc=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
     $task=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
     $definitionValid=$false
-    if($task){try{Assert-Task $task;$definitionValid=$true}catch{}}
+    if($task){try{Assert-Task $task -ReadOnly;$definitionValid=$true}catch{}}
     $serviceValid=[bool]($svc -and $svc.PathName -ieq ('"'+$native+'" service') -and $svc.StartName -eq 'LocalSystem')
     $logon=[bool]($task -and @($task.Triggers).Count -eq 1 -and $task.Triggers[0].Enabled)
     $tunnels=@(Get-CimInstance Win32_Process -Filter "Name='tunnel-client-runtime.exe'"|Select-Object ProcessId,SessionId,ExecutablePath)
@@ -46,7 +46,7 @@ function Resolve-Sid([string]$account){
     if($account -match '^S-1-'){return $account}
     return ([Security.Principal.NTAccount]::new($account)).Translate([Security.Principal.SecurityIdentifier]).Value
 }
-function Assert-Task($task){
+function Assert-Task($task,[switch]$ReadOnly){
     if(-not $task -or @($task.Actions).Count -ne 1 -or @($task.Triggers).Count -ne 1 -or
         $task.Actions[0].Execute -ine $native -or $task.Actions[0].Arguments -cne 'tunnel' -or
         $task.Principal.LogonType.ToString() -ne 'Interactive' -or
@@ -55,7 +55,8 @@ function Assert-Task($task){
         $task.Triggers[0].CimClass.CimClassName -ne 'MSFT_TaskLogonTrigger' -or
         $task.Actions[0].WorkingDirectory -ine $root -or $task.Settings.RestartCount -ne 3){throw 'TASK_IDENTITY_MISMATCH'}
     $actual=$task.Principal.UserId
-    if((Resolve-Sid $actual) -ne $user.User.Value -or (Resolve-Sid $task.Triggers[0].UserId) -ne $user.User.Value){throw 'TASK_OWNER_MISMATCH'}
+    $actualSid=Resolve-Sid $actual
+    if((Resolve-Sid $task.Triggers[0].UserId) -ne $actualSid -or (-not $ReadOnly -and $actualSid -ne $user.User.Value)){throw 'TASK_OWNER_MISMATCH'}
 }
 # Read only official bounded loopback diagnostics. Readiness alone is not acceptance.
 function Assert-RemoteEvidence {

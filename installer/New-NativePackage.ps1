@@ -17,6 +17,7 @@ try{
     Copy-Item -Path (Join-Path $PublishDirectory '*') -Destination $native -Recurse
     if(-not(Test-Path -LiteralPath (Join-Path $native 'WindowsAdminMCP.exe') -PathType Leaf)){throw 'PUBLISH_EXE_MISSING'}
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'NativeStartup.ps1') -Destination $native
+    Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'WindowsAdminMCP.ps1') -Destination $native
     Invoke-WebRequest -Uri 'https://github.com/openai/tunnel-client/releases/download/v0.0.21/tunnel-client-runtime-v0.0.21-windows-amd64.zip' -OutFile $zip
     if((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne 'D991623BD171049E2100B402D72AF7EBC8EDF558051AE8FC924173373D1611A8'){throw 'VENDOR_ZIP_HASH_INVALID'}
     $archive=[IO.Compression.ZipFile]::OpenRead($zip)

@@ -15,7 +15,9 @@ internal enum CaptureCode
 {
     COMPLETED, INVALID_ARGUMENT, SERVICE_CHECK_FAILED, INTERACTIVE_DESKTOP_UNAVAILABLE,
     MONITOR_NOT_FOUND, REGION_OUTSIDE_MONITOR, REGION_PIXEL_LIMIT_EXCEEDED,
-    SCREENSHOT_EXCEEDS_2MB, SCREEN_CAPTURE_FAILED
+    SCREENSHOT_EXCEEDS_2MB, SCREEN_CAPTURE_FAILED,
+    SESSION_ZERO, NON_INTERACTIVE_SESSION, NOT_PHYSICAL_CONSOLE, INPUT_DESKTOP_ACCESS_FAILED,
+    INPUT_DESKTOP_NOT_DEFAULT, THREAD_DESKTOP_NOT_DEFAULT
 }
 
 internal sealed record CaptureDescriptor(
@@ -58,7 +60,8 @@ internal static class DesktopCapture
         CallToolResult Fail(CaptureCode code,int? native=null)=>Error(code,correlation,native:native,timing:Timing(),serviceCorrelation:serviceCorrelation);
         using var process=Process.GetCurrentProcess();
         int session=process.SessionId;
-        if(!IsDefaultConsoleDesktop(session))return Fail(CaptureCode.INTERACTIVE_DESKTOP_UNAVAILABLE);
+        var initial=ObserveDesktop(session);
+        if(initial.Code!=CaptureCode.COMPLETED)return Fail(initial.Code,initial.NativeError);
         IntPtr oldDpi=SetThreadDpiAwarenessContext(new IntPtr(-4)); // per-monitor v2
         if(oldDpi==IntPtr.Zero)return Fail(CaptureCode.SCREEN_CAPTURE_FAILED,native:Marshal.GetLastWin32Error());
         try
@@ -74,9 +77,10 @@ internal static class DesktopCapture
             using(var drawing=Graphics.FromImage(source))
                 drawing.CopyFromScreen(bounds.Left+x,bounds.Top+y,0,0,new Size(w,h));
             // Reject if the ordinary input desktop disappeared during capture.
-            if(!IsDefaultConsoleDesktop(session))return Fail(CaptureCode.INTERACTIVE_DESKTOP_UNAVAILABLE);
+            var after=ObserveDesktop(session);
+            if(after.Code!=CaptureCode.COMPLETED)return Fail(after.Code,after.NativeError);
             var encoded=Encode(source,maxWidth);
-            if(encoded is null)return Error(CaptureCode.SCREENSHOT_EXCEEDS_2MB,correlation);
+            if(encoded is null)return Fail(CaptureCode.SCREENSHOT_EXCEEDS_2MB);
             return Result(new(CaptureCode.COMPLETED,correlation,monitor,encoded.Width,encoded.Height,
                 "image/png",encoded.Png.Length,session,Timing:Timing(),ServiceCheckCorrelationId:serviceCorrelation),encoded.Png);
         }
@@ -107,15 +111,18 @@ internal static class DesktopCapture
         return null;
     }
 
-    private static bool IsDefaultConsoleDesktop(int session)
+    private static (CaptureCode Code,int? NativeError) ObserveDesktop(int session)
     {
-        if(session==0 || !Environment.UserInteractive || (uint)session!=WTSGetActiveConsoleSessionId())return false;
+        if(session==0)return (CaptureCode.SESSION_ZERO,null);
+        if(!Environment.UserInteractive)return (CaptureCode.NON_INTERACTIVE_SESSION,null);
+        if((uint)session!=WTSGetActiveConsoleSessionId())return (CaptureCode.NOT_PHYSICAL_CONSOLE,null);
         IntPtr input=OpenInputDesktop(0,false,1); // DESKTOP_READOBJECTS, no switching rights
-        if(input==IntPtr.Zero)return false;
+        if(input==IntPtr.Zero)return (CaptureCode.INPUT_DESKTOP_ACCESS_FAILED,Marshal.GetLastWin32Error());
         try
         {
-            return Name(input)=="Default" &&
-                Name(GetThreadDesktop(GetCurrentThreadId()))=="Default";
+            if(Name(input)!="Default")return (CaptureCode.INPUT_DESKTOP_NOT_DEFAULT,null);
+            if(Name(GetThreadDesktop(GetCurrentThreadId()))!="Default")return (CaptureCode.THREAD_DESKTOP_NOT_DEFAULT,null);
+            return (CaptureCode.COMPLETED,null);
         }
         finally{_ = CloseDesktop(input);}
     }

@@ -71,6 +71,8 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                 deadline.CancelAfter(TimeSpan.FromSeconds(3));
                 var clock=Stopwatch.StartNew();
                 string input = await PipeWire.ReadFrameAsync(pipe, deadline.Token);
+                var request = JsonSerializer.Deserialize<AdminRequest>(input, PipeWire.Json);
+                if(request?.TraceId is {} trace && Guid.TryParseExact(trace,"N",out _))correlation=trace;
                 bool allowed = false;
                 string? callerSid=null, logonSid=null;
                 pipe.RunAsClient(() =>
@@ -94,8 +96,6 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                 if (!allowed) response = new(StatusCode.ACCESS_DENIED, correlation);
                 else
                 {
-                    var request = JsonSerializer.Deserialize<AdminRequest>(input, PipeWire.Json);
-                    if(request?.TraceId is {} trace && Guid.TryParseExact(trace,"N",out _))correlation=trace;
                     if (request?.Operation == AdminOperation.Job && request.Worker is null)
                     {
                         try

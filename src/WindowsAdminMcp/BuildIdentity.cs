@@ -1,8 +1,14 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text.Json.Serialization;
 
-public sealed record VersionIdentity(string McpVersion,string AssemblyVersion,string InformationalVersion,
-    string DotNetRuntime,string ExpectedTunnelVersion,int StoreSchema);
+public sealed record VersionIdentity(
+    [property:JsonPropertyName("mcp_version")] string McpVersion,
+    [property:JsonPropertyName("assembly_version")] string AssemblyVersion,
+    [property:JsonPropertyName("informational_version")] string InformationalVersion,
+    [property:JsonPropertyName("dotnet_runtime")] string DotNetRuntime,
+    [property:JsonPropertyName("expected_tunnel_version")] string ExpectedTunnelVersion,
+    [property:JsonPropertyName("store_schema")] int StoreSchema);
 
 internal static class BuildIdentity
 {

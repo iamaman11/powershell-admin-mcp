@@ -11,6 +11,9 @@ $clients=[Collections.Generic.List[Diagnostics.Process]]::new()
 $statusSamples=[Collections.Generic.List[double]]::new()
 $admission=[Collections.Generic.List[double]]::new()
 $cancel=[Collections.Generic.List[double]]::new()
+$logs=[Collections.Generic.List[double]]::new()
+$execIdle=[Collections.Generic.List[double]]::new()
+$execQueued=[Collections.Generic.List[double]]::new()
 $cold=[Collections.Generic.List[double]]::new()
 $meta=@{'io.modelcontextprotocol/protocolVersion'='2026-07-28';'io.modelcontextprotocol/clientCapabilities'=@{};'io.modelcontextprotocol/clientInfo'=@{name='local-performance';version='1'}}
 $svc=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
@@ -97,7 +100,7 @@ try{
     if($ExerciseJobs){
         $prefix='perf-'+[guid]::NewGuid().ToString('N')
         $sequence++
-        $hold=Call $clients[0] $sequence 'powershell_job' @{action='submit';operation_key=$prefix+'-hold';command="Start-Sleep -Seconds 20; Write-Output 'perf-fixture'";timeout_seconds=45}
+        $hold=Call $clients[0] $sequence 'powershell_job' @{action='submit';operation_key=$prefix+'-hold';command="Start-Sleep -Seconds 35; Write-Output 'perf-fixture'";timeout_seconds=55}
         if($hold.status -ne 'OK'){throw 'PERF_HOLD_ADMISSION'}
         $watch=[Diagnostics.Stopwatch]::StartNew()
         do{
@@ -108,8 +111,19 @@ try{
             Start-Sleep -Milliseconds 50
         }while($watch.Elapsed.TotalSeconds -lt 10)
         if($s.job.state -ne 'RUNNING'){throw 'PERF_HOLD_NOT_RUNNING'}
+        # Synchronous short client wait while the single runner is occupied.
+        $sequence++;$watch=[Diagnostics.Stopwatch]::StartNew()
+        $pending=Call $clients[0] $sequence 'powershell_exec' @{operation_key=$prefix+'-exec-queued';command="Write-Output 'must not execute'";timeout_seconds=1}
+        $execQueued.Add($watch.Elapsed.TotalMilliseconds)
+        if($pending.status -ne 'PENDING' -or -not $pending.job_id){throw 'PERF_PENDING_EXPECTED'}
+        $sequence++;$cancelled=Call $clients[1] $sequence 'powershell_job' @{action='cancel';job_id=$pending.job_id}
+        if($cancelled.job.state -ne 'CANCELLED'){throw 'PERF_PENDING_CANCEL_FAILED'}
         for($i=0;$i -lt 12;$i++){
             $sequence++;Status-Round $sequence
+            $sequence++;$watch=[Diagnostics.Stopwatch]::StartNew()
+            $logged=Call $clients[2] $sequence 'powershell_job' @{action='logs';job_id=$hold.job.job_id;step_index=1}
+            $logs.Add($watch.Elapsed.TotalMilliseconds)
+            if($logged.status -ne 'OK'){throw 'PERF_LOGS_FAILED'}
             $sequence++;$watch=[Diagnostics.Stopwatch]::StartNew()
             $j=Call $clients[$i%3] $sequence 'powershell_job' @{action='submit';operation_key=$prefix+'-'+$i;command="Write-Output 'must remain queued'";timeout_seconds=10}
             $admission.Add($watch.Elapsed.TotalMilliseconds)
@@ -129,6 +143,12 @@ try{
             Start-Sleep -Milliseconds 250
         }while($watch.Elapsed.TotalSeconds -lt 50)
         if($s.job.state -ne 'COMPLETED' -or $s.job.execution.stdout.Trim() -cne 'perf-fixture'){throw 'PERF_HOLD_RESULT'}
+        for($i=0;$i -lt 3;$i++){
+            $sequence++;$watch=[Diagnostics.Stopwatch]::StartNew()
+            $x=Call $clients[$i] $sequence 'powershell_exec' @{operation_key=$prefix+'-exec-idle-'+$i;command="Write-Output 'perf-idle'";timeout_seconds=10}
+            $execIdle.Add($watch.Elapsed.TotalMilliseconds)
+            if($x.status -ne 'COMPLETED' -or $x.stdout.Trim() -cne 'perf-idle'){throw 'PERF_IDLE_EXEC_FAILED'}
+        }
     }
     $soak=[Diagnostics.Stopwatch]::StartNew()
     do{
@@ -145,6 +165,7 @@ try{
     [pscustomobject]@{status='PASS';scope='LOCAL_RAW_SDK_NOT_REMOTE';clients=3;service_pid=$servicePid;
         soak_seconds=[Math]::Round($soak.Elapsed.TotalSeconds,3);job_exercise=[bool]$ExerciseJobs;
         cold_client_latency=(Distribution $cold);status_latency=$status;admission_latency=$admissionStats;cancel_latency=$cancelStats;
+        logs_latency=(Distribution $logs);exec_idle_latency=(Distribution $execIdle);exec_queued_wait=(Distribution $execQueued);
         baseline_goals=@{status_p95_100ms=($status.p95_ms -le 100);
             admission_p95_100ms=$(if($admissionStats){$admissionStats.p95_ms -le 100});
             cancel_p95_500ms=$(if($cancelStats){$cancelStats.p95_ms -le 500})};
