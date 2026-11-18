@@ -93,10 +93,11 @@ function Assert-RemoteEvidence {
     $m=$health.components['mcp']
     $c=$health.components['control-plane']
     $delivery=$health.components['response-delivery']
-    $required=@('powershell_exec','powershell_job','powershell_screenshot','powershell_status')
+    $required=@('powershell_exec','powershell_job','powershell_screenshot','powershell_status',
+                'windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element')
     if($m.state -ne 'discovered' -or $m.details.child_state -ne 'running' -or $m.details.evidence -ne 'same_child' -or
         $m.details.tools_list.complete -ne $true -or $m.details.tools_list.ok -ne $true -or
-        @($m.details.tools_list.tool_names).Count -ne 4 -or
+        @($m.details.tools_list.tool_names).Count -ne $required.Count -or
         @($required|Where-Object {$_ -cnotin $m.details.tools_list.tool_names}).Count -ne 0){throw 'TRIAL_MCP_DISCOVERY_UNVERIFIED'}
     if($c.status -ne 'ok' -or $delivery.status -ne 'ok' -or $delivery.details.accepted -lt 1){throw 'TRIAL_RESPONSE_DELIVERY_UNVERIFIED'}
     $after=@(Get-NetTCPConnection -LocalAddress '127.0.0.1' -LocalPort 8080 -State Listen)

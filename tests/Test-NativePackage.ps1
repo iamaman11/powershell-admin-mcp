@@ -9,6 +9,14 @@ if(Test-Path -LiteralPath $data){throw 'FIXTURE_DATA_EXISTS'}
 if(Test-Path -LiteralPath $root){throw 'FIXTURE_ROOT_EXISTS'}
 if(Get-Service WindowsAdminMCP -ErrorAction SilentlyContinue){throw 'FIXTURE_SERVICE_EXISTS'}
 function Check($ok,$name){if(-not $ok){throw "FAIL $name"};Write-Host "PASS $name"}
+$startupText=Get-Content -LiteralPath (Join-Path $PSScriptRoot '../installer/NativeStartup.ps1') -Raw
+$contract=[regex]::Match($startupText,'(?m)^\s*\$required=@\((?<items>[^)]*)\)')
+$declared=@([regex]::Matches($contract.Groups['items'].Value, "'([^']+)'")|ForEach-Object {$_.Groups[1].Value})
+$expected=@('powershell_exec','powershell_job','powershell_screenshot','powershell_status',
+            'windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element')
+Check ($contract.Success -and $declared.Count -eq $expected.Count -and
+    @($expected|Where-Object {$_ -cnotin $declared}).Count -eq 0 -and
+    $startupText.Contains('@($m.details.tools_list.tool_names).Count -ne $required.Count')) 'r6.mcp_discovery_contract_eight_tools'
 $verified=& $installer -PackagePath $Package -ExpectedSha256 $Sha256|ConvertFrom-Json
 Check ($verified.status -eq 'VERIFIED' -and -not(Test-Path -LiteralPath $root)) 'r6.package_verify_no_install'
 $rejected=$false
