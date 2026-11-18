@@ -13,9 +13,11 @@ public sealed record ExecutionBudget(BudgetReason Reason,int ActiveExecutions,
     public bool CanStart=>Reason==BudgetReason.AVAILABLE;
     private const ulong MiB=1024UL*1024UL;
     internal const ulong Reservation=256*MiB;
+    private const ulong MinimumFreeReserve=1024*MiB;
     internal static ExecutionBudget Evaluate(int active,ulong totalPhysical,ulong availablePhysical,ulong availableCommit)
     {
-        ulong reserve=Math.Max(1024*MiB,totalPhysical/10);
+        // Preserve a 1 GiB floor while reserving only 5% of larger machines.
+        ulong reserve=Math.Max(MinimumFreeReserve,totalPhysical/20);
         // Conservative accounting also covers admission before child allocation.
         ulong needed=reserve+(checked((ulong)active)+1)*Reservation;
         return new(Math.Min(availablePhysical,availableCommit)>=needed?BudgetReason.AVAILABLE:BudgetReason.MEMORY_RESERVE,
