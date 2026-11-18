@@ -50,12 +50,13 @@ public sealed class AdminTools
     }
 
     [McpServerTool(Name="powershell_job",UseStructuredContent=true),
-        Description("Durably submit one script OR 1-8 sequential steps (each command, timeout_seconds, pause_after, reboot_after, verify_after_reboot). A reboot_after step must finish successfully before an external restart; the next step must explicitly declare verify_after_reboot and fail if the postcondition is absent. A verified new full boot releases only the next step; the tool never restarts Windows itself. Inspect status, list recent jobs, read a step's bounded logs, cancel, or resume a paused checkpoint with expected_completed_steps. Submit requires stable operation_key; retry only same key and payload. Resume never replays an interrupted step. A manual pause does not verify an OS reboot.")]
+        Description("Durably submit one script OR 1-8 sequential steps (each command, timeout_seconds, pause_after, reboot_after, verify_after_reboot). A reboot_after step must finish successfully before an external restart; the next step must explicitly declare verify_after_reboot and fail if the postcondition is absent. A verified new full boot releases only the next step; the tool never restarts Windows itself. Inspect status by job_id or operation_key, list jobs with state_filter, page_size (1-100, default 20) and before_seq (use next_before_seq from previous page), read a step's bounded logs (step_index is 1-based, 1..total_steps), cancel, or resume a paused checkpoint with expected_completed_steps. Submit requires stable operation_key; retry only same key and payload. Resume never replays an interrupted step. A manual pause does not verify an OS reboot.")]
     public static async Task<JobReply> Job(JobAction action,string? operation_key=null,string? job_id=null,
         string? command=null,int timeout_seconds=30,string? working_directory=null,JobStep[]? steps=null,
-        int? step_index=null,int? expected_completed_steps=null,CancellationToken cancellationToken=default)
+        [Description("One-based step number, 1..total_steps; logs only.")] int? step_index=null,int? expected_completed_steps=null,
+        JobState? state_filter=null,int? page_size=null,long? before_seq=null,CancellationToken cancellationToken=default)
     {
-        var reply=await Call(new(AdminOperation.Job,action,operation_key,job_id,command,timeout_seconds,working_directory,steps,step_index,expected_completed_steps),cancellationToken);
+        var reply=await Call(new(AdminOperation.Job,action,operation_key,job_id,command,timeout_seconds,working_directory,steps,step_index,expected_completed_steps,state_filter,page_size,before_seq),cancellationToken);
         return reply.Job??new(reply.Code,reply.Correlation,OperationKey:operation_key);
     }
 
@@ -74,8 +75,10 @@ public sealed class AdminTools
         return DesktopCapture.Capture(monitor,x,y,width,height,max_width,correlation);
     }
 
+    internal static TimeSpan ExecWaitBudget(int executionSeconds) => TimeSpan.FromSeconds(Math.Min(executionSeconds + 5, 90));
+
     [McpServerTool(Name="powershell_exec",UseStructuredContent=true),
-        Description("Execute a short script using the same durable queue. If the bounded wait returns PENDING, inspect the returned job_id. Disconnect does not cancel an admitted job.")]
+        Description("Execute a short script using the same durable queue (timeout_seconds 1..120 is the execution deadline, not the client wait). The synchronous wait is at most 90 seconds from tool entry, leaving a 30-second transport reserve. PENDING includes the admitted job_id; inspect it without replay. audit_persisted means a step result has been durably saved, not merely admitted. Disconnect does not cancel an admitted job.")]
     public static async Task<ExecutionResult> Exec(string command,int timeout_seconds=30,
         string? working_directory=null,string? operation_key=null,CancellationToken cancellationToken=default)
     {
@@ -93,23 +96,32 @@ public sealed class AdminTools
                 OperationKey:operation_key,CorrelationId:admitted.CorrelationId);
         }
         var job=admitted.Job;
-        do
+        ExecutionResult Pending(string stage,string correlation) => new(ExecutionState.PENDING,hash,clock.ElapsedMilliseconds,
+            Stage:stage,JobId:job.JobId,OperationKey:operation_key,CorrelationId:correlation);
+        var remaining=ExecWaitBudget(timeout_seconds)-clock.Elapsed;
+        if(remaining<=TimeSpan.Zero)return Pending("SYNCHRONOUS_WAIT_LIMIT",admitted.CorrelationId);
+        using var waitDeadline=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        waitDeadline.CancelAfter(remaining);
+        try
         {
-            var read=await Job(JobAction.logs,job_id:job.JobId,cancellationToken:cancellationToken);
-            if(read.Status==StatusCode.OK && read.Job is {} current)
+            while(true)
             {
-                if(current.Execution is {} result) return result with {JobId=job.JobId,OperationKey=operation_key,
-                    CorrelationId=read.CorrelationId,AuditPersisted=true};
-                if(current.State is JobState.CANCELLED or JobState.NEEDS_RECONCILIATION or JobState.FAILED)
-                    return new(current.State==JobState.CANCELLED?ExecutionState.CANCELLED:ExecutionState.NEEDS_RECONCILIATION,
-                        hash,clock.ElapsedMilliseconds,JobId:job.JobId,OperationKey:operation_key,CorrelationId:read.CorrelationId,AuditPersisted:true);
+                var read=await Job(JobAction.logs,job_id:job.JobId,cancellationToken:waitDeadline.Token);
+                if(read.Status==StatusCode.OK && read.Job is {} current)
+                {
+                    if(current.Execution is {} result) return result with {JobId=job.JobId,OperationKey=operation_key,
+                        CorrelationId=read.CorrelationId};
+                    if(current.State is JobState.CANCELLED or JobState.NEEDS_RECONCILIATION or JobState.FAILED)
+                        return new(current.State==JobState.CANCELLED?ExecutionState.CANCELLED:ExecutionState.NEEDS_RECONCILIATION,
+                            hash,clock.ElapsedMilliseconds,JobId:job.JobId,OperationKey:operation_key,CorrelationId:read.CorrelationId);
+                }
+                else return Pending(read.Status.ToString(),read.CorrelationId);
+                await Task.Delay(500,waitDeadline.Token);
             }
-            else return new(ExecutionState.PENDING,hash,clock.ElapsedMilliseconds,Stage:read.Status.ToString(),
-                JobId:job.JobId,OperationKey:operation_key,CorrelationId:read.CorrelationId,AuditPersisted:true);
-            if(clock.Elapsed>=TimeSpan.FromSeconds(timeout_seconds+5))break;
-            await Task.Delay(100,cancellationToken);
-        }while(true);
-        return new(ExecutionState.PENDING,hash,clock.ElapsedMilliseconds,JobId:job.JobId,OperationKey:operation_key,
-            CorrelationId:admitted.CorrelationId,AuditPersisted:true);
+        }
+        catch(OperationCanceledException) when(waitDeadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            return Pending("SYNCHRONOUS_WAIT_LIMIT",admitted.CorrelationId);
+        }
     }
 }

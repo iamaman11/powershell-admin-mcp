@@ -149,12 +149,14 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
 
     internal JobReply Dispatch(AdminRequest request, string correlation)
     {
-        JobReply Reply(StatusCode code, JobInfo? job = null, JobInfo[]? jobs = null)
-            => new(code, correlation, job, jobs, request.Key);
+        JobReply Reply(StatusCode code, JobInfo? job = null, JobInfo[]? jobs = null, long? nextBeforeSeq = null)
+            => new(code, correlation, job, jobs, request.Key, NextBeforeSeq:nextBeforeSeq);
         if (request.Action is not {} action || !Enum.IsDefined(action) ||
             request.Key is {Length:0 or >100} || request.JobId is {Length:0 or >64} ||
             (request.StepIndex is not null && action != JobAction.logs) ||
-            (request.ExpectedCompletedSteps is not null && action != JobAction.resume))
+            (request.ExpectedCompletedSteps is not null && action != JobAction.resume) ||
+            ((request.StateFilter is not null || request.PageSize is not null || request.BeforeSeq is not null) && action != JobAction.list) ||
+            (request.StateFilter is {} filter && !Enum.IsDefined(filter)) || request.PageSize is <1 or >100 || request.BeforeSeq is <1)
             return Reply(StatusCode.INVALID_ARGUMENT);
 
         lock (gate)
@@ -214,11 +216,18 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
             if (action == JobAction.list)
             {
                 if (request.Key is not null || request.JobId is not null) return Reply(StatusCode.INVALID_ARGUMENT);
-                using var cmd = Command("SELECT "+Columns+" FROM jobs ORDER BY seq DESC LIMIT 20",null);
+                int size=request.PageSize??20;
+                using var cmd = Command("SELECT "+Columns+",seq FROM jobs WHERE ($state IS NULL OR state=$state) AND ($before IS NULL OR seq<$before) ORDER BY seq DESC LIMIT $take",
+                    null,("$state",(object?)request.StateFilter?.ToString()??DBNull.Value),("$before",(object?)request.BeforeSeq??DBNull.Value),("$take",size+1));
                 using var reader = cmd.ExecuteReader();
                 var jobs = new List<JobInfo>();
-                while(reader.Read()) jobs.Add(Read(reader));
-                return Reply(StatusCode.OK,jobs:jobs.ToArray());
+                long? last=null,next=null;
+                while(reader.Read())
+                {
+                    if(jobs.Count==size){next=last;break;}
+                    jobs.Add(Read(reader));last=reader.GetInt64(9);
+                }
+                return Reply(StatusCode.OK,jobs:jobs.ToArray(),nextBeforeSeq:next);
             }
             if ((request.Key is null) == (request.JobId is null)) return Reply(StatusCode.INVALID_ARGUMENT);
             using var change = Db.BeginTransaction();
@@ -234,7 +243,9 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 var blob = cmd.ExecuteScalar();
                 var execution = blob is byte[] bytes ? JsonSerializer.Deserialize<ExecutionResult>(
                     JobDataProtection.Open(bytes,job.JobId,Field(index,"result")),PipeWire.Json) : null;
-                return Reply(StatusCode.OK,job with {Execution=execution,ResultStep=index});
+                // Schema-2/3 results stored the runner default false. Successful authenticated readback
+                // proves that the result is committed, without rewriting historic records.
+                return Reply(StatusCode.OK,job with {Execution=execution is null?null:execution with {AuditPersisted=true},ResultStep=index});
             }
             if (action == JobAction.resume)
             {
@@ -420,7 +431,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                     UPDATE job_steps SET result=$result,command=NULL
                     WHERE job_id=$id AND step_index=$step AND result IS NULL
                     """,tx,("$id",work.Id),("$step",work.Index),
-                    ("$result",JobDataProtection.Protect(JsonSerializer.Serialize(result,PipeWire.Json),work.Id,Field(work.Index,"result"))));
+                    ("$result",JobDataProtection.Protect(JsonSerializer.Serialize(result with {AuditPersisted=true},PipeWire.Json),work.Id,Field(work.Index,"result"))));
                 if(step.ExecuteNonQuery()!=1)throw new InvalidOperationException("Lost step transition");
                 using var update=Command("""
                     UPDATE jobs SET state=$state,completed_steps=$completed,updated_utc=$now,

@@ -12,7 +12,8 @@ public enum StatusCode
 internal sealed record AdminRequest([property: JsonRequired] AdminOperation Operation,
     JobAction? Action = null, string? Key = null, string? JobId = null, string? Command = null,
     int TimeoutSeconds = 30, string? WorkingDirectory = null, JobStep[]? Steps = null,
-    int? StepIndex = null, int? ExpectedCompletedSteps = null);
+    int? StepIndex = null, int? ExpectedCompletedSteps = null,
+    JobState? StateFilter = null, int? PageSize = null, long? BeforeSeq = null);
 
 public sealed record AdminStatus(
     [property: JsonPropertyName("status")] StatusCode Status,

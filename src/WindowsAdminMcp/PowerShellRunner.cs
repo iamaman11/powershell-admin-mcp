@@ -27,6 +27,8 @@ public sealed record ExecutionResult(
     [property:JsonPropertyName("job_id")] string? JobId = null,
     [property:JsonPropertyName("operation_key")] string? OperationKey = null,
     [property:JsonPropertyName("correlation_id")] string? CorrelationId = null,
+    // True only when the returned step result is read from, or committed to, the durable store.
+    // Admission, pending waits and synthetic replies without a stored result are not execution audit.
     [property:JsonPropertyName("audit_persisted")] bool AuditPersisted = false);
 
 internal static class PowerShellRunner

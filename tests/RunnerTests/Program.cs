@@ -14,6 +14,8 @@ static async Task<ExecutionResult> Run(string command, int timeout = 10, string?
 if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true")
     throw new InvalidOperationException("Isolated Windows CI only");
 Check(File.Exists(PowerShellRunner.Executable), "r2.machine_wide_pwsh");
+Check(AdminTools.ExecWaitBudget(120)==TimeSpan.FromSeconds(90) && AdminTools.ExecWaitBudget(85)==TimeSpan.FromSeconds(90) &&
+    AdminTools.ExecWaitBudget(10)==TimeSpan.FromSeconds(15), "transport.exec_wait_budget");
 var simple = await Run("Write-Output 'hello'");
 Check(simple.Status == ExecutionState.COMPLETED && simple.ExitCode == 0 && simple.Stdout.Trim() == "hello", "r2.stdout_exit");
 string prefix = "Write-Output 'Проверка Unicode 🚀'\n#";
@@ -192,7 +194,7 @@ try
         store.Initialize(database);
         var saved=store.Dispatch(new(AdminOperation.Job,JobAction.logs,JobId:id),"migration");
         Check(saved.Status==StatusCode.OK && saved.Job?.State==JobState.COMPLETED &&
-            saved.Job.Execution?.Stdout=="v2 preserved","r4.real_v2_migration_preserves_encrypted_result");
+            saved.Job.Execution is {Stdout:"v2 preserved",AuditPersisted:true},"r4.real_v2_migration_preserves_encrypted_result_and_audit");
         var duplicate=store.Dispatch(new(AdminOperation.Job,JobAction.submit,Key:key,Command:command,WorkingDirectory:v2Cwd),"migration");
         Check(duplicate.Status==StatusCode.OK && duplicate.Job?.JobId==id,"r4.v2_payload_hash_unchanged");
         var counts=store.Summary();
@@ -218,3 +220,27 @@ try
     }
 }
 finally{Directory.Delete(migrationRoot,true);}
+
+// Isolated real store: keyset pagination is stable, filtered and rejects invalid ranges.
+string pagingRoot=Path.Combine(Path.GetTempPath(),"WindowsAdminMCP-paging-"+Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(pagingRoot);
+try
+{
+    using var store=new JobCoordinator(Microsoft.Extensions.Logging.Abstractions.NullLogger<JobCoordinator>.Instance);
+    store.Initialize(Path.Combine(pagingRoot,"jobs.db"));
+    JobReply Call(AdminRequest req)=>store.Dispatch(req,"paging");
+    for(int i=0;i<5;i++)
+        Check(Call(new(AdminOperation.Job,JobAction.submit,Key:"paging-"+i,Command:"Write-Output 1")).Status==StatusCode.OK,"paging.admission."+i);
+    Check(Call(new(AdminOperation.Job,JobAction.cancel,Key:"paging-3")).Status==StatusCode.OK,"paging.cancel");
+    var p1=Call(new(AdminOperation.Job,JobAction.list,StateFilter:JobState.QUEUED,PageSize:2));
+    Check(p1.Status==StatusCode.OK && p1.Jobs is {Length:2} && p1.Jobs[0].OperationKey=="paging-4" &&
+        p1.Jobs[1].OperationKey=="paging-2" && p1.NextBeforeSeq is >0,"paging.first");
+    var p2=Call(new(AdminOperation.Job,JobAction.list,StateFilter:JobState.QUEUED,PageSize:2,BeforeSeq:p1.NextBeforeSeq));
+    Check(p2.Status==StatusCode.OK && p2.Jobs is {Length:2} && p2.Jobs[0].OperationKey=="paging-1" &&
+        p2.Jobs[1].OperationKey=="paging-0" && p2.NextBeforeSeq is null,"paging.second");
+    Check(Call(new(AdminOperation.Job,JobAction.list,PageSize:0)).Status==StatusCode.INVALID_ARGUMENT &&
+        Call(new(AdminOperation.Job,JobAction.status,Key:"paging-0",BeforeSeq:1)).Status==StatusCode.INVALID_ARGUMENT,"paging.invalid");
+    var lookup=Call(new(AdminOperation.Job,JobAction.status,Key:"paging-3"));
+    Check(lookup.Job?.State==JobState.CANCELLED,"paging.key_lookup");
+}
+finally{Directory.Delete(pagingRoot,true);}

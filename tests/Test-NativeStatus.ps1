@@ -92,8 +92,24 @@ try{
     Assert ($x.status -eq 'COMPLETED' -and $x.stdout.Contains('real-exec') -and $x.stdout.Contains('S-1-5-18') -and $x.audit_persisted) 'r3.actual_exec_service_context'
     $prefix="Write-Output 'Проверка 🚀'"+[char]10+'#'
     $long=$prefix+('x'*(11982-$prefix.Length))
+    $shortLog=Job $b 101 @{action='logs';operation_key='short';step_index=1}
+    Assert ($shortLog.job.execution.audit_persisted -and $shortLog.job.execution.stdout.Contains('real-exec')) 'hardening.exec_and_logs_same_persisted_audit'
+    $badIndex=Job $b 102 @{action='logs';operation_key='short';step_index=0}
+    Assert ($badIndex.status -eq 'INVALID_ARGUMENT') 'hardening.zero_step_index_rejected'
     $x=ToolCall $b 11 'powershell_exec' @{command=$long;timeout_seconds=10;operation_key='long'}
     Assert ($x.status -eq 'COMPLETED' -and $x.stdout.Trim() -ceq 'Проверка 🚀') 'r3.long_unicode_through_mcp'
+    # A 100-second benign runner command must return PENDING in the 90-second client budget
+    # and continue to completion through the same durable job API.
+    $boundaryClock=[Diagnostics.Stopwatch]::StartNew()
+    Send $a 103 'tools/call' @{name='powershell_exec';arguments=@{command="Start-Sleep -Seconds 100; Write-Output 'BOUNDARY_OK'";timeout_seconds=120;operation_key='boundary-exec'};_meta=$meta}
+    $boundaryLine=$a.StandardOutput.ReadLineAsync().WaitAsync([TimeSpan]::FromSeconds(110)).GetAwaiter().GetResult()
+    $boundary=$boundaryLine|ConvertFrom-Json -AsHashtable
+    Assert ($boundary.id -eq 103 -and -not $boundary.Contains('error') -and (-not $boundary.result.Contains('isError') -or -not $boundary.result.isError) -and
+        $boundary.result.structuredContent.status -eq 'PENDING' -and $boundary.result.structuredContent.job_id -and
+        -not $boundary.result.structuredContent.audit_persisted -and $boundaryClock.Elapsed.TotalSeconds -lt 110) 'hardening.exec_boundary_pending_before_tunnel_deadline'
+    $boundaryId=$boundary.result.structuredContent.job_id
+    $boundaryResult=Wait-JobState $b $boundaryId 'COMPLETED'
+    Assert ($boundaryResult.execution.stdout.Trim() -ceq 'BOUNDARY_OK' -and $boundaryResult.execution.audit_persisted) 'hardening.boundary_result_saved'
     $first=Job $a 12 @{action='submit';operation_key='shared';command="Start-Sleep -Seconds 5; Write-Output 'first'";timeout_seconds=20}
     Assert ($first.status -eq 'OK' -and $first.job.state -eq 'QUEUED') 'r3.durable_admission'
     $null=Wait-JobState $b $first.job.job_id 'RUNNING'
@@ -106,7 +122,7 @@ try{
     $a.Kill($true);$a.WaitForExit()
     $one=Wait-JobState $b $first.job.job_id 'COMPLETED'
     $two=Wait-JobState $c $next.job.job_id 'COMPLETED'
-    Assert ($one.execution.stdout.Trim() -eq 'first' -and $two.execution.stdout.Trim() -eq 'second') 'r3.disconnect_and_distinct_results'
+    Assert ($one.execution.stdout.Trim() -eq 'first' -and $two.execution.stdout.Trim() -eq 'second' -and $one.execution.audit_persisted -and $two.execution.audit_persisted) 'r3.disconnect_and_distinct_results'
     $kill=Job $b 15 @{action='submit';operation_key='cancel';command='Start-Sleep -Seconds 30';timeout_seconds=60}
     $null=Wait-JobState $c $kill.job.job_id 'RUNNING'
     Start-Sleep -Milliseconds 700
