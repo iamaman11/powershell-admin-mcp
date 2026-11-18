@@ -25,6 +25,26 @@ function Assert-IdleStore($report){
         throw 'UPDATE_ACTIVE_JOBS: finish or cancel active and queued jobs first'
     }
 }
+function Select-UpdateClients($processes,[string]$executable,[int[]]$allowedParents){
+    @($processes|Where-Object {$_ -and $_.ExecutablePath -ieq $executable -and
+        $_.CommandLine -match '\sstdio\s*$' -and $_.ParentProcessId -notin $allowedParents})
+}
+function Assert-UpdateClientScope($client,[int]$sessionId,[string]$sid,[string]$ownerSid){
+    if($client.SessionId -ne $sessionId){throw 'UPDATE_CLIENT_OTHER_SESSION'}
+    if($ownerSid -cne $sid){throw 'UPDATE_CLIENT_OTHER_OWNER'}
+}
+function Assert-BlockingLauncherIdentity($launcher,$children){
+    if($launcher.Name -in @('services.exe','svchost.exe','winlogon.exe','explorer.exe',
+                           'WindowsAdminMCP.exe','tunnel-client-runtime.exe')){
+        throw 'UPDATE_CLIENT_PARENT_PROTECTED'
+    }
+    if(-not $launcher.ExecutablePath){throw 'UPDATE_CLIENT_PARENT_PATH_UNCONFIRMED'}
+    foreach($child in $children){
+        if([datetime]$launcher.CreationDate -gt [datetime]$child.CreationDate){
+            throw 'UPDATE_CLIENT_PARENT_IDENTITY_CHANGED'
+        }
+    }
+}
 function Assert-InstalledUpdateSource([string]$scriptDirectory,[string]$installRoot,$manifest){
     $expected=[IO.Path]::GetFullPath((Join-Path $installRoot 'native\installer')).TrimEnd([char]'\')
     $actual=[IO.Path]::GetFullPath($scriptDirectory).TrimEnd([char]'\')
@@ -77,6 +97,8 @@ $stage='preflight'
 $download=$null
 $stopping=$false
 $maintenance=$false
+$closedClients=0
+$closedLaunchers=0
 function Read-InstalledDoctor {
     # doctor deliberately returns nonzero for NOT_TESTED remote evidence.
     $PSNativeCommandUseErrorActionPreference=$false
@@ -85,11 +107,93 @@ function Read-InstalledDoctor {
     if($d.schemaVersion -ne 1 -or $d.package.status -ne 'VERIFIED'){throw 'UPDATE_INSTALLED_PACKAGE_UNVERIFIED'}
     return $d
 }
+function Get-UpdateClients([int[]]$allowedParents){
+    @(Select-UpdateClients @(Get-CimInstance Win32_Process -Filter "Name='WindowsAdminMCP.exe'") $native $allowedParents)
+}
 function Assert-ClosedClients([int[]]$allowedParents){
-    $others=@(Get-CimInstance Win32_Process -Filter "Name='WindowsAdminMCP.exe'"|Where-Object {
-        $_.ExecutablePath -ieq $native -and $_.CommandLine -match '\sstdio\s*$' -and $_.ParentProcessId -notin $allowedParents
-    })
-    if($others.Count){throw 'UPDATE_LOCAL_CLIENTS_ACTIVE: close Codex and other local stdio connections'}
+    if(@(Get-UpdateClients $allowedParents).Count){throw 'UPDATE_LOCAL_CLIENTS_RESTARTED_OR_ACTIVE'}
+}
+function Stop-ProvenUpdateProcess($cim,[int]$session){
+    $process=$null
+    try{
+        try{$process=[Diagnostics.Process]::GetProcessById($cim.ProcessId)}
+        catch [ArgumentException]{return $false}
+        if($process.HasExited){return $false}
+        if($process.SessionId -ne $session -or
+           $process.MainModule.FileName -ine $cim.ExecutablePath -or
+           ($process.StartTime - [datetime]$cim.CreationDate).Duration().TotalSeconds -gt 2){
+            throw 'UPDATE_CLIENT_IDENTITY_CHANGED'
+        }
+        try{$process.Kill()}
+        catch [InvalidOperationException]{if(-not $process.HasExited){throw}}
+        if(-not $process.WaitForExit(5000)){throw 'UPDATE_CLIENT_EXIT_TIMEOUT'}
+        return $true
+    }finally{if($process){$process.Dispose()}}
+}
+function Assert-NotUpdaterAncestor([int]$targetPid){
+    # Closing the console hosting this updater would interrupt the file swap.
+    $ancestor=$PID
+    for($hop=0;$hop -lt 32;$hop++){
+        if($ancestor -eq $targetPid){throw 'UPDATE_CLIENT_PARENT_IS_OPERATOR'}
+        $current=Get-CimInstance Win32_Process -Filter ("ProcessId="+$ancestor) -ErrorAction Stop
+        if(-not $current -or $current.ParentProcessId -le 4){return}
+        $ancestor=[int]$current.ParentProcessId
+    }
+    throw 'UPDATE_OPERATOR_ANCESTRY_UNCONFIRMED'
+}
+function Stop-BlockingLaunchers($clients,[int]$session,[string]$sid){
+    # Escalate only if the same leaf frontends have already been closed but
+    # are being recreated. The responsible direct parents are then blockers.
+    $closed=0
+    $parentGroups=@($clients|Group-Object ParentProcessId)
+    if($parentGroups.Count -gt 8){throw 'UPDATE_CLIENT_PARENT_COUNT_UNEXPECTED'}
+    foreach($group in $parentGroups){
+        $parentPid=[int]$group.Name
+        $launcher=Get-CimInstance Win32_Process -Filter ("ProcessId="+$parentPid) -ErrorAction Stop
+        if(-not $launcher){continue}
+        Assert-BlockingLauncherIdentity $launcher $group.Group
+        Assert-NotUpdaterAncestor $parentPid
+        $owner=Invoke-CimMethod -InputObject $launcher -MethodName GetOwnerSid -ErrorAction Stop
+        if($owner.ReturnValue -ne 0){throw 'UPDATE_CLIENT_PARENT_OWNER_UNCONFIRMED'}
+        Assert-UpdateClientScope $launcher $session $sid ([string]$owner.Sid)
+        if(Stop-ProvenUpdateProcess $launcher $session){$closed++}
+    }
+    return $closed
+}
+function Stop-LocalStdioClients {
+    # First stop this package's own stdio frontends. If a launcher persistently
+    # recreates them, stop that proven direct parent in the same user/session.
+    # Never touch foreign sessions, protected processes or the update console.
+    $session=[Diagnostics.Process]::GetCurrentProcess().SessionId
+    $sid=$identity.User.Value
+    $closed=0
+    $launchers=0
+    for($pass=0;$pass -lt 4;$pass++){
+        $clients=@(Get-UpdateClients @())
+        if(-not $clients.Count){return [pscustomobject]@{clients=$closed;launchers=$launchers}}
+        if($clients.Count -gt 32){throw 'UPDATE_CLIENT_COUNT_UNEXPECTED'}
+        # Validate every target before terminating any client in this pass.
+        foreach($client in $clients){
+            $owner=Invoke-CimMethod -InputObject $client -MethodName GetOwnerSid -ErrorAction Stop
+            if($owner.ReturnValue -ne 0){throw 'UPDATE_CLIENT_OWNER_READBACK_FAILED'}
+            Assert-UpdateClientScope $client $session $sid ([string]$owner.Sid)
+        }
+        Assert-IdleStore (Read-InstalledDoctor)
+        if($pass -eq 2){$launchers+=Stop-BlockingLaunchers $clients $session $sid}
+        foreach($client in $clients){
+            $current=Get-CimInstance Win32_Process -Filter ("ProcessId="+$client.ProcessId) -ErrorAction Stop
+            if(-not $current){continue}
+            if($current.CreationDate -ne $client.CreationDate -or
+               @(Select-UpdateClients @($current) $native @()).Count -ne 1){throw 'UPDATE_CLIENT_IDENTITY_CHANGED'}
+            $owner=Invoke-CimMethod -InputObject $current -MethodName GetOwnerSid -ErrorAction Stop
+            if($owner.ReturnValue -ne 0){throw 'UPDATE_CLIENT_OWNER_READBACK_FAILED'}
+            Assert-UpdateClientScope $current $session $sid ([string]$owner.Sid)
+            if(Stop-ProvenUpdateProcess $current $session){$closed++}
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    Assert-ClosedClients @()
+    return [pscustomobject]@{clients=$closed;launchers=$launchers}
 }
 function Read-Manifest {Get-Content -LiteralPath (Join-Path $root 'manifest.json') -Raw|ConvertFrom-Json}
 function Invoke-GhJson([string]$endpoint){
@@ -110,7 +214,6 @@ try{
     if($d.package.commit -cne $installed.commit -or -not $d.service.versions.informational_version.EndsWith('+'+$installed.commit)){throw 'UPDATE_INSTALLED_IDENTITY_MISMATCH'}
     $before=& $startup -Action Status|ConvertFrom-Json
     if(-not $before.definition_valid -or -not $before.service_binding_valid){throw 'UPDATE_STARTUP_UNCONFIRMED'}
-    Assert-ClosedClients @($d.tunnelPid|Where-Object {$null -ne $_})
     $pending=Test-Path -LiteralPath (Join-Path $root '.rollback\journal.json')
     if($Action -eq 'update'){
         $stage='acquire'
@@ -155,14 +258,16 @@ try{
     $stage='drain'
     $d=Read-InstalledDoctor
     Assert-IdleStore $d
-    Assert-ClosedClients @($d.tunnelPid|Where-Object {$null -ne $_})
-    # The operator must suspend other clients during maintenance. Refuse busy
-    # queues, then close the remote ingress and check the store again.
+    # Refuse busy queues; stop the tunnel ingress, close only same-session
+    # disposable MCP frontends, then confirm durable work is still idle.
     $stopping=$true
     $null=& $startup -Action Stop -ExpectedNativeSha256 $installed.files.'native/WindowsAdminMCP.exe'
     $clock=[Diagnostics.Stopwatch]::StartNew()
     while(@(Get-Process -Name 'tunnel-client-runtime' -ErrorAction SilentlyContinue).Count -and $clock.Elapsed.TotalSeconds -lt 15){Start-Sleep -Milliseconds 200}
     if(@(Get-Process -Name 'tunnel-client-runtime' -ErrorAction SilentlyContinue).Count){throw 'UPDATE_TUNNEL_NOT_QUIESCENT'}
+    $drained=Stop-LocalStdioClients
+    $closedClients=$drained.clients
+    $closedLaunchers=$drained.launchers
     Assert-ClosedClients @()
     Assert-IdleStore (Read-InstalledDoctor)
     $stage='maintenance'
@@ -216,7 +321,8 @@ try{
         if(-not $ready){$after=Read-InstalledDoctor}
     }
     $trialStatus=if($ready){'TRIAL_LOCAL_READY'}elseif($after.tun -ne 'READY'){'TRIAL_WAITING_FOR_TUN'}else{'TRIAL_NOT_READY'}
-    [pscustomobject]@{status=$trialStatus;commit=$current.commit;tun=$after.tun;local_ready=$ready;remote_accepted=$false;
+    [pscustomobject]@{status=$trialStatus;commit=$current.commit;tun=$after.tun;local_ready=$ready;
+        closed_local_clients=$closedClients;closed_blocking_launchers=$closedLaunchers;remote_accepted=$false;
         next_action='verify eight MCP tools externally, then use -Action accept -RemoteAcceptanceConfirmed'}|ConvertTo-Json -Compress
 }catch{
     # Restore transport only when no maintenance/swap was attempted. Once

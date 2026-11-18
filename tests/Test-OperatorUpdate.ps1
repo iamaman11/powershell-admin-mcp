@@ -25,6 +25,23 @@ foreach($field in @('running','queued','cancelRequested')){
     $report.store.$field=0
 }
 Check (Reject {Assert-IdleStore ([pscustomobject]@{service=$null;store=$null})} 'UPDATE_STORE_UNCONFIRMED') 'h5.fail_closed_store_unconfirmed'
+$exe='C:\Program Files\WindowsAdminMCP\native\WindowsAdminMCP.exe'
+$local=[pscustomobject]@{ExecutablePath=$exe;CommandLine='"'+$exe+'" stdio';ParentProcessId=42;SessionId=1}
+$tunnel=[pscustomobject]@{ExecutablePath=$exe;CommandLine='"'+$exe+'" stdio';ParentProcessId=77;SessionId=1}
+$otherBinary=[pscustomobject]@{ExecutablePath='C:\Other\WindowsAdminMCP.exe';CommandLine='"C:\Other\WindowsAdminMCP.exe" stdio';ParentProcessId=42;SessionId=1}
+$service=[pscustomobject]@{ExecutablePath=$exe;CommandLine='"'+$exe+'" service';ParentProcessId=42;SessionId=0}
+$samples=@($local,$tunnel,$otherBinary,$service)
+Check (@(Select-UpdateClients $samples $exe @(77)).Count -eq 1) 'h5.only_canonical_stdio_leaf_selected'
+Check (@(Select-UpdateClients $samples $exe @()).Count -eq 2) 'h5.tunnel_child_included_after_tunnel_stop'
+Assert-UpdateClientScope $local 1 'S-1-5-21-fixture' 'S-1-5-21-fixture'
+Check (Reject {Assert-UpdateClientScope $local 2 'S-1-5-21-fixture' 'S-1-5-21-fixture'} 'UPDATE_CLIENT_OTHER_SESSION') 'h5.never_close_foreign_session'
+Check (Reject {Assert-UpdateClientScope $local 1 'S-1-5-21-fixture' 'S-1-5-21-other'} 'UPDATE_CLIENT_OTHER_OWNER') 'h5.never_close_foreign_owner'
+$child=[pscustomobject]@{CreationDate=[datetime]'2026-11-18T20:00:05'}
+$launcher=[pscustomobject]@{Name='codex.exe';ExecutablePath='C:\Tools\codex.exe';CreationDate=[datetime]'2026-11-18T20:00:00'}
+Assert-BlockingLauncherIdentity $launcher @($child)
+Check (Reject {Assert-BlockingLauncherIdentity ([pscustomobject]@{Name='services.exe';ExecutablePath='C:\Windows\System32\services.exe';CreationDate=$launcher.CreationDate}) @($child)} 'UPDATE_CLIENT_PARENT_PROTECTED') 'h5.never_kill_protected_parent'
+Check (Reject {Assert-BlockingLauncherIdentity ([pscustomobject]@{Name='pwsh.exe';ExecutablePath='C:\Tools\pwsh.exe';CreationDate=[datetime]'2026-11-18T20:01:00'}) @($child)} 'UPDATE_CLIENT_PARENT_IDENTITY_CHANGED') 'h5.never_kill_reused_parent_pid'
+Check (Reject {Assert-BlockingLauncherIdentity ([pscustomobject]@{Name='codex.exe';ExecutablePath=$null;CreationDate=$launcher.CreationDate}) @($child)} 'UPDATE_CLIENT_PARENT_PATH_UNCONFIRMED') 'h5.never_kill_unidentified_parent'
 $fixtureRoot=Join-Path ([IO.Path]::GetTempPath()) ('wmcp-updater-'+[guid]::NewGuid().ToString('N'))
 $helperDir=Join-Path $fixtureRoot 'native\installer'
 try{
