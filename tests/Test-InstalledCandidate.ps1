@@ -76,7 +76,12 @@ try {
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
 [pscustomobject]@{sid=$identity.User.Value;session=[Diagnostics.Process]::GetCurrentProcess().SessionId;profile=$env:USERPROFILE;hkcu=(Test-Path 'HKCU:\Software');elevated=([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)}|ConvertTo-Json -Compress
 '@
-    $userStatus=(Tool $b 30 'powershell_status' @{}).structuredContent
+    $presence=[Diagnostics.Stopwatch]::StartNew();$presenceId=800
+    do{
+        $userStatus=(Tool $b $presenceId 'powershell_status' @{}).structuredContent;$presenceId++
+        if($userStatus.user_context_available -and $userStatus.command_context -eq 'USER'){break}
+        Start-Sleep -Milliseconds 250
+    }while($presence.Elapsed.TotalSeconds -lt 15)
     Assert ($userStatus.command_context -eq 'USER' -and $userStatus.user_context_available -and
         $userStatus.frontend.sid -eq $ownerSid -and $userStatus.frontend.session_id -eq $ownerSession) 'installed.actual_user_runner_available'
     $user=(Tool $b 31 'powershell_exec' @{operation_key=$key+'-user';command=$identityCommand;timeout_seconds=10}).structuredContent
@@ -150,9 +155,12 @@ exit 0
         }
     }finally{
         # Only the fixture's own IDs; never cancel any unrelated job.
+        $cleanupId=700
         foreach($job in $parallel){
-            $v=(Tool $b (700+$parallel.IndexOf($job)) 'powershell_job' @{action='status';job_id=$job.id}).structuredContent
-            if($v.job.state -in @('QUEUED','RUNNING')){$null=Tool $b 710 'powershell_job' @{action='cancel';job_id=$job.id}}
+            try{
+                $v=(Tool $b $cleanupId 'powershell_job' @{action='status';job_id=$job.id}).structuredContent;$cleanupId++
+                if($v.job.state -in @('QUEUED','RUNNING')){$null=Tool $b $cleanupId 'powershell_job' @{action='cancel';job_id=$job.id};$cleanupId++}
+            }catch{Write-Warning ('Fixture cleanup readback failed for job '+$job.id)}
         }
     }
     $exec=(Tool $a 4 'powershell_exec' @{command="Write-Output 'native Здравствуй'; [Security.Principal.WindowsIdentity]::GetCurrent().User.Value";timeout_seconds=10;operation_key=$key;execution_context='SYSTEM'} $false).structuredContent
