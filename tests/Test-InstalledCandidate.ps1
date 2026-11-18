@@ -65,10 +65,10 @@ try {
         Assert ($status.status -eq 'OK' -and $status.service_pid -eq $expectedPid -and $status.execution_sid -eq 'S-1-5-18') 'installed.shared_service'
     }
     $key='physical-'+[guid]::NewGuid().ToString('N')
-    $exec=(Tool $a 4 'powershell_exec' @{command="Write-Output 'native Здравствуй'; [Security.Principal.WindowsIdentity]::GetCurrent().User.Value";timeout_seconds=10;operation_key=$key} $false).structuredContent
+    $exec=(Tool $a 4 'powershell_exec' @{command="Write-Output 'native Здравствуй'; [Security.Principal.WindowsIdentity]::GetCurrent().User.Value";timeout_seconds=10;operation_key=$key;execution_context='SYSTEM'} $false).structuredContent
     Assert ($exec.status -eq 'COMPLETED' -and $exec.stdout.Contains('native Здравствуй') -and $exec.stdout.Contains('S-1-5-18')) 'installed.real_exec'
     $jobKey=$key+'-job'
-    $jobArgs=@{action='submit';operation_key=$jobKey;command="Start-Sleep -Seconds 2; Write-Output 'native-job'";timeout_seconds=10}
+    $jobArgs=@{action='submit';operation_key=$jobKey;command="Start-Sleep -Seconds 2; Write-Output 'native-job'";timeout_seconds=10;execution_context='SYSTEM'}
     $job=(Tool $b 4 'powershell_job' $jobArgs).structuredContent
     Assert ($job.status -eq 'OK' -and $job.job.job_id) 'installed.durable_submit'
     $dup=(Tool $c 4 'powershell_job' $jobArgs).structuredContent

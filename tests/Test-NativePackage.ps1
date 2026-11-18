@@ -135,6 +135,7 @@ try{
         try{& $Body $p}finally{$p.StandardInput.Close();if(-not $p.WaitForExit(3000)){$p.Kill($true);$p.WaitForExit()};$p.Dispose()}
     }
     function Call-Tool($p,$id,$name,$arguments){
+        if($name -eq 'powershell_exec' -or ($name -eq 'powershell_job' -and $arguments.action -eq 'submit')){$arguments.execution_context='SYSTEM'}
         $msg=@{jsonrpc='2.0';id=$id;method='tools/call';params=@{name=$name;arguments=$arguments;_meta=$meta}}
         $p.StandardInput.WriteLine(($msg|ConvertTo-Json -Depth 10 -Compress));$p.StandardInput.Flush()
         do{

@@ -10,7 +10,7 @@ public enum ExecutionState
     EXECUTION_FAILED, TIMEOUT_BEFORE_EXECUTION, CANCELLED_BEFORE_EXECUTION,
     TIMEOUT_UNKNOWN_EFFECT, CANCELLED_UNKNOWN_EFFECT, OUTPUT_INCOMPLETE,
     PENDING, NEEDS_RECONCILIATION, SERVICE_UNAVAILABLE, ACCESS_DENIED, IPC_TIMEOUT, IPC_PROTOCOL_ERROR,
-    IPC_FAILED, NOT_FOUND, CONFLICT, BUSY, STORE_FULL, NOT_CANCELLABLE, ADMISSION_UNCONFIRMED, CANCELLED, RECONCILED, HISTORY_PRUNED, STORE_UNAVAILABLE
+    IPC_FAILED, NOT_FOUND, CONFLICT, BUSY, STORE_FULL, NOT_CANCELLABLE, ADMISSION_UNCONFIRMED, CANCELLED, RECONCILED, HISTORY_PRUNED, STORE_UNAVAILABLE, USER_CONTEXT_UNAVAILABLE, LEASE_LOST
 }
 
 public sealed record ExecutionResult(
@@ -29,7 +29,10 @@ public sealed record ExecutionResult(
     [property:JsonPropertyName("correlation_id")] string? CorrelationId = null,
     // True only when the returned step result is read from, or committed to, the durable store.
     // Admission, pending waits and synthetic replies without a stored result are not execution audit.
-    [property:JsonPropertyName("audit_persisted")] bool AuditPersisted = false);
+    [property:JsonPropertyName("audit_persisted")] bool AuditPersisted = false,
+    [property:JsonPropertyName("execution_context")] CommandContext? ExecutionContext = null,
+    [property:JsonPropertyName("execution_sid")] string? ExecutionSid = null,
+    [property:JsonPropertyName("execution_session_id")] int? ExecutionSessionId = null);
 
 internal static class PowerShellRunner
 {

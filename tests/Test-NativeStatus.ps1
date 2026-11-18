@@ -21,6 +21,9 @@ function Connect {
     return $p
 }
 function Send($p,$id,$method,$params){
+    if($method -eq 'tools/call' -and ($params.name -eq 'powershell_exec' -or
+        ($params.name -eq 'powershell_job' -and $params.arguments.action -eq 'submit')) -and
+        -not $params.arguments.ContainsKey('execution_context')){$params.arguments.execution_context='SYSTEM'}
     $m=@{jsonrpc='2.0';id=$id;method=$method;params=$params}
     $p.StandardInput.WriteLine(($m|ConvertTo-Json -Depth 12 -Compress));$p.StandardInput.Flush()
 }
@@ -64,7 +67,7 @@ try{
         Assert ($v.service_pid -eq $svc.ProcessId -and $v.execution_sid -eq 'S-1-5-18' -and $v.elevated) 'r1.scm_pid_and_real_execution_identity'
         $caller=[Security.Principal.WindowsIdentity]::GetCurrent()
         Assert ($v.frontend.pid -eq $p.Id -and $v.frontend.sid -eq $caller.User.Value -and
-            $v.frontend.session_id -eq $p.SessionId -and $v.command_context -eq 'SYSTEM') 'hardening.separate_frontend_and_runner_identity'
+            $v.frontend.session_id -eq $p.SessionId -and $v.command_context -in @('SYSTEM','UNCONFIRMED')) 'hardening.separate_frontend_and_runner_identity'
     }
     foreach($p in @($a,$b,$c)){Send $p 2 'tools/call' @{name='powershell_status';arguments=@{};_meta=$meta}}
     $results=@(foreach($p in @($a,$b,$c)){(Receive $p 2).structuredContent})

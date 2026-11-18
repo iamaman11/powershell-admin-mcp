@@ -10,7 +10,7 @@ using ModelContextProtocol.Protocol;
 [McpServerToolType]
 public sealed class AdminTools
 {
-    private static async Task<AdminResponse> Call(AdminRequest request,CancellationToken ct)
+    internal static async Task<AdminResponse> Call(AdminRequest request,CancellationToken ct)
     {
         string correlation=Guid.NewGuid().ToString("N");
         bool sent=false;
@@ -40,6 +40,12 @@ public sealed class AdminTools
         catch(IOException e){return Fail(StatusCode.IPC_FAILED,e.HResult);}
     }
 
+    private static CommandContext DefaultContext()
+    {
+        using var identity=WindowsIdentity.GetCurrent();
+        return identity.IsSystem?CommandContext.SYSTEM:CommandContext.USER;
+    }
+
     internal static Task<AdminResponse> Diagnostics(CancellationToken ct) => Call(new(AdminOperation.Diagnostics),ct);
 
     [McpServerTool(Name="powershell_status",UseStructuredContent=true),
@@ -52,21 +58,24 @@ public sealed class AdminTools
         using var process=Process.GetCurrentProcess();
         var frontend=new FrontendContext(process.Id,identity.Name,identity.User?.Value,process.SessionId,
             new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator));
-        // The current native runner is always service-owned; never infer its
-        // identity from the frontend account. No token duplication or impersonation.
-        return status with {Frontend=frontend,ExecutionContext=status.Status==StatusCode.OK &&
-            status.ExecutionSid=="S-1-5-18"?CommandContext.SYSTEM:CommandContext.UNCONFIRMED};
+        // The service owns queue/identity checks. A user frontend is not proof
+        // that a matching user-side runner is currently available.
+        return status with {Frontend=frontend,ExecutionContext=status.Status!=StatusCode.OK?CommandContext.UNCONFIRMED:
+            identity.IsSystem?CommandContext.SYSTEM:
+            status.UserContextAvailable==true?CommandContext.USER:CommandContext.UNCONFIRMED};
     }
 
     [McpServerTool(Name="powershell_job",UseStructuredContent=true),
-        Description("Durably submit one script OR 1-8 sequential steps (each command, timeout_seconds, pause_after, reboot_after, verify_after_reboot). A reboot_after step must finish successfully before an external restart; the next step must explicitly declare verify_after_reboot and fail if the postcondition is absent. A verified new full boot releases only the next step; the tool never restarts Windows itself. Inspect status by job_id or operation_key, list jobs with state_filter, page_size (1-100, default 20) and before_seq (use next_before_seq from previous page), read a step's bounded logs (step_index is 1-based, 1..total_steps), cancel, or resume a paused checkpoint with expected_completed_steps. Reconcile records an immutable decision (EFFECT_CONFIRMED, NO_EFFECT_CONFIRMED, UNKNOWN) and evidence for a NEEDS_RECONCILIATION job; never runs it again. Prune compacts up to eight terminal histories per call, retaining audit metadata and operation keys; retain_days defaults to 30 (0..30 explicitly). Unresolved jobs are never pruned. Submit requires stable operation_key; retry only same key and payload. Resume never replays an interrupted step. A manual pause does not verify an OS reboot.")]
+        Description("Durably submit one script OR 1-8 sequential steps (each command, timeout_seconds, pause_after, reboot_after, verify_after_reboot). A reboot_after step must finish successfully before an external restart; the next step must explicitly declare verify_after_reboot and fail if the postcondition is absent. A verified new full boot releases only the next step; the tool never restarts Windows itself. Inspect status by job_id or operation_key, list jobs with state_filter, page_size (1-100, default 20) and before_seq (use next_before_seq from previous page), read a step's bounded logs (step_index is 1-based, 1..total_steps), cancel, or resume a paused checkpoint with expected_completed_steps. Reconcile records an immutable decision (EFFECT_CONFIRMED, NO_EFFECT_CONFIRMED, UNKNOWN) and evidence for a NEEDS_RECONCILIATION job; never runs it again. Prune compacts up to eight terminal histories per call, retaining audit metadata and operation keys; retain_days defaults to 30 (0..30 explicitly). Unresolved jobs are never pruned. USER jobs stay bound to the originating logon, use the current user's profile, and cannot declare reboot boundaries; explicitly request SYSTEM for service operations. No fallback to SYSTEM when user context is unavailable. Submit requires stable operation_key; retry only same key and payload. Resume never replays an interrupted step. A manual pause does not verify an OS reboot.")]
     public static async Task<JobReply> Job(JobAction action,string? operation_key=null,string? job_id=null,
         string? command=null,int timeout_seconds=30,string? working_directory=null,JobStep[]? steps=null,
         [Description("One-based step number, 1..total_steps; logs only.")] int? step_index=null,int? expected_completed_steps=null,
         JobState? state_filter=null,int? page_size=null,long? before_seq=null,
-        ReconciliationDecision? decision=null,string? evidence=null,int? retain_days=null,CancellationToken cancellationToken=default)
+        ReconciliationDecision? decision=null,string? evidence=null,int? retain_days=null,
+        [Description("Submit only: USER (default for non-SYSTEM clients) runs in the same authenticated interactive logon; SYSTEM explicitly requests service context.")] CommandContext? execution_context=null,CancellationToken cancellationToken=default)
     {
-        var reply=await Call(new(AdminOperation.Job,action,operation_key,job_id,command,timeout_seconds,working_directory,steps,step_index,expected_completed_steps,state_filter,page_size,before_seq,decision,evidence,retain_days),cancellationToken);
+        var reply=await Call(new(AdminOperation.Job,action,operation_key,job_id,command,timeout_seconds,working_directory,steps,step_index,expected_completed_steps,state_filter,page_size,before_seq,decision,evidence,retain_days,
+            execution_context??(action==JobAction.submit?DefaultContext():null)),cancellationToken);
         return reply.Job??new(reply.Code,reply.Correlation,OperationKey:operation_key);
     }
 
@@ -88,9 +97,9 @@ public sealed class AdminTools
     internal static TimeSpan ExecWaitBudget(int executionSeconds) => TimeSpan.FromSeconds(Math.Min(executionSeconds + 5, 90));
 
     [McpServerTool(Name="powershell_exec",UseStructuredContent=true),
-        Description("Execute a short script using the same durable queue (timeout_seconds 1..120 is the execution deadline, not the client wait). The synchronous wait is at most 90 seconds from tool entry, leaving a 30-second transport reserve. PENDING includes the admitted job_id; inspect it without replay. audit_persisted means a step result has been durably saved, not merely admitted. Disconnect does not cancel an admitted job.")]
+        Description("Execute a short script using the same durable queue. USER is the default for non-SYSTEM clients; specify SYSTEM for service operations. No automatic context fallback. (timeout_seconds 1..120 is the execution deadline, not the client wait). The synchronous wait is at most 90 seconds from tool entry, leaving a 30-second transport reserve. PENDING includes the admitted job_id; inspect it without replay. audit_persisted means a step result has been durably saved, not merely admitted. Disconnect does not cancel an admitted job.")]
     public static async Task<ExecutionResult> Exec(string command,int timeout_seconds=30,
-        string? working_directory=null,string? operation_key=null,CancellationToken cancellationToken=default)
+        string? working_directory=null,string? operation_key=null,CommandContext? execution_context=null,CancellationToken cancellationToken=default)
     {
         var clock=Stopwatch.StartNew();
         string hash=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(command))).ToLowerInvariant();
@@ -98,7 +107,7 @@ public sealed class AdminTools
         if(timeout_seconds is <1 or >120)
             return new(ExecutionState.INVALID_ARGUMENT,hash,clock.ElapsedMilliseconds,OperationKey:operation_key);
         var admitted=await Job(JobAction.submit,operation_key,command:command,timeout_seconds:timeout_seconds,
-            working_directory:working_directory,cancellationToken:cancellationToken);
+            working_directory:working_directory,execution_context:execution_context,cancellationToken:cancellationToken);
         if(admitted.Status!=StatusCode.OK || admitted.Job is null)
         {
             var error=Enum.TryParse<ExecutionState>(admitted.Status.ToString(),out var parsed)?parsed:ExecutionState.IPC_PROTOCOL_ERROR;

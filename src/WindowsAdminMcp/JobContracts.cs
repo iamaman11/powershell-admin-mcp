@@ -36,7 +36,11 @@ public sealed record JobInfo(
     [property:JsonPropertyName("reboot_evidence"), JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] BootEvidenceCode? RebootEvidence = null,
     [property:JsonPropertyName("reconciliation")] ReconciliationRecord? Reconciliation = null,
     [property:JsonPropertyName("history_pruned_utc")] string? HistoryPrunedUtc = null,
-    [property:JsonPropertyName("interrupted_source_available")] bool? InterruptedSourceAvailable = null);
+    [property:JsonPropertyName("interrupted_source_available")] bool? InterruptedSourceAvailable = null,
+    [property:JsonPropertyName("execution_context")] CommandContext ExecutionContext = CommandContext.SYSTEM,
+    [property:JsonPropertyName("execution_sid")] string? ExecutionSid = null,
+    [property:JsonPropertyName("execution_session_id")] int? ExecutionSessionId = null,
+    [property:JsonPropertyName("waiting_for_user")] bool? WaitingForUser = null);
 
 public sealed record JobReply(
     [property:JsonPropertyName("status")] StatusCode Status,
@@ -56,4 +60,5 @@ public sealed record StoreSummary(long Total,long Queued,long Running,long Cance
     public bool CapacityWarning => Detailed>=TotalLimit*8/10;
 }
 internal sealed record AdminResponse(StatusCode Code, string Correlation, AdminStatus? Info = null, JobReply? Job = null,
-    [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] StoreSummary? Store = null);
+    [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] StoreSummary? Store = null,
+    [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] WorkerReply? Worker = null);

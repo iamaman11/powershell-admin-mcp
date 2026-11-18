@@ -318,3 +318,35 @@ try
     }
 }
 finally{Directory.Delete(retentionRoot,true);}
+
+
+// A genuine SQLite/DPAPI fixture exercises session routing without impersonating users.
+string routingRoot=Path.Combine(Path.GetTempPath(),"WindowsAdminMCP-routing-"+Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(routingRoot);
+try
+{
+    using var routing=new JobCoordinator(Microsoft.Extensions.Logging.Abstractions.NullLogger<JobCoordinator>.Instance);
+    routing.Initialize(Path.Combine(routingRoot,"jobs.db"));
+    var owner=new UserSession("S-1-5-21-1-2-3-1001",1,"S-1-5-5-1-2");
+    var other=new UserSession("S-1-5-21-1-2-3-1002",2,"S-1-5-5-1-3");
+    var laterLogin=owner with {LogonSid="S-1-5-5-1-4"};
+    var req=new AdminRequest(AdminOperation.Job,JobAction.submit,Key:"user-job",Command:"Write-Output 1",ExecutionContext:CommandContext.USER);
+    Check(routing.Dispatch(req,"fixture",owner.Sid,owner).Status==StatusCode.USER_CONTEXT_UNAVAILABLE,"user.no_system_fallback");
+    Check(routing.DispatchWorker(new(WorkerAction.poll),owner).Status==StatusCode.OK,"user.worker_presence");
+    var admission=routing.Dispatch(req,"fixture",owner.Sid,owner);
+    Check(admission.Job is {ExecutionContext:CommandContext.USER,ExecutionSessionId:1},"user.bound_admission");
+    Check(routing.DispatchWorker(new(WorkerAction.poll),other).Work is null &&
+        routing.DispatchWorker(new(WorkerAction.poll),laterLogin).Work is null,"user.no_other_session_claim");
+    var lease=routing.DispatchWorker(new(WorkerAction.poll),owner).Work;
+    Check(lease is not null && lease.JobId==admission.Job?.JobId,"user.owner_claim");
+    if(lease is null)throw new InvalidOperationException("Missing fixture lease");
+    Check(routing.DispatchWorker(new(WorkerAction.heartbeat,lease.LeaseId),other).Status==StatusCode.LEASE_LOST,"user.no_other_session_heartbeat");
+    string hash=Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(lease.Command))).ToLowerInvariant();
+    var result=new ExecutionResult(ExecutionState.COMPLETED,hash,100,0,"user fixture");
+    Check(routing.DispatchWorker(new(WorkerAction.complete,lease.LeaseId,result),other).Status==StatusCode.LEASE_LOST,"user.no_other_session_completion");
+    Check(routing.DispatchWorker(new(WorkerAction.complete,lease.LeaseId,result),owner).Status==StatusCode.OK,"user.durable_completion");
+    var readback=routing.Dispatch(new(AdminOperation.Job,JobAction.logs,Key:"user-job"),"fixture",owner.Sid,owner);
+    Check(readback.Job is {State:JobState.COMPLETED,Execution:{ExecutionContext:CommandContext.USER,AuditPersisted:true,ExecutionSessionId:1}},"user.persisted_context");
+    Check(routing.Dispatch(req,"fixture",owner.Sid,laterLogin).Status==StatusCode.CONFLICT,"user.no_replay_new_logon");
+}
+finally{Directory.Delete(routingRoot,true);}

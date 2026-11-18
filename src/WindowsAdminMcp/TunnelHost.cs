@@ -103,6 +103,10 @@ internal static class TunnelHost
             }while(clock.Elapsed<TimeSpan.FromSeconds(30));
             if(!ready)return Report(stage,3);
 
+            using var workerStop=new CancellationTokenSource();
+            var workerTask=UserWorker.RunAsync(workerStop.Token);
+            try
+            {
             // Local dependency only: read OS state, never execute or reconfigure INTERNET.
             // Poll slowly while blocked and log transitions, not every observation.
             while (true)
@@ -187,6 +191,12 @@ internal static class TunnelHost
                 Report(Code.TUN_LOST,0,vendorPid:child.Process.Id);
             }
             await Task.Delay(TimeSpan.FromSeconds(5));
+            }
+            }
+            finally
+            {
+                await workerStop.CancelAsync();
+                await workerTask;
             }
         }
         catch(Exception e) when(e is IOException or UnauthorizedAccessException or Win32Exception or

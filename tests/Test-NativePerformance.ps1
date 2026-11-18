@@ -28,6 +28,7 @@ function New-Client {
     return $p
 }
 function Send($p,$id,$name,$arguments){
+    if($name -eq 'powershell_exec' -or ($name -eq 'powershell_job' -and $arguments.action -eq 'submit')){$arguments.execution_context='SYSTEM'}
     $msg=@{jsonrpc='2.0';id=$id;method='tools/call';params=@{name=$name;arguments=$arguments;_meta=$meta}}
     $p.StandardInput.WriteLine(($msg|ConvertTo-Json -Compress -Depth 12));$p.StandardInput.Flush()
 }
