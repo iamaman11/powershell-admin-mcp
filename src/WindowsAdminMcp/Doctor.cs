@@ -11,7 +11,7 @@ internal enum DoctorState { OK, DEGRADED, NOT_TESTED }
 internal enum DoctorReason
 {
     OBSERVED, MISSING, ACCESS_OR_READBACK_FAILED, NOT_CANONICAL, HASH_MISMATCH,
-    MULTIPLE_PROCESSES, SERVICE_NOT_CONFIRMED, STORE_NOT_CONFIRMED, STORE_AT_CAPACITY,
+    MULTIPLE_PROCESSES, SERVICE_NOT_CONFIRMED, STORE_NOT_CONFIRMED, STORE_AT_CAPACITY, STORE_CAPACITY_WARNING,
     RECONCILIATION_REQUIRED, NETWORK_NOT_READY, BOOT_UNPROVEN, REMOTE_NOT_TESTED,
     STARTUP_NOT_TESTED, DESKTOP_NOT_TESTED, MANIFEST_UNVERIFIED, STARTUP_NOT_READY, STARTUP_READBACK_FAILED
 }
@@ -67,8 +67,8 @@ internal static class Doctor
         var store=service?response.Store:null;
         var storeReason=store is null?DoctorReason.STORE_NOT_CONFIRMED:
             store.NeedsReconciliation>0?DoctorReason.RECONCILIATION_REQUIRED:
-            store.Total>=store.TotalLimit || store.Queued+store.Running+store.CancelRequested+store.WaitingForResume+store.WaitingForReboot>=store.ActiveLimit
-            ?DoctorReason.STORE_AT_CAPACITY:DoctorReason.OBSERVED;
+            store.Detailed>=store.TotalLimit || store.Queued+store.Running+store.CancelRequested+store.WaitingForResume+store.WaitingForReboot>=store.ActiveLimit
+            ?DoctorReason.STORE_AT_CAPACITY:store.CapacityWarning?DoctorReason.STORE_CAPACITY_WARNING:DoctorReason.OBSERVED;
         Add(DoctorComponent.Store,storeReason==DoctorReason.OBSERVED?DoctorState.OK:DoctorState.DEGRADED,storeReason,
             storeReason==DoctorReason.OBSERVED?DoctorAction.NONE:DoctorAction.INSPECT_JOBS);
         var boot=BootEvidence.Observe();

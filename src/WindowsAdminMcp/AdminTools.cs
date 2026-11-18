@@ -59,13 +59,14 @@ public sealed class AdminTools
     }
 
     [McpServerTool(Name="powershell_job",UseStructuredContent=true),
-        Description("Durably submit one script OR 1-8 sequential steps (each command, timeout_seconds, pause_after, reboot_after, verify_after_reboot). A reboot_after step must finish successfully before an external restart; the next step must explicitly declare verify_after_reboot and fail if the postcondition is absent. A verified new full boot releases only the next step; the tool never restarts Windows itself. Inspect status by job_id or operation_key, list jobs with state_filter, page_size (1-100, default 20) and before_seq (use next_before_seq from previous page), read a step's bounded logs (step_index is 1-based, 1..total_steps), cancel, or resume a paused checkpoint with expected_completed_steps. Submit requires stable operation_key; retry only same key and payload. Resume never replays an interrupted step. A manual pause does not verify an OS reboot.")]
+        Description("Durably submit one script OR 1-8 sequential steps (each command, timeout_seconds, pause_after, reboot_after, verify_after_reboot). A reboot_after step must finish successfully before an external restart; the next step must explicitly declare verify_after_reboot and fail if the postcondition is absent. A verified new full boot releases only the next step; the tool never restarts Windows itself. Inspect status by job_id or operation_key, list jobs with state_filter, page_size (1-100, default 20) and before_seq (use next_before_seq from previous page), read a step's bounded logs (step_index is 1-based, 1..total_steps), cancel, or resume a paused checkpoint with expected_completed_steps. Reconcile records an immutable decision (EFFECT_CONFIRMED, NO_EFFECT_CONFIRMED, UNKNOWN) and evidence for a NEEDS_RECONCILIATION job; never runs it again. Prune compacts up to eight terminal histories per call, retaining audit metadata and operation keys; retain_days defaults to 30 (0..30 explicitly). Unresolved jobs are never pruned. Submit requires stable operation_key; retry only same key and payload. Resume never replays an interrupted step. A manual pause does not verify an OS reboot.")]
     public static async Task<JobReply> Job(JobAction action,string? operation_key=null,string? job_id=null,
         string? command=null,int timeout_seconds=30,string? working_directory=null,JobStep[]? steps=null,
         [Description("One-based step number, 1..total_steps; logs only.")] int? step_index=null,int? expected_completed_steps=null,
-        JobState? state_filter=null,int? page_size=null,long? before_seq=null,CancellationToken cancellationToken=default)
+        JobState? state_filter=null,int? page_size=null,long? before_seq=null,
+        ReconciliationDecision? decision=null,string? evidence=null,int? retain_days=null,CancellationToken cancellationToken=default)
     {
-        var reply=await Call(new(AdminOperation.Job,action,operation_key,job_id,command,timeout_seconds,working_directory,steps,step_index,expected_completed_steps,state_filter,page_size,before_seq),cancellationToken);
+        var reply=await Call(new(AdminOperation.Job,action,operation_key,job_id,command,timeout_seconds,working_directory,steps,step_index,expected_completed_steps,state_filter,page_size,before_seq,decision,evidence,retain_days),cancellationToken);
         return reply.Job??new(reply.Code,reply.Correlation,OperationKey:operation_key);
     }
 
@@ -116,12 +117,16 @@ public sealed class AdminTools
             while(true)
             {
                 var read=await Job(JobAction.logs,job_id:job.JobId,cancellationToken:waitDeadline.Token);
+                if(read.Status==StatusCode.HISTORY_PRUNED)
+                    return new(ExecutionState.HISTORY_PRUNED,hash,clock.ElapsedMilliseconds,Stage:"HISTORY_PRUNED",
+                        JobId:job.JobId,OperationKey:operation_key,CorrelationId:read.CorrelationId);
                 if(read.Status==StatusCode.OK && read.Job is {} current)
                 {
                     if(current.Execution is {} result) return result with {JobId=job.JobId,OperationKey=operation_key,
                         CorrelationId=read.CorrelationId};
-                    if(current.State is JobState.CANCELLED or JobState.NEEDS_RECONCILIATION or JobState.FAILED)
-                        return new(current.State==JobState.CANCELLED?ExecutionState.CANCELLED:ExecutionState.NEEDS_RECONCILIATION,
+                    if(current.State is JobState.CANCELLED or JobState.NEEDS_RECONCILIATION or JobState.RECONCILED or JobState.FAILED)
+                        return new(current.State==JobState.CANCELLED?ExecutionState.CANCELLED:
+                            current.State==JobState.RECONCILED?ExecutionState.RECONCILED:ExecutionState.NEEDS_RECONCILIATION,
                             hash,clock.ElapsedMilliseconds,JobId:job.JobId,OperationKey:operation_key,CorrelationId:read.CorrelationId);
                 }
                 else return Pending(read.Status.ToString(),read.CorrelationId);

@@ -200,7 +200,7 @@ try{
         $read=Read-SavedJob
         Check ($read.status -eq 'OK' -and $read.job.job_id -eq $saved.job_id -and $read.job.execution.stdout.Trim() -ceq 'upgrade-preserved') 'r6.job_preserved_after_package_update'
         # Negative metadata fixture: target claims schema 2, current SQLite
-        # is really schema 3. No old executable or DB is actually restored.
+        # is really schema 4. No old executable or DB is actually restored.
         $priorManifest=Join-Path $root '.rollback\manifest.json'
         $original=[IO.File]::ReadAllText($priorManifest)
         try{

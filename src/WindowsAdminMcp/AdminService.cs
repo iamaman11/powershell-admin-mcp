@@ -66,11 +66,13 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                 deadline.CancelAfter(TimeSpan.FromSeconds(3));
                 string input = await PipeWire.ReadFrameAsync(pipe, deadline.Token);
                 bool allowed = false;
+                string? callerSid=null;
                 pipe.RunAsClient(() =>
                 {
                     using var token = WindowsIdentity.GetCurrent(true);
                     allowed = token is not null && (token.IsSystem ||
                         new WindowsPrincipal(token).IsInRole(WindowsBuiltInRole.Administrator));
+                    if(allowed)callerSid=token?.User?.Value;
                 });
                 AdminResponse response;
                 if (!allowed) response = new(StatusCode.ACCESS_DENIED, correlation);
@@ -79,13 +81,23 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                     var request = JsonSerializer.Deserialize<AdminRequest>(input, PipeWire.Json);
                     if (request?.Operation == AdminOperation.Job)
                     {
-                        var result = jobs.Dispatch(request, correlation);
-                        response = new(result.Status, correlation, Job: result);
+                        try
+                        {
+                            var result = jobs.Dispatch(request, correlation,callerSid);
+                            response = new(result.Status, correlation, Job: result);
+                        }
+                        catch(Microsoft.Data.Sqlite.SqliteException e)
+                        {
+                            var code=request.Action==JobAction.submit?StatusCode.ADMISSION_UNCONFIRMED:StatusCode.STORE_UNAVAILABLE;
+                            logger.LogWarning("Store request failed {Correlation} code {Code}",correlation,e.SqliteErrorCode);
+                            response=new(code,correlation,Job:new(code,correlation,OperationKey:request.Key,NativeError:e.SqliteErrorCode));
+                        }
                     }
                     else if (request?.Operation is (AdminOperation.Status or AdminOperation.Diagnostics) && request.Action is null &&
                         request.Command is null && request.Key is null && request.JobId is null &&
                         request.Steps is null && request.StepIndex is null && request.ExpectedCompletedSteps is null &&
-                        request.StateFilter is null && request.PageSize is null && request.BeforeSeq is null)
+                        request.StateFilter is null && request.PageSize is null && request.BeforeSeq is null &&
+                        request.Decision is null && request.Evidence is null && request.RetainDays is null)
                     {
                         using var actual = WindowsIdentity.GetCurrent();
                         var status = new AdminStatus(StatusCode.OK, correlation, Environment.ProcessId, Environment.MachineName,

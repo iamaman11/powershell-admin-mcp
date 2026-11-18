@@ -137,10 +137,20 @@ try{
     Stop-Service $name
     Start-Service $name
     $null=Wait-Status $b 'OK'
+    $unknownSource=Job $c 114 @{action='logs';job_id=$kill.job.job_id;step_index=1}
+    Assert ($unknownSource.job.interrupted_source_available) 'hardening.interrupted_source_retained'
+    $decision=Job $c 115 @{action='reconcile';job_id=$kill.job.job_id;decision='UNKNOWN';evidence='Isolated cancellation fixture: effect deliberately unknown.'}
+    Assert ($decision.status -eq 'OK' -and $decision.job.state -eq 'RECONCILED' -and $decision.job.reconciliation.decision -eq 'UNKNOWN') 'hardening.reconcile_unknown'
+    $repeat=Job $b 116 @{action='reconcile';job_id=$kill.job.job_id;decision='UNKNOWN';evidence='Isolated cancellation fixture: effect deliberately unknown.'}
+    Assert ($repeat.status -eq 'OK' -and $repeat.job.reconciliation.correlation_id -eq $decision.job.reconciliation.correlation_id) 'hardening.reconciliation_idempotent'
+    $change=Job $b 117 @{action='reconcile';job_id=$kill.job.job_id;decision='EFFECT_CONFIRMED';evidence='Different decision'}
+    Assert ($change.status -eq 'CONFLICT') 'hardening.reconciliation_immutable'
+    $noreplay=Job $b 118 @{action='submit';operation_key='cancel';command='Start-Sleep -Seconds 30';timeout_seconds=60}
+    Assert ($noreplay.job.state -eq 'RECONCILED' -and $noreplay.job.job_id -eq $kill.job.job_id) 'hardening.reconciled_key_no_replay'
     $saved=Job $c 17 @{action='logs';job_id=$first.job.job_id}
     Assert ($saved.job.state -eq 'COMPLETED' -and $saved.job.execution.stdout.Trim() -eq 'first') 'r3.persisted_real_output'
     $list=Job $c 18 @{action='list'}
-    Assert (@($list.jobs|Where-Object {$_.job_id -eq $kill.job.job_id -and $_.state -eq 'NEEDS_RECONCILIATION'}).Count -eq 1) 'r3.list_recovery'
+    Assert (@($list.jobs|Where-Object {$_.job_id -eq $kill.job.job_id -and $_.state -eq 'RECONCILED'}).Count -eq 1) 'r3.list_recovery'
     Write-Host 'R3_NATIVE_JOBS=PASS (actual service and PowerShell, three SDK stdio clients; no live tunnel/reboot)'
     # Real non-idempotent local side effect, followed by a deliberate interruption.
     $marker=Join-Path $data 'recovery-marker.txt'
@@ -274,7 +284,7 @@ try{
     }finally{if(-not $doctorProc.HasExited){$doctorProc.Kill($true);$doctorProc.WaitForExit()};$doctorProc.Dispose()}
     $doctor=$rawDoctor|ConvertFrom-Json -AsHashtable
     Assert ($doctor.schemaVersion -eq 1 -and $doctor.status -eq 'DEGRADED' -and $doctorExit -eq 1) 'r6.doctor_reports_isolated_install_degraded'
-    Assert ($doctor.service.service_pid -eq (Get-CimInstance Win32_Service -Filter "Name='$name'").ProcessId -and $doctor.store.schemaVersion -eq 3) 'r6.doctor_authoritative_service_store'
+    Assert ($doctor.service.service_pid -eq (Get-CimInstance Win32_Service -Filter "Name='$name'").ProcessId -and $doctor.store.schemaVersion -eq 4) 'r6.doctor_authoritative_service_store'
     Assert ($doctor.store.total -gt 0 -and $doctor.store.waitingForReboot -eq 0 -and $doctor.store.needsReconciliation -ge 1) 'r6.doctor_total_state_counts'
     Assert (@($doctor.checks|Where-Object {$_.component -eq 'Remote' -and $_.status -eq 'NOT_TESTED'}).Count -eq 1) 'r6.doctor_no_false_remote_acceptance'
     $performance=& (Join-Path $PSScriptRoot 'Test-NativePerformance.ps1') -Exe $Exe -DurationSeconds 12 -ExerciseJobs|ConvertFrom-Json

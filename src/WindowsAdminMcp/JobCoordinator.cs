@@ -12,7 +12,8 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
     private CancellationTokenSource? active;
     private string? activeId;
     private SqliteConnection Db => connection ?? throw new InvalidOperationException("Store unavailable");
-    private const string Columns = "job_id,op_key,state,command_hash,created_utc,updated_utc,completed_steps,step_count,reboot_evidence";
+    private const string Columns = "job_id,op_key,state,command_hash,created_utc,updated_utc,completed_steps,step_count,reboot_evidence,reconciliation,history_pruned_utc";
+    internal const int DetailedLimit=10000, RetentionDays=30, PruneBatch=8;
     private static string Now() => DateTimeOffset.UtcNow.ToString("O");
     private static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 
@@ -37,52 +38,29 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                     using var existing = Command("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='jobs'", null);
                     if ((long)existing.ExecuteScalar()! != 0) throw new InvalidOperationException("Unversioned database.");
                 }
-                else if (v is not (2 or 3)) throw new InvalidOperationException("Unsupported job store version; offline migration required.");
+                else if (v is not (2 or 3 or StoreSchema.Current)) throw new InvalidOperationException("Unsupported job store version; offline migration required.");
             }
             using (var pragmas = Command("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;", null))
                 pragmas.ExecuteNonQuery();
-            if(versionValue == 2) BackupV2();
+            bool migrating=versionValue is 2 or 3;
+            if(migrating) BackupLegacy(versionValue);
             using var tx = Db.BeginTransaction();
-            if (versionValue == 2)
+            if(migrating)
             {
-                using var migration = Command("""
-                CREATE TABLE jobs_v3(
-                  seq INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL UNIQUE, op_key TEXT NOT NULL UNIQUE,
-                  payload_hash TEXT NOT NULL, command_hash TEXT NOT NULL, cwd BLOB NOT NULL,
-                  state TEXT NOT NULL CHECK(state IN ('QUEUED','RUNNING','CANCEL_REQUESTED','WAITING_FOR_RESUME','WAITING_FOR_REBOOT','COMPLETED','FAILED','CANCELLED','NEEDS_RECONCILIATION')),
-                  created_utc TEXT NOT NULL, updated_utc TEXT NOT NULL,
-                  completed_steps INTEGER NOT NULL DEFAULT 0, step_count INTEGER NOT NULL CHECK(step_count BETWEEN 1 AND 8),
-                  reboot_stamp TEXT, reboot_evidence TEXT,
-                  CHECK(completed_steps BETWEEN 0 AND step_count));
-                CREATE TABLE job_steps_v3(
-                  job_id TEXT NOT NULL REFERENCES jobs_v3(job_id) ON DELETE CASCADE,
-                  step_index INTEGER NOT NULL CHECK(step_index BETWEEN 1 AND 8),
-                  command BLOB, timeout_seconds INTEGER NOT NULL CHECK(timeout_seconds BETWEEN 1 AND 3600),
-                  pause_after INTEGER NOT NULL CHECK(pause_after IN (0,1)), result BLOB,
-                  reboot_after INTEGER NOT NULL DEFAULT 0 CHECK(reboot_after IN (0,1)),
-                  PRIMARY KEY(job_id,step_index));
-                INSERT INTO jobs_v3(seq,job_id,op_key,payload_hash,command_hash,cwd,state,created_utc,updated_utc,completed_steps,step_count)
-                SELECT seq,job_id,op_key,payload_hash,command_hash,cwd,state,created_utc,updated_utc,completed_steps,step_count FROM jobs;
-                INSERT INTO job_steps_v3(job_id,step_index,command,timeout_seconds,pause_after,result)
-                SELECT job_id,step_index,command,timeout_seconds,pause_after,result FROM job_steps;
-                DROP TABLE job_steps;
-                DROP TABLE jobs;
-                ALTER TABLE jobs_v3 RENAME TO jobs;
-                ALTER TABLE job_steps_v3 RENAME TO job_steps;
-                """,tx);
-                migration.ExecuteNonQuery();
+                using var rename=Command("ALTER TABLE job_steps RENAME TO job_steps_legacy; ALTER TABLE jobs RENAME TO jobs_legacy;",tx);
+                rename.ExecuteNonQuery();
             }
-            else
-            {
-                using var schema = Command("""
+            using(var schema=Command("""
                 CREATE TABLE IF NOT EXISTS jobs(
                   seq INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL UNIQUE, op_key TEXT NOT NULL UNIQUE,
                   payload_hash TEXT NOT NULL, command_hash TEXT NOT NULL, cwd BLOB NOT NULL,
-                  state TEXT NOT NULL CHECK(state IN ('QUEUED','RUNNING','CANCEL_REQUESTED','WAITING_FOR_RESUME','WAITING_FOR_REBOOT','COMPLETED','FAILED','CANCELLED','NEEDS_RECONCILIATION')),
+                  state TEXT NOT NULL CHECK(state IN ('QUEUED','RUNNING','CANCEL_REQUESTED','WAITING_FOR_RESUME','WAITING_FOR_REBOOT','COMPLETED','FAILED','CANCELLED','NEEDS_RECONCILIATION','RECONCILED')),
                   created_utc TEXT NOT NULL, updated_utc TEXT NOT NULL,
                   completed_steps INTEGER NOT NULL DEFAULT 0, step_count INTEGER NOT NULL CHECK(step_count BETWEEN 1 AND 8),
-                  reboot_stamp TEXT, reboot_evidence TEXT,
-                  CHECK(completed_steps BETWEEN 0 AND step_count));
+                  reboot_stamp TEXT, reboot_evidence TEXT, reconciliation BLOB, history_pruned_utc TEXT,
+                  CHECK(completed_steps BETWEEN 0 AND step_count),
+                  CHECK((state='RECONCILED')=(reconciliation IS NOT NULL)),
+                  CHECK(history_pruned_utc IS NULL OR state IN ('COMPLETED','FAILED','CANCELLED','RECONCILED')));
                 CREATE TABLE IF NOT EXISTS job_steps(
                   job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
                   step_index INTEGER NOT NULL CHECK(step_index BETWEEN 1 AND 8),
@@ -90,15 +68,30 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                   pause_after INTEGER NOT NULL CHECK(pause_after IN (0,1)), result BLOB,
                   reboot_after INTEGER NOT NULL DEFAULT 0 CHECK(reboot_after IN (0,1)),
                   PRIMARY KEY(job_id,step_index));
-                """,tx);
-                schema.ExecuteNonQuery();
+                CREATE INDEX IF NOT EXISTS ix_jobs_state_seq ON jobs(state,seq);
+                CREATE INDEX IF NOT EXISTS ix_jobs_detail_retention ON jobs(updated_utc,seq) WHERE history_pruned_utc IS NULL;
+                """,tx))schema.ExecuteNonQuery();
+            if(migrating)
+            {
+                string boot=versionValue==3?",reboot_stamp,reboot_evidence":"";
+                string stepBoot=versionValue==3?",reboot_after":"";
+                using var migration=Command($"""
+                    INSERT INTO jobs(seq,job_id,op_key,payload_hash,command_hash,cwd,state,created_utc,updated_utc,completed_steps,step_count{boot})
+                    SELECT seq,job_id,op_key,payload_hash,command_hash,cwd,state,created_utc,updated_utc,completed_steps,step_count{boot} FROM jobs_legacy;
+                    INSERT INTO job_steps(job_id,step_index,command,timeout_seconds,pause_after,result{stepBoot})
+                    SELECT job_id,step_index,command,timeout_seconds,pause_after,result{stepBoot} FROM job_steps_legacy;
+                    DROP TABLE job_steps_legacy;
+                    DROP TABLE jobs_legacy;
+                    """,tx);
+                migration.ExecuteNonQuery();
             }
             using(var check=Command("PRAGMA foreign_key_check",tx))
             using(var rows=check.ExecuteReader())
                 if(rows.Read())throw new InvalidOperationException("Job store foreign key check failed.");
-            using(var setVersion=Command("PRAGMA user_version=3",tx))setVersion.ExecuteNonQuery();
+            using(var setVersion=Command($"PRAGMA user_version={StoreSchema.Current}",tx))setVersion.ExecuteNonQuery();
             using var recovery = Command("""
-                UPDATE job_steps SET command=NULL WHERE job_id IN (SELECT job_id FROM jobs WHERE state IN ('RUNNING','CANCEL_REQUESTED'));
+                UPDATE job_steps SET command=NULL WHERE job_id IN (SELECT job_id FROM jobs WHERE state IN ('RUNNING','CANCEL_REQUESTED'))
+                  AND step_index<>(SELECT completed_steps+1 FROM jobs WHERE jobs.job_id=job_steps.job_id);
                 UPDATE jobs SET state='NEEDS_RECONCILIATION', updated_utc=$now WHERE state IN ('RUNNING','CANCEL_REQUESTED');
                 """, tx, ("$now", Now()));
             int recovered = recovery.ExecuteNonQuery();
@@ -109,10 +102,10 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
 
     // SQLite's own backup API includes the committed WAL contents; the destination
     // is a new unique file in the already validated SYSTEM/Admin state directory.
-    // Older binaries must not open this v3 database. Backup is not an automatic downgrade.
-    private void BackupV2()
+    // Older binaries must not open the migrated database. Backup is not an automatic downgrade.
+    private void BackupLegacy(long version)
     {
-        string path=Db.DataSource+".schema2-"+Guid.NewGuid().ToString("N")+".backup";
+        string path=Db.DataSource+$".schema{version}-"+Guid.NewGuid().ToString("N")+".backup";
         using(var reserve=new FileStream(path,FileMode.CreateNew,FileAccess.Write,FileShare.None)){}
         using var backup=new SqliteConnection(new SqliteConnectionStringBuilder
         {DataSource=path,Mode=SqliteOpenMode.ReadWrite,Pooling=false}.ToString());
@@ -122,11 +115,11 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
         check.CommandText="PRAGMA quick_check";
         if((string?)check.ExecuteScalar()!="ok")throw new InvalidOperationException("Schema backup integrity check failed.");
         check.CommandText="PRAGMA user_version";
-        if((long)check.ExecuteScalar()! != 2)throw new InvalidOperationException("Schema backup version mismatch.");
-        logger.LogInformation("Protected schema v2 backup created before migration.");
+        if((long)check.ExecuteScalar()! != version)throw new InvalidOperationException("Schema backup version mismatch.");
+        logger.LogInformation("Protected schema {Version} backup created before migration.",version);
     }
 
-    internal StoreSummary Summary()
+    internal StoreSummary Summary(SqliteTransaction? tx=null)
     {
         lock(gate)
         {
@@ -135,28 +128,31 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                   coalesce(sum(state='QUEUED'),0),coalesce(sum(state='RUNNING'),0),
                   coalesce(sum(state='CANCEL_REQUESTED'),0),coalesce(sum(state='WAITING_FOR_RESUME'),0),
                   coalesce(sum(state='WAITING_FOR_REBOOT'),0),coalesce(sum(state='NEEDS_RECONCILIATION'),0),
-                  coalesce(sum(state='COMPLETED'),0),coalesce(sum(state='FAILED'),0),coalesce(sum(state='CANCELLED'),0)
+                  coalesce(sum(state='COMPLETED'),0),coalesce(sum(state='FAILED'),0),coalesce(sum(state='CANCELLED'),0),
+                  coalesce(sum(history_pruned_utc IS NULL),0),coalesce(sum(history_pruned_utc IS NOT NULL),0),coalesce(sum(state='RECONCILED'),0)
                 FROM jobs
-                """,null);
+                """,tx);
             using var row=cmd.ExecuteReader();
             if(!row.Read())throw new InvalidOperationException("Store count unavailable.");
             return new(row.GetInt64(0),row.GetInt64(1),row.GetInt64(2),row.GetInt64(3),row.GetInt64(4),
-                row.GetInt64(5),row.GetInt64(6),row.GetInt64(7),row.GetInt64(8),row.GetInt64(9),StoreSchema.Current,16,10000);
+                row.GetInt64(5),row.GetInt64(6),row.GetInt64(7),row.GetInt64(8),row.GetInt64(9),StoreSchema.Current,16,DetailedLimit,row.GetInt64(10),row.GetInt64(11),row.GetInt64(12),RetentionDays);
         }
     }
 
     private void Signal() { if (wake.CurrentCount == 0) wake.Release(); }
 
-    internal JobReply Dispatch(AdminRequest request, string correlation)
+    internal JobReply Dispatch(AdminRequest request, string correlation,string? callerSid=null)
     {
-        JobReply Reply(StatusCode code, JobInfo? job = null, JobInfo[]? jobs = null, long? nextBeforeSeq = null)
-            => new(code, correlation, job, jobs, request.Key, NextBeforeSeq:nextBeforeSeq);
+        JobReply Reply(StatusCode code, JobInfo? job = null, JobInfo[]? jobs = null, long? nextBeforeSeq = null,StoreSummary? store=null,int? prunedCount=null)
+            => new(code, correlation, job, jobs, request.Key, NextBeforeSeq:nextBeforeSeq,Store:store,PrunedCount:prunedCount);
         if (request.Action is not {} action || !Enum.IsDefined(action) ||
             request.Key is {Length:0 or >100} || request.JobId is {Length:0 or >64} ||
             (request.StepIndex is not null && action != JobAction.logs) ||
             (request.ExpectedCompletedSteps is not null && action != JobAction.resume) ||
             ((request.StateFilter is not null || request.PageSize is not null || request.BeforeSeq is not null) && action != JobAction.list) ||
-            (request.StateFilter is {} filter && !Enum.IsDefined(filter)) || request.PageSize is <1 or >100 || request.BeforeSeq is <1)
+            (request.StateFilter is {} filter && !Enum.IsDefined(filter)) || request.PageSize is <1 or >100 || request.BeforeSeq is <1 ||
+            ((request.Decision is not null || request.Evidence is not null) && action!=JobAction.reconcile) ||
+            (request.RetainDays is not null && action!=JobAction.prune) || request.RetainDays is <0 or >RetentionDays)
             return Reply(StatusCode.INVALID_ARGUMENT);
 
         lock (gate)
@@ -184,8 +180,16 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 if (!Directory.Exists(cwd)) return Reply(StatusCode.INVALID_ARGUMENT);
                 using var count = Command("SELECT count(*) FROM jobs WHERE state IN ('QUEUED','RUNNING','CANCEL_REQUESTED','WAITING_FOR_RESUME','WAITING_FOR_REBOOT')", tx);
                 if ((long)count.ExecuteScalar()! >= 16) return Reply(StatusCode.BUSY);
-                using var total = Command("SELECT count(*) FROM jobs", tx);
-                if ((long)total.ExecuteScalar()! >= 10000) return Reply(StatusCode.STORE_FULL);
+                if(CountDetails(tx)>=DetailedLimit)
+                {
+                    PruneExpired(tx,RetentionDays);
+                    if(CountDetails(tx)>=DetailedLimit)
+                    {
+                        var full=Summary(tx);
+                        tx.Commit();
+                        return Reply(StatusCode.STORE_FULL,store:full);
+                    }
+                }
                 string id = Guid.NewGuid().ToString("N"), now = Now(),
                     hash = steps.Length == 1 ? Hash(steps[0].Command) : Hash(JsonSerializer.Serialize(steps));
                 using var insert = Command("""
@@ -205,10 +209,11 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                         ("$timeout",step.TimeoutSeconds), ("$pause",step.PauseAfter?1:0), ("$reboot",step.RebootAfter?1:0));
                     add.ExecuteNonQuery();
                 }
+                var usage=CountDetails(tx)>=DetailedLimit*8/10?Summary(tx):null;
                 tx.Commit();
                 Signal();
                 logger.LogInformation("Job admitted {JobId} correlation {Correlation}, step count {Count}",id,correlation,steps.Length);
-                return Reply(StatusCode.OK,new(id,key,JobState.QUEUED,hash,now,now,TotalSteps:steps.Length));
+                return Reply(StatusCode.OK,new(id,key,JobState.QUEUED,hash,now,now,TotalSteps:steps.Length),store:usage);
             }
 
             if (request.Command is not null || request.WorkingDirectory is not null || request.Steps is not null)
@@ -225,9 +230,19 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 while(reader.Read())
                 {
                     if(jobs.Count==size){next=last;break;}
-                    jobs.Add(Read(reader));last=reader.GetInt64(9);
+                    jobs.Add(Read(reader,includeReconciliation:false));last=reader.GetInt64(11);
                 }
-                return Reply(StatusCode.OK,jobs:jobs.ToArray(),nextBeforeSeq:next);
+                reader.Close();
+                return Reply(StatusCode.OK,jobs:jobs.ToArray(),nextBeforeSeq:next,store:Summary());
+            }
+            if(action==JobAction.prune)
+            {
+                if(request.Key is not null || request.JobId is not null)return Reply(StatusCode.INVALID_ARGUMENT);
+                using var compact=Db.BeginTransaction();
+                int pruned=PruneExpired(compact,request.RetainDays??RetentionDays);
+                var usage=Summary(compact);
+                compact.Commit();
+                return Reply(StatusCode.OK,store:usage,prunedCount:pruned);
             }
             if ((request.Key is null) == (request.JobId is null)) return Reply(StatusCode.INVALID_ARGUMENT);
             using var change = Db.BeginTransaction();
@@ -239,13 +254,42 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 int index = request.StepIndex ?? Math.Min(job.TotalSteps, job.State is JobState.COMPLETED or JobState.WAITING_FOR_RESUME or JobState.WAITING_FOR_REBOOT
                     ? job.CompletedSteps : job.CompletedSteps + 1);
                 if (index < 1 || index > job.TotalSteps) return Reply(StatusCode.INVALID_ARGUMENT);
-                using var cmd = Command("SELECT result FROM job_steps WHERE job_id=$id AND step_index=$step",change,("$id",job.JobId),("$step",index));
-                var blob = cmd.ExecuteScalar();
-                var execution = blob is byte[] bytes ? JsonSerializer.Deserialize<ExecutionResult>(
-                    JobDataProtection.Open(bytes,job.JobId,Field(index,"result")),PipeWire.Json) : null;
-                // Schema-2/3 results stored the runner default false. Successful authenticated readback
-                // proves that the result is committed, without rewriting historic records.
-                return Reply(StatusCode.OK,job with {Execution=execution is null?null:execution with {AuditPersisted=true},ResultStep=index});
+                bool unresolved=job.State==JobState.NEEDS_RECONCILIATION && index==job.CompletedSteps+1;
+                using var cmd = Command("SELECT result,command IS NOT NULL FROM job_steps WHERE job_id=$id AND step_index=$step",change,("$id",job.JobId),("$step",index));
+                using var row=cmd.ExecuteReader();
+                if(!row.Read())throw new InvalidOperationException("Missing job step.");
+                var execution = row.IsDBNull(0)?null:(JsonSerializer.Deserialize<ExecutionResult>(
+                    JobDataProtection.Open((byte[])row.GetValue(0),job.JobId,Field(index,"result")),PipeWire.Json)
+                    ??throw new InvalidOperationException("Missing execution result."));
+                bool? sourceAvailable=unresolved?row.GetInt32(1)!=0:null;
+                return Reply(job.HistoryPrunedUtc is null?StatusCode.OK:StatusCode.HISTORY_PRUNED,job with
+                {
+                    Execution=execution is null?null:execution with {AuditPersisted=true},ResultStep=index,
+                    InterruptedSourceAvailable=sourceAvailable
+                });
+            }
+            if(action==JobAction.reconcile)
+            {
+                if(request.Decision is not {} decision || !Enum.IsDefined(decision) ||
+                    request.Evidence is not {Length:>0 and <=4000} evidence || string.IsNullOrWhiteSpace(evidence) ||
+                    string.IsNullOrWhiteSpace(callerSid))return Reply(StatusCode.INVALID_ARGUMENT,job);
+                if(job.State==JobState.RECONCILED)
+                    return Reply(job.Reconciliation is {} previous && previous.Decision==decision && previous.Evidence==evidence?
+                        StatusCode.OK:StatusCode.CONFLICT,job);
+                if(job.State!=JobState.NEEDS_RECONCILIATION)return Reply(StatusCode.NOT_RECONCILABLE,job);
+                string now=Now();
+                var record=new ReconciliationRecord(decision,evidence,now,callerSid,correlation);
+                using var save=Command("""
+                    UPDATE jobs SET state='RECONCILED',reconciliation=$record,updated_utc=$now
+                    WHERE job_id=$id AND state='NEEDS_RECONCILIATION'
+                    """,change,("$id",job.JobId),("$now",now),
+                    ("$record",JobDataProtection.Protect(JsonSerializer.Serialize(record,PipeWire.Json),job.JobId,"reconciliation")));
+                if(save.ExecuteNonQuery()!=1)throw new InvalidOperationException("Lost reconciliation transition.");
+                using var clear=Command("UPDATE job_steps SET command=NULL WHERE job_id=$id",change,("$id",job.JobId));
+                clear.ExecuteNonQuery();
+                change.Commit();
+                logger.LogInformation("Job {JobId} reconciliation recorded {Decision} correlation {Correlation}",job.JobId,decision,correlation);
+                return Reply(StatusCode.OK,job with {State=JobState.RECONCILED,UpdatedUtc=now,Reconciliation=record});
             }
             if (action == JobAction.resume)
             {
@@ -302,16 +346,72 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
         using var reader=cmd.ExecuteReader();
         return reader.Read()?Read(reader):null;
     }
-    private static JobInfo Read(SqliteDataReader r)=>new(r.GetString(0),r.GetString(1),
+    private static JobInfo Read(SqliteDataReader r,bool includeReconciliation=true)=>new(r.GetString(0),r.GetString(1),
         Enum.Parse<JobState>(r.GetString(2)),r.GetString(3),r.GetString(4),r.GetString(5),
         CompletedSteps:r.GetInt32(6),TotalSteps:r.GetInt32(7),
-        RebootEvidence:r.IsDBNull(8)?null:Enum.Parse<BootEvidenceCode>(r.GetString(8)));
+        RebootEvidence:r.IsDBNull(8)?null:Enum.Parse<BootEvidenceCode>(r.GetString(8)),
+        Reconciliation:!includeReconciliation||r.IsDBNull(9)?null:(JsonSerializer.Deserialize<ReconciliationRecord>(
+            JobDataProtection.Open((byte[])r.GetValue(9),r.GetString(0),"reconciliation"))??throw new InvalidOperationException("Missing reconciliation.")),
+        HistoryPrunedUtc:r.IsDBNull(10)?null:r.GetString(10));
     private SqliteCommand Command(string sql,SqliteTransaction? tx,params (string Name,object Value)[] parameters)
     {
         var cmd=Db.CreateCommand();cmd.Transaction=tx;cmd.CommandText=sql;
         foreach(var (name,value) in parameters)cmd.Parameters.AddWithValue(name,value);
         return cmd;
     }
+    private long CountDetails(SqliteTransaction? tx)
+    {
+        using var cmd=Command("SELECT count(*) FROM jobs WHERE history_pruned_utc IS NULL",tx);
+        return (long)cmd.ExecuteScalar()!;
+    }
+
+    // Compact terminal output, never delete metadata, operation keys or reconciliation evidence.
+    private int PruneExpired(SqliteTransaction tx,int retainDays)
+    {
+        string cutoff=DateTimeOffset.UtcNow.AddDays(-retainDays).ToString("O");
+        var ids=new List<string>();
+        using(var candidates=Command("""
+            SELECT job_id FROM jobs WHERE history_pruned_utc IS NULL
+            AND state IN ('COMPLETED','FAILED','CANCELLED','RECONCILED') AND updated_utc<$cutoff
+            ORDER BY updated_utc,seq LIMIT $limit
+            """,tx,("$cutoff",cutoff),("$limit",PruneBatch)))
+        using(var reader=candidates.ExecuteReader())
+            while(reader.Read())ids.Add(reader.GetString(0));
+        foreach(string id in ids)
+        {
+            var results=new List<(int Index,byte[] Blob)>();
+            using(var steps=Command("SELECT step_index,result FROM job_steps WHERE job_id=$id AND result IS NOT NULL",tx,("$id",id)))
+            using(var reader=steps.ExecuteReader())
+                while(reader.Read())results.Add((reader.GetInt32(0),(byte[])reader.GetValue(1)));
+            foreach(var item in results)
+            {
+                string field=Field(item.Index,"result");
+                var saved=JsonSerializer.Deserialize<ExecutionResult>(JobDataProtection.Open(item.Blob,id,field),PipeWire.Json)
+                    ??throw new InvalidOperationException("Missing result for compaction.");
+                var compact=saved with {Stdout="",Stderr="",Warnings=[],AuditPersisted=true};
+                using var write=Command("UPDATE job_steps SET result=$result,command=NULL WHERE job_id=$id AND step_index=$step",
+                    tx,("$id",id),("$step",item.Index),
+                    ("$result",JobDataProtection.Protect(JsonSerializer.Serialize(compact,PipeWire.Json),id,field)));
+                if(write.ExecuteNonQuery()!=1)throw new InvalidOperationException("Lost history step.");
+            }
+            using var update=Command("UPDATE jobs SET history_pruned_utc=$now WHERE job_id=$id AND history_pruned_utc IS NULL",
+                tx,("$id",id),("$now",Now()));
+            if(update.ExecuteNonQuery()!=1)throw new InvalidOperationException("Lost history compaction.");
+        }
+        return ids.Count;
+    }
+
+    private void MaintainHistory()
+    {
+        lock(gate)
+        {
+            using var tx=Db.BeginTransaction();
+            int count=PruneExpired(tx,RetentionDays);
+            tx.Commit();
+            if(count>0)logger.LogInformation("Compacted {Count} eligible job histories.",count);
+        }
+    }
+
     private sealed record Work(string Id,int Index,int Count,string Script,int Timeout,string Cwd,bool PauseAfter,bool RebootAfter,CancellationTokenSource Cancel);
     private Work? Take(CancellationToken stop)
     {
@@ -387,7 +487,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
 
     internal async Task RunAsync(CancellationToken stop)
     {
-        long nextBootProbe=0;
+        long nextBootProbe=0,nextHistoryMaintenance=0;
         while(!stop.IsCancellationRequested)
         {
             long now=Environment.TickCount64;
@@ -397,7 +497,11 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 nextBootProbe=Environment.TickCount64+5000;
             }
             var work=Take(stop);
-            if(work is null){await wake.WaitAsync(TimeSpan.FromSeconds(5),stop);continue;}
+            if(work is null)
+            {
+                if(now>=nextHistoryMaintenance){MaintainHistory();nextHistoryMaintenance=Environment.TickCount64+60000;}
+                await wake.WaitAsync(TimeSpan.FromSeconds(5),stop);continue;
+            }
             // Capture prior boot before this step executes. Even if this step
             // changes configuration or requests a shutdown, only a committed
             // success may become a reboot boundary. An interrupted step never will.
@@ -428,9 +532,9 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                     _=>JobState.FAILED
                 };
                 using var step=Command("""
-                    UPDATE job_steps SET result=$result,command=NULL
+                    UPDATE job_steps SET result=$result,command=CASE WHEN $keep=1 THEN command ELSE NULL END
                     WHERE job_id=$id AND step_index=$step AND result IS NULL
-                    """,tx,("$id",work.Id),("$step",work.Index),
+                    """,tx,("$id",work.Id),("$step",work.Index),("$keep",end==JobState.NEEDS_RECONCILIATION?1:0),
                     ("$result",JobDataProtection.Protect(JsonSerializer.Serialize(result with {AuditPersisted=true},PipeWire.Json),work.Id,Field(work.Index,"result"))));
                 if(step.ExecuteNonQuery()!=1)throw new InvalidOperationException("Lost step transition");
                 using var update=Command("""
@@ -442,7 +546,8 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 if(update.ExecuteNonQuery()!=1)throw new InvalidOperationException("Lost job transition");
                 if(end is JobState.CANCELLED or JobState.FAILED or JobState.NEEDS_RECONCILIATION)
                 {
-                    using var clear=Command("UPDATE job_steps SET command=NULL WHERE job_id=$id",tx,("$id",work.Id));
+                    using var clear=Command("UPDATE job_steps SET command=NULL WHERE job_id=$id AND ($keep=0 OR step_index<>$step)",
+                        tx,("$id",work.Id),("$keep",end==JobState.NEEDS_RECONCILIATION?1:0),("$step",work.Index));
                     clear.ExecuteNonQuery();
                 }
                 tx.Commit(); // output and checkpoint become visible together

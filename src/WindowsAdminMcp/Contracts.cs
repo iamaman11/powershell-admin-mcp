@@ -6,14 +6,15 @@ internal enum AdminOperation { Status, Job, Diagnostics }
 [JsonConverter(typeof(JsonStringEnumConverter<StatusCode>))]
 public enum StatusCode
 {
-    OK, SERVICE_UNAVAILABLE, ACCESS_DENIED, IPC_TIMEOUT, IPC_PROTOCOL_ERROR, IPC_FAILED, INVALID_ARGUMENT, NOT_FOUND, CONFLICT, BUSY, STORE_FULL, NOT_CANCELLABLE, NOT_RESUMABLE, ADMISSION_UNCONFIRMED
+    OK, SERVICE_UNAVAILABLE, ACCESS_DENIED, IPC_TIMEOUT, IPC_PROTOCOL_ERROR, IPC_FAILED, INVALID_ARGUMENT, NOT_FOUND, CONFLICT, BUSY, STORE_FULL, NOT_CANCELLABLE, NOT_RESUMABLE, ADMISSION_UNCONFIRMED, NOT_RECONCILABLE, HISTORY_PRUNED, STORE_UNAVAILABLE
 }
 
 internal sealed record AdminRequest([property: JsonRequired] AdminOperation Operation,
     JobAction? Action = null, string? Key = null, string? JobId = null, string? Command = null,
     int TimeoutSeconds = 30, string? WorkingDirectory = null, JobStep[]? Steps = null,
     int? StepIndex = null, int? ExpectedCompletedSteps = null,
-    JobState? StateFilter = null, int? PageSize = null, long? BeforeSeq = null);
+    JobState? StateFilter = null, int? PageSize = null, long? BeforeSeq = null,
+    ReconciliationDecision? Decision = null, string? Evidence = null, int? RetainDays = null);
 
 [JsonConverter(typeof(JsonStringEnumConverter<CommandContext>))]
 public enum CommandContext { SYSTEM, UNCONFIRMED }
