@@ -83,6 +83,35 @@ public sealed class WindowTools
                 WindowInspectCode.STALE_WINDOW, [], Detail: resolved.ToString());
         return await WindowInspector.RunIsolatedAsync(window_id, max_depth, max_elements, cancellationToken);
     }
+
+    [McpServerTool(Name = "windows.invoke_element", UseStructuredContent = true),
+     Description("Act on a fresh element_id (expires after 30 seconds) from windows.inspect_window. Requires confirm=true and authorized USER desktop; only UIA INVOKE, SET_VALUE, SELECT or TOGGLE patterns, no focus/mouse/keyboard. Value is never put in child arguments or action audit. Timeout means UNKNOWN EFFECT: do not retry automatically.")]
+    public static async Task<WindowActionResult> InvokeElement(string window_id, string element_id,
+        WindowActionKind action, string? value = null, bool confirm = false,
+        CancellationToken cancellationToken = default)
+    {
+        var request = new WindowActionRequest(window_id, element_id, action, value);
+        if (!WindowAction.Valid(request)) return new(WindowActionCode.INVALID_ARGUMENT);
+        if (!confirm) return new(WindowActionCode.CONFIRMATION_REQUIRED);
+
+        var status = await AdminTools.Status(cancellationToken);
+        if (status.Status != StatusCode.OK)
+            return new(WindowActionCode.SERVICE_UNAVAILABLE, Detail: status.Status.ToString());
+        using var self = Process.GetCurrentProcess();
+        if (status.ExecutionContext != CommandContext.USER ||
+            status.UserContextAvailable != true || status.Frontend?.Elevated != true ||
+            status.Frontend?.SessionId != self.SessionId)
+            return new(WindowActionCode.USER_CONTEXT_UNAVAILABLE);
+        var desktop = DesktopCapture.ObserveDesktop(self.SessionId);
+        if (desktop.Code != CaptureCode.COMPLETED)
+            return new(WindowActionCode.DESKTOP_UNAVAILABLE, Detail: desktop.Code.ToString());
+        var resolved = WindowCatalog.ResolveId(window_id, self.SessionId, out _);
+        if (resolved != WindowResolveCode.OK)
+            return new(resolved == WindowResolveCode.ACCESS_DENIED ? WindowActionCode.ACCESS_DENIED :
+                resolved == WindowResolveCode.WRONG_SESSION ? WindowActionCode.USER_CONTEXT_UNAVAILABLE :
+                WindowActionCode.STALE_WINDOW, Detail: resolved.ToString());
+        return await WindowAction.RunIsolatedAsync(request, cancellationToken);
+    }
 }
 
 internal readonly record struct WindowIdentity(long Handle, int ProcessId, long StartFileTimeUtc, int SessionId);
