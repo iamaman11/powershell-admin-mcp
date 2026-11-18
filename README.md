@@ -27,13 +27,13 @@ Stop disconnects the interactive tunnel but does not stop the durable system ser
 
 ## Install, update, trial and rollback
 
-For an existing installation, after changes are merged into `main` and its push CI succeeds, the standard interactive elevated PowerShell 7 command from a **clean, current main checkout** is:
+For an existing installation **that contains the updater helpers** (included in native packages from this change onward), the standard command from **any PowerShell directory**, using an interactive elevated PowerShell 7 console, is:
 
 ```powershell
-.\\WindowsAdminMCP.ps1 -Action update
+& "$env:ProgramFiles\WindowsAdminMCP\native\WindowsAdminMCP.ps1" -Action update
 ```
 
-It verifies the exact main commit and matching successful CI, downloads and verifies the official package, drains idle work, replaces files offline, prepares and starts the new trial, and checks local readiness. It intentionally does **not** accept the candidate remotely; exercise all eight MCP tools before explicit acceptance. If jobs are active or local clients hold binaries, the command stops with an explanatory error; resolve those conditions, then rerun. Never use an unrelated application directory as the checkout.
+The installed operator checks its own manifest-verified updater scripts, then verifies the exact main commit and matching successful CI, downloads and verifies the official package, drains idle work, replaces files offline, prepares and starts the new trial, and checks local readiness. No local Git checkout, directory lookup or Git command is needed. It intentionally does **not** accept the candidate remotely; exercise all eight MCP tools before explicit acceptance. If jobs are active or local clients hold binaries, the command stops with an explanatory error; resolve those conditions, then rerun. For older installations without the packaged updater, the previous clean-main-checkout method is retained for a one-time upgrade.
 
 Manual initial-install and recovery entry points remain available. Use the CI package ZIP and its published SHA-256 from the exact accepted commit, not source-script installation. From a trusted checkout:
 

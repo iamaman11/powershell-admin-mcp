@@ -18,6 +18,13 @@ try{
     if(-not(Test-Path -LiteralPath (Join-Path $native 'WindowsAdminMCP.exe') -PathType Leaf)){throw 'PUBLISH_EXE_MISSING'}
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'NativeStartup.ps1') -Destination $native
     Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'WindowsAdminMCP.ps1') -Destination $native
+    # The canonical operator must be self-contained after installation.
+    # Hash these scripts in manifest.json like all other deployed files.
+    $helpers=Join-Path $native 'installer'
+    [void][IO.Directory]::CreateDirectory($helpers)
+    foreach($name in @('Install-Native.ps1','Update-Native.ps1','NativeFileSwap.ps1')){
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $helpers
+    }
     Invoke-WebRequest -Uri 'https://github.com/openai/tunnel-client/releases/download/v0.0.21/tunnel-client-runtime-v0.0.21-windows-amd64.zip' -OutFile $zip
     if((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne 'D991623BD171049E2100B402D72AF7EBC8EDF558051AE8FC924173373D1611A8'){throw 'VENDOR_ZIP_HASH_INVALID'}
     $archive=[IO.Compression.ZipFile]::OpenRead($zip)
