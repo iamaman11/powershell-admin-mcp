@@ -46,6 +46,18 @@ function Assert-InstalledUpdateSource([string]$scriptDirectory,[string]$installR
     }
     return $true
 }
+function Assert-InstalledRollbackTarget([string]$scriptDirectory,[string]$installRoot,$current,$previous){
+    # An in-place updater must remain callable after the native directory has
+    # been replaced. Legacy backups without helpers need a stable checkout.
+    if(-not(Assert-InstalledUpdateSource $scriptDirectory $installRoot $current)){return}
+    foreach($relative in @('native/installer/Install-Native.ps1',
+                           'native/installer/NativeFileSwap.ps1')){
+        if($previous['files'] -isnot [Collections.IDictionary] -or
+           -not $previous['files'].Contains($relative)){
+            throw 'UPDATE_LEGACY_ROLLBACK_REQUIRES_CHECKOUT'
+        }
+    }
+}
 # Dot-sourcing exposes only the pure checks for isolated CI, not a way around
 # the public local-console guard.
 if($MyInvocation.InvocationName -eq '.'){return}
@@ -138,6 +150,7 @@ try{
         if($prior['store_schema'] -ne 4 -or $prior['commit'] -cnotmatch '^[a-f0-9]{40}$'){
             throw 'UPDATE_ROLLBACK_TARGET_UNPROVEN'
         }
+        Assert-InstalledRollbackTarget $PSScriptRoot $root $installed $prior
     }
     $stage='drain'
     $d=Read-InstalledDoctor

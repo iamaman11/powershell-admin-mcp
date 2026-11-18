@@ -33,7 +33,15 @@ For an existing installation **that contains the updater helpers** (included in 
 & "$env:ProgramFiles\WindowsAdminMCP\native\WindowsAdminMCP.ps1" -Action update
 ```
 
-The installed operator checks its own manifest-verified updater scripts, then verifies the exact main commit and matching successful CI, downloads and verifies the official package, drains idle work, replaces files offline, prepares and starts the new trial, and checks local readiness. No local Git checkout, directory lookup or Git command is needed. It intentionally does **not** accept the candidate remotely; exercise all eight MCP tools before explicit acceptance. If jobs are active or local clients hold binaries, the command stops with an explanatory error; resolve those conditions, then rerun. For older installations without the packaged updater, the previous clean-main-checkout method is retained for a one-time upgrade.
+The installed operator checks its own manifest-verified updater scripts, then verifies the exact main commit and matching successful CI, downloads and verifies the official package, drains idle work, replaces files offline, prepares and starts the new trial, and checks local readiness. No local Git checkout, directory lookup or Git command is needed. It intentionally does **not** accept the candidate remotely; exercise all eight MCP tools before explicit acceptance. If jobs are active or local clients hold binaries, the command stops with an explanatory error; resolve those conditions, then rerun.
+
+**One-time transition from an older installed package** that lacks `native\installer\Update-Native.ps1`: run the following single command in the same independent elevated PowerShell 7 console. It fetches a fresh, clean `main` into a unique temporary directory automatically; no knowledge of existing Git checkouts is required. Git and GitHub CLI are required for this one-time route, and the temporary checkout is retained for recovery if the trial needs rollback.
+
+```powershell
+& { $p=Join-Path $env:TEMP ('WindowsAdminMCP-bootstrap-'+[guid]::NewGuid().ToString('N')); git clone --quiet --depth 1 --branch main https://github.com/iamaman11/powershell-admin-mcp.git $p; if($LASTEXITCODE -ne 0){throw 'BOOTSTRAP_CLONE_FAILED'}; & (Join-Path $p 'WindowsAdminMCP.ps1') -Action update }
+```
+
+After that, use only the normal installed command above. A rollback to a legacy package without updater helpers must use a trusted checkout: the installed updater refuses that rollback **before** stopping the service.
 
 Manual initial-install and recovery entry points remain available. Use the CI package ZIP and its published SHA-256 from the exact accepted commit, not source-script installation. From a trusted checkout:
 

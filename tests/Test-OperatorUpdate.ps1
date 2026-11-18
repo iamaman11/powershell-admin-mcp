@@ -38,6 +38,13 @@ try{
     $installed=[pscustomobject]@{files=[pscustomobject]$hashes}
     Check (Assert-InstalledUpdateSource $helperDir $fixtureRoot $installed) 'h5.installed_updater_verified_without_checkout'
     Check (-not(Assert-InstalledUpdateSource $fixtureRoot $fixtureRoot $installed)) 'h5.unrelated_directory_requires_checkout'
+    $old=[ordered]@{files=[ordered]@{'native/WindowsAdminMCP.exe'='A'*64}}
+    Check (Reject {Assert-InstalledRollbackTarget $helperDir $fixtureRoot $installed $old} 'UPDATE_LEGACY_ROLLBACK_REQUIRES_CHECKOUT') 'h5.legacy_rollback_denied_before_stopping_service'
+    Assert-InstalledRollbackTarget $fixtureRoot $fixtureRoot $installed $old
+    $old.files['native/installer/Install-Native.ps1']='B'*64
+    $old.files['native/installer/NativeFileSwap.ps1']='C'*64
+    Assert-InstalledRollbackTarget $helperDir $fixtureRoot $installed $old
+    Write-Host 'PASS h5.bundled_rollback_helpers_allowed'
     $installed.files.PSObject.Properties['native/installer/Update-Native.ps1'].Value='0'*64
     Check (Reject {Assert-InstalledUpdateSource $helperDir $fixtureRoot $installed} 'UPDATE_INSTALLED_HELPER_HASH_MISMATCH') 'h5.tampered_installed_updater_denied'
     $installed.files.PSObject.Properties.Remove('native/installer/Update-Native.ps1')
