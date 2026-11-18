@@ -239,7 +239,7 @@ internal static class WindowCapture
         {
             if (context != IntPtr.Zero) Marshal.Release(context);
             var iid = DxgiDeviceIid;
-            hr = Marshal.QueryInterface(d3d, ref iid, out var dxgi);
+            hr = Marshal.QueryInterface(d3d, in iid, out var dxgi);
             if (hr < 0) Marshal.ThrowExceptionForHR(hr);
             try
             {
