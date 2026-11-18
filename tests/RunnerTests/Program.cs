@@ -29,6 +29,14 @@ using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent())
 }
 Check(AdminTools.ExecWaitBudget(120)==TimeSpan.FromSeconds(90) && AdminTools.ExecWaitBudget(85)==TimeSpan.FromSeconds(90) &&
     AdminTools.ExecWaitBudget(10)==TimeSpan.FromSeconds(15), "transport.exec_wait_budget");
+var testWindowIdentity = new WindowIdentity(0x12345, 4242, 133700000000000000, 1);
+string testWindowId = WindowCatalog.FormatId(testWindowIdentity);
+Check(WindowCatalog.TryParseId(testWindowId, out var decodedWindowId) && decodedWindowId == testWindowIdentity &&
+    !WindowCatalog.TryParseId("w1:bad:token", out _) &&
+    !WindowCatalog.TryParseId("w1:0:1:1:1", out _), "windows.stable_ref_contract");
+var invalidWindowLimit = await WindowTools.ListWindows(max_windows: 0);
+Check(invalidWindowLimit.Status == WindowListCode.INVALID_ARGUMENT && invalidWindowLimit.Windows.Length == 0,
+    "windows.bounded_argument_validation");
 var simple = await Run("Write-Output 'hello'");
 Check(simple.Status == ExecutionState.COMPLETED && simple.ExitCode == 0 && simple.Stdout.Trim() == "hello", "r2.stdout_exit");
 string prefix = "Write-Output 'Проверка Unicode 🚀'\n#";
