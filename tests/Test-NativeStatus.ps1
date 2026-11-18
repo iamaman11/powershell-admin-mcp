@@ -27,7 +27,7 @@ function Send($p,$id,$method,$params){
     $m=@{jsonrpc='2.0';id=$id;method=$method;params=$params}
     $p.StandardInput.WriteLine(($m|ConvertTo-Json -Depth 12 -Compress));$p.StandardInput.Flush()
 }
-function Receive($p,$id,[int]$timeout=10){
+function Receive($p,$id,[int]$timeout=10,[switch]$AllowToolError){
     $watch=[Diagnostics.Stopwatch]::StartNew()
     while($true){
         $remaining=[TimeSpan]::FromSeconds($timeout)-$watch.Elapsed
@@ -36,7 +36,7 @@ function Receive($p,$id,[int]$timeout=10){
         if($null -eq $line){throw 'UNEXPECTED_EOF'}
         $m=$line|ConvertFrom-Json -AsHashtable
         if($m.Contains('id') -and $m.id -eq $id){
-            if($m.Contains('error') -or ($m.result.Contains('isError') -and $m.result.isError)){throw "RPC_FAILURE $line"}
+            if($m.Contains('error') -or ($m.result.Contains('isError') -and $m.result.isError -and -not $AllowToolError)){throw "RPC_FAILURE $line"}
             return $m.result
         }
     }
@@ -86,10 +86,10 @@ try{
     $restrictedInspect=(Receive $a 34).structuredContent
     Assert ($restrictedInspect.status -eq 'USER_CONTEXT_UNAVAILABLE' -and @($restrictedInspect.elements).Count -eq 0) 'windows.inspect_reject_unbound_ci_frontend'
     Send $a 37 'tools/call' @{name='windows.capture_window';arguments=@{window_id='bad';max_width=1280};_meta=$meta}
-    $badCapture=(Receive $a 37).structuredContent
+    $badCapture=(Receive $a 37 -AllowToolError).structuredContent
     Assert ($badCapture.status -eq 'INVALID_ARGUMENT') 'windows.capture_reject_bad_window_id'
     Send $a 38 'tools/call' @{name='windows.capture_window';arguments=@{window_id='w1:7fffffffffffffff:1092:1dbaf8d88b62800:1';max_width=1280};_meta=$meta}
-    $restrictedCapture=(Receive $a 38).structuredContent
+    $restrictedCapture=(Receive $a 38 -AllowToolError).structuredContent
     Assert ($restrictedCapture.status -eq 'USER_CONTEXT_UNAVAILABLE') 'windows.capture_reject_unbound_ci_frontend'
     $invalidCaptureWorker=(& $Exe window-capture-worker 'bad' 1280 | ConvertFrom-Json)
     Assert ($invalidCaptureWorker.result.status -eq 'INVALID_ARGUMENT') 'windows.invalid_capture_worker_args'
