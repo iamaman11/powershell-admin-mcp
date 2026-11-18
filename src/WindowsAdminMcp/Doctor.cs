@@ -166,7 +166,9 @@ internal static class Doctor
                     r.GetProperty("definition_valid").GetBoolean(),r.GetProperty("service_binding_valid").GetBoolean(),
                     r.GetProperty("service_start").ValueKind==JsonValueKind.String?r.GetProperty("service_start").GetString():null,
                     r.GetProperty("task").ValueKind==JsonValueKind.String?r.GetProperty("task").GetString():null,
-                    r.GetProperty("logon_enabled").ValueKind==JsonValueKind.True);
+                    r.GetProperty("logon_enabled").ValueKind==JsonValueKind.True,
+                    r.GetProperty("recovery").ValueKind==JsonValueKind.Null?null:
+                        r.GetProperty("recovery").Deserialize<RecoveryObservation>(PipeWire.Json));
             }
             finally{if(!p.HasExited){p.Kill(true);p.WaitForExit(5000);}}
         }
@@ -175,4 +177,4 @@ internal static class Doctor
         {return null;}
     }
 }
-internal sealed record StartupObservation(bool Ready,bool DefinitionValid,bool ServiceBindingValid,string? ServiceStart,string? Task,bool LogonEnabled);
+internal sealed record StartupObservation(bool Ready,bool DefinitionValid,bool ServiceBindingValid,string? ServiceStart,string? Task,bool LogonEnabled,RecoveryObservation? Recovery);

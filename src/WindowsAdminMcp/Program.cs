@@ -36,6 +36,11 @@ else if (args is ["doctor"] || args is ["doctor","--evidence",_])
     Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(report,PipeWire.Json));
     Environment.ExitCode=report.Status==DoctorState.OK?0:1;
 }
+else if (args is ["maintenance", "recovery"] || args is ["maintenance", "configure-recovery"])
+{
+    var recovery=args[1]=="configure-recovery"?ServiceRecovery.Configure():ServiceRecovery.Observe();
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(recovery,PipeWire.Json));
+}
 else if (args is ["doctor", "boot"])
 {
     // The first read-only component of the unified native doctor.
@@ -59,6 +64,6 @@ else if (args is ["stdio"])
 }
 else
 {
-    Console.Error.WriteLine("Usage: WindowsAdminMCP.exe service|stdio|tunnel|doctor [boot|--evidence path]|maintenance store-schema");
+    Console.Error.WriteLine("Usage: WindowsAdminMCP.exe service|stdio|tunnel|doctor [boot|--evidence path]|maintenance store-schema|recovery|configure-recovery");
     Environment.ExitCode = 2;
 }

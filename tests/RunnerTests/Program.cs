@@ -14,6 +14,19 @@ static async Task<ExecutionResult> Run(string command, int timeout = 10, string?
 if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true")
     throw new InvalidOperationException("Isolated Windows CI only");
 Check(File.Exists(PowerShellRunner.Executable), "r2.machine_wide_pwsh");
+using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent())
+{
+    var si = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "whoami.exe"));
+    si.ArgumentList.Add("/logonid"); si.UseShellExecute = false; si.RedirectStandardOutput = true;
+    using var whoami = Process.Start(si)!;
+    string output = await whoami.StandardOutput.ReadToEndAsync();
+    await whoami.WaitForExitAsync();
+    string expected = System.Text.RegularExpressions.Regex.Match(output, @"S-1-5-5-\d+-\d+").Value;
+    Check(whoami.ExitCode == 0 && expected.Length > 0 && TokenLogon.Read(identity) == expected,
+        "user.real_native_logon_sid_matches_whoami");
+    Check(identity.Groups?.OfType<System.Security.Principal.SecurityIdentifier>().All(x => x.Value != expected) == true,
+        "user.managed_groups_exclude_logon_sid_regression");
+}
 Check(AdminTools.ExecWaitBudget(120)==TimeSpan.FromSeconds(90) && AdminTools.ExecWaitBudget(85)==TimeSpan.FromSeconds(90) &&
     AdminTools.ExecWaitBudget(10)==TimeSpan.FromSeconds(15), "transport.exec_wait_budget");
 var simple = await Run("Write-Output 'hello'");
