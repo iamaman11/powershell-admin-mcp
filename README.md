@@ -45,6 +45,7 @@ If physical acceptance rejects an unaccepted schema-4 candidate, use offline `In
 - powershell_exec: durable single step, execution timeout 1–120 s, synchronous wait capped at 90 s from entry. PENDING carries job_id; inspect it, don't resubmit with a different key.
 - powershell_job: submit (1–8 steps, each timeout 1–3600 s), status by job_id or operation_key, logs (step_index **1-based**, 1..total_steps), list with state_filter/page_size (1–100)/before_seq cursor, cancel, resume, reconcile, prune.
 - powershell_screenshot: PNG ImageContent; bounded region and image size. Requires authorized default physical console; never unlocks or switches sessions. Returns typed reason and local timing on failure.
+- windows.list_windows (candidate): read-only list of up to 100 titled, visible top-level windows on the same authorized interactive USER desktop. Returns ephemeral `window_id` tied to HWND, process creation time and session; includes occluded windows and foreground flag. Never activates windows or reads control contents. Protected/locked/remote desktops and service/SYSTEM context are rejected. Separate inspect/capture/action tools are not implemented in this slice; see #9.
 
 All commands are trusted administrative PowerShell, not sandboxed. Timeout/cancel may leave side effects. A disconnected request does not grant permission to replay. USER worker loss records unknown effect; jobs are not automatically retried.
 
