@@ -25,6 +25,17 @@ foreach($field in @('running','queued','cancelRequested')){
     $report.store.$field=0
 }
 Check (Reject {Assert-IdleStore ([pscustomobject]@{service=$null;store=$null})} 'UPDATE_STORE_UNCONFIRMED') 'h5.fail_closed_store_unconfirmed'
+$exe='C:\Program Files\WindowsAdminMCP\native\WindowsAdminMCP.exe'
+$local=[pscustomobject]@{ExecutablePath=$exe;CommandLine='"'+$exe+'" stdio';ParentProcessId=42;SessionId=1}
+$tunnel=[pscustomobject]@{ExecutablePath=$exe;CommandLine='"'+$exe+'" stdio';ParentProcessId=77;SessionId=1}
+$otherBinary=[pscustomobject]@{ExecutablePath='C:\Other\WindowsAdminMCP.exe';CommandLine='"C:\Other\WindowsAdminMCP.exe" stdio';ParentProcessId=42;SessionId=1}
+$service=[pscustomobject]@{ExecutablePath=$exe;CommandLine='"'+$exe+'" service';ParentProcessId=42;SessionId=0}
+$samples=@($local,$tunnel,$otherBinary,$service)
+Check (@(Select-UpdateClients $samples $exe @(77)).Count -eq 1) 'h5.only_canonical_stdio_leaf_selected'
+Check (@(Select-UpdateClients $samples $exe @()).Count -eq 2) 'h5.tunnel_child_included_after_tunnel_stop'
+Assert-UpdateClientScope $local 1 'S-1-5-21-fixture' 'S-1-5-21-fixture'
+Check (Reject {Assert-UpdateClientScope $local 2 'S-1-5-21-fixture' 'S-1-5-21-fixture'} 'UPDATE_CLIENT_OTHER_SESSION') 'h5.never_close_foreign_session'
+Check (Reject {Assert-UpdateClientScope $local 1 'S-1-5-21-fixture' 'S-1-5-21-other'} 'UPDATE_CLIENT_OTHER_OWNER') 'h5.never_close_foreign_owner'
 $fixtureRoot=Join-Path ([IO.Path]::GetTempPath()) ('wmcp-updater-'+[guid]::NewGuid().ToString('N'))
 $helperDir=Join-Path $fixtureRoot 'native\installer'
 try{
