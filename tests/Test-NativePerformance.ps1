@@ -15,6 +15,7 @@ $logs=[Collections.Generic.List[double]]::new()
 $execIdle=[Collections.Generic.List[double]]::new()
 $execQueued=[Collections.Generic.List[double]]::new()
 $cold=[Collections.Generic.List[double]]::new()
+$cancelPhases=[Collections.Generic.List[object]]::new()
 $meta=@{'io.modelcontextprotocol/protocolVersion'='2026-07-28';'io.modelcontextprotocol/clientCapabilities'=@{};'io.modelcontextprotocol/clientInfo'=@{name='local-performance';version='1'}}
 $svc=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
 if(-not $svc -or $svc.State -ne 'Running' -or $svc.StartName -ne 'LocalSystem' -or $svc.ProcessId -eq 0 -or $svc.PathName -ine ('"'+$Exe+'" service')){throw 'SERVICE_IDENTITY_MISMATCH'}
@@ -129,8 +130,11 @@ try{
             $admission.Add($watch.Elapsed.TotalMilliseconds)
             if($j.status -ne 'OK' -or $j.job.state -ne 'QUEUED'){throw 'PERF_ADMISSION_FAILED'}
             $sequence++;$watch=[Diagnostics.Stopwatch]::StartNew()
-            $c=Call $clients[($i+1)%3] $sequence 'powershell_job' @{action='cancel';job_id=$j.job.job_id}
-            $cancel.Add($watch.Elapsed.TotalMilliseconds)
+            $clientIndex=($i+1)%3
+            $c=Call $clients[$clientIndex] $sequence 'powershell_job' @{action='cancel';job_id=$j.job.job_id}
+            $elapsed=$watch.Elapsed.TotalMilliseconds
+            $cancel.Add($elapsed)
+            $cancelPhases.Add([pscustomobject]@{index=$i;client=$clientIndex;correlation_id=$c.correlation_id;client_ms=[Math]::Round($elapsed,3);timing=$c.timing})
             if($c.status -ne 'OK' -or $c.job.state -ne 'CANCELLED'){throw 'PERF_CANCEL_NOT_QUEUED'}
         }
         $watch=[Diagnostics.Stopwatch]::StartNew()
@@ -166,6 +170,7 @@ try{
         soak_seconds=[Math]::Round($soak.Elapsed.TotalSeconds,3);job_exercise=[bool]$ExerciseJobs;
         cold_client_latency=(Distribution $cold);status_latency=$status;admission_latency=$admissionStats;cancel_latency=$cancelStats;
         logs_latency=(Distribution $logs);exec_idle_latency=(Distribution $execIdle);exec_queued_wait=(Distribution $execQueued);
+        cancel_phase_samples=$cancelPhases.ToArray();
         baseline_goals=@{status_p95_100ms=($status.p95_ms -le 100);
             admission_p95_100ms=$(if($admissionStats){$admissionStats.p95_ms -le 100});
             cancel_p95_500ms=$(if($cancelStats){$cancelStats.p95_ms -le 500})};
