@@ -71,9 +71,17 @@ else if (args is ["window-action-worker"])
     WindowActionResult result;
     try
     {
-        string raw = await Console.In.ReadToEndAsync();
-        var request = raw.Length <= 16000
-            ? System.Text.Json.JsonSerializer.Deserialize<WindowActionRequest>(raw, PipeWire.Json)
+        char[] chars = new char[16001];
+        int length = 0;
+        while (length < chars.Length)
+        {
+            int read = await Console.In.ReadAsync(chars.AsMemory(length));
+            if (read == 0) break;
+            length += read;
+        }
+        var request = length <= 16000
+            ? System.Text.Json.JsonSerializer.Deserialize<WindowActionRequest>(
+                new string(chars, 0, length), PipeWire.Json)
             : null;
         result = request is null ? new(WindowActionCode.INVALID_ARGUMENT) :
             WindowAction.InvokeInWorker(request);
