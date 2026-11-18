@@ -84,6 +84,30 @@ public sealed class WindowTools
         return await WindowInspector.RunIsolatedAsync(window_id, max_depth, max_elements, cancellationToken);
     }
 
+    [McpServerTool(Name = "windows.capture_window", UseStructuredContent = true),
+     Description("Capture pixels of a selected window_id using Windows Graphics Capture, even when occluded. Only authorized foreground USER desktop, never changes focus. Minimized/protected windows may be unavailable. PNG max 2 MB and max_width 256..1920. No desktop screenshot fallback.")]
+    public static async Task<ModelContextProtocol.Protocol.CallToolResult> CaptureWindow(string window_id,
+        int max_width = 1280, CancellationToken cancellationToken = default)
+    {
+        if (!WindowCapture.Valid(window_id, max_width))
+            return WindowCapture.Response(new(WindowCaptureCode.INVALID_ARGUMENT));
+        var status = await AdminTools.Status(cancellationToken);
+        if (status.Status != StatusCode.OK)
+            return WindowCapture.Response(new(WindowCaptureCode.SERVICE_UNAVAILABLE, Detail: status.Status.ToString()));
+        using var self = Process.GetCurrentProcess();
+        if (status.ExecutionContext != CommandContext.USER ||
+            status.UserContextAvailable != true || status.Frontend?.Elevated != true ||
+            status.Frontend?.SessionId != self.SessionId)
+            return WindowCapture.Response(new(WindowCaptureCode.USER_CONTEXT_UNAVAILABLE));
+        var desktop = DesktopCapture.ObserveDesktop(self.SessionId);
+        if (desktop.Code != CaptureCode.COMPLETED)
+            return WindowCapture.Response(new(WindowCaptureCode.DESKTOP_UNAVAILABLE, Detail: desktop.Code.ToString()));
+        var resolved = WindowCatalog.ResolveId(window_id, self.SessionId, out _);
+        if (resolved != WindowResolveCode.OK)
+            return WindowCapture.Response(new(WindowCapture.MapResolve(resolved), Detail: resolved.ToString()));
+        return await WindowCapture.RunIsolatedAsync(window_id, max_width, cancellationToken);
+    }
+
     [McpServerTool(Name = "windows.invoke_element", UseStructuredContent = true),
      Description("Act on a fresh element_id (expires after 30 seconds) from windows.inspect_window. Requires confirm=true and authorized USER desktop; only UIA INVOKE, SET_VALUE, SELECT or TOGGLE patterns, no focus/mouse/keyboard. Value is never put in child arguments or action audit. Timeout means UNKNOWN EFFECT: do not retry automatically.")]
     public static async Task<WindowActionResult> InvokeElement(string window_id, string element_id,
