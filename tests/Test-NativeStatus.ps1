@@ -73,6 +73,12 @@ try{
             $v.frontend.session_id -eq $p.SessionId -and $v.command_context -in @('SYSTEM','UNCONFIRMED') -and
             $v.versions.mcp_version -eq '0.8.1-dev' -and $v.versions.store_schema -eq 4 -and $v.timing.ipc_ms -ge 0) 'hardening.separate_frontend_and_runner_identity'
     }
+    Send $a 31 'tools/call' @{name='windows.list_windows';arguments=@{max_windows=0};_meta=$meta}
+    $invalidWindowList=(Receive $a 31).structuredContent
+    Assert ($invalidWindowList.status -eq 'INVALID_ARGUMENT' -and @($invalidWindowList.windows).Count -eq 0) 'windows.mcp_invalid_limit'
+    Send $a 32 'tools/call' @{name='windows.list_windows';arguments=@{max_windows=1};_meta=$meta}
+    $restrictedWindowList=(Receive $a 32).structuredContent
+    Assert ($restrictedWindowList.status -eq 'USER_CONTEXT_UNAVAILABLE' -and @($restrictedWindowList.windows).Count -eq 0) 'windows.reject_unbound_ci_frontend'
     foreach($p in @($a,$b,$c)){Send $p 2 'tools/call' @{name='powershell_status';arguments=@{};_meta=$meta}}
     $results=@(foreach($p in @($a,$b,$c)){(Receive $p 2).structuredContent})
     Assert (@($results|Where-Object {$_.status -eq 'OK' -and $_.service_pid -eq $svc.ProcessId}).Count -eq 3) 'r1.one_service_three_stdio_clients'
