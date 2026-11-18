@@ -1,6 +1,9 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Windows.Automation;
@@ -22,19 +25,50 @@ public sealed record WindowElement(
     [property: JsonPropertyName("enabled")] bool Enabled,
     [property: JsonPropertyName("offscreen")] bool Offscreen,
     [property: JsonPropertyName("password")] bool Password,
-    [property: JsonPropertyName("patterns")] string[] Patterns);
+    [property: JsonPropertyName("patterns")] string[] Patterns,
+    [property: JsonPropertyName("element_id")] string ElementId);
 
 public sealed record WindowInspectResult(
     [property: JsonPropertyName("status")] WindowInspectCode Status,
     [property: JsonPropertyName("elements")] WindowElement[] Elements,
     [property: JsonPropertyName("truncated")] bool Truncated = false,
     [property: JsonPropertyName("detail")] string? Detail = null,
-    [property: JsonPropertyName("elapsed_ms")] long? ElapsedMs = null);
+    [property: JsonPropertyName("elapsed_ms")] long? ElapsedMs = null,
+    [property: JsonPropertyName("element_ref_expires_utc")] DateTimeOffset? ElementRefExpiresUtc = null);
 
 // UI Automation can block inside a third-party provider. Run it in a bounded,
 // on-demand copy of this executable, never on the MCP request/USER worker thread.
 internal static class WindowInspector
 {
+    internal const int ElementRefSeconds = 30;
+    private const long FutureSkewMs = 5000;
+
+    // Runtime IDs are ephemeral. A fresh token also binds the window identity
+    // and control metadata. It is an identity check, never an authorization.
+    internal static string ElementRef(AutomationElement element, string windowId, long unixMs)
+    {
+        int[] runtimeId = element.GetRuntimeId();
+        var current = element.Current;
+        string fingerprint = windowId + "|" + string.Join(",", runtimeId) + "|" +
+            current.ControlType.ProgrammaticName + "|" + current.AutomationId + "|" + current.Name;
+        byte[] digest = SHA256.HashData(Encoding.UTF8.GetBytes(fingerprint));
+        return "e1:" + unixMs.ToString("x", CultureInfo.InvariantCulture) + ":" +
+            Convert.ToHexString(digest.AsSpan(0, 16)).ToLowerInvariant();
+    }
+
+    internal static bool TryParseElementRef(string? text, out long unixMs)
+    {
+        unixMs = 0;
+        if (text is null || text.Length > 80) return false;
+        var fields = text.Split(':');
+        if (fields.Length != 3 || fields[0] != "e1" || fields[2].Length != 32 ||
+            !fields[2].All(Uri.IsHexDigit) ||
+            !long.TryParse(fields[1], NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out unixMs))
+            return false;
+        long age = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - unixMs;
+        return age >= -FutureSkewMs && age <= ElementRefSeconds * 1000L;
+    }
+
     internal static bool ValidArguments(string? windowId, int maxDepth, int maxElements) =>
         WindowCatalog.TryParseId(windowId, out _) && maxDepth is >= 0 and <= 5 &&
         maxElements is >= 1 and <= 100;
@@ -52,10 +86,10 @@ internal static class WindowInspector
             return new(resolved == WindowResolveCode.ACCESS_DENIED ? WindowInspectCode.ACCESS_DENIED :
                 resolved == WindowResolveCode.WRONG_SESSION ? WindowInspectCode.USER_CONTEXT_UNAVAILABLE :
                 WindowInspectCode.STALE_WINDOW, [], Detail: resolved.ToString());
-        return InspectCore(hwnd, maxDepth, maxElements);
+        return InspectCore(hwnd, maxDepth, maxElements, windowId);
     }
 
-    internal static WindowInspectResult InspectCore(IntPtr hwnd, int maxDepth, int maxElements)
+    internal static WindowInspectResult InspectCore(IntPtr hwnd, int maxDepth, int maxElements, string? windowId = null)
     {
         var clock = Stopwatch.StartNew();
         if (hwnd == IntPtr.Zero || maxDepth is < 0 or > 5 || maxElements is < 1 or > 100)
@@ -65,6 +99,7 @@ internal static class WindowInspector
             var root = AutomationElement.FromHandle(hwnd);
             if (root is null) return new(WindowInspectCode.UIA_UNAVAILABLE, [], ElapsedMs: clock.ElapsedMilliseconds);
             var walker = TreeWalker.ControlViewWalker;
+            long snapshotMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var nodes = new List<WindowElement>(maxElements);
             var stack = new Stack<(AutomationElement Element, string Path, int Depth, int? Parent)>();
             stack.Push((root, "0", 0, null));
@@ -86,8 +121,14 @@ internal static class WindowInspector
                     .Select(p => Bounded(p.ProgrammaticName, 64)).ToArray(); }
                 catch (ElementNotAvailableException) { patterns = []; }
                 int parentIndex = nodes.Count;
+                string elementId = "";
+                if (windowId is not null)
+                {
+                    try { elementId = ElementRef(item.Element, windowId, snapshotMs); }
+                    catch (ElementNotAvailableException) { continue; }
+                }
                 nodes.Add(new(item.Path, item.Parent, item.Depth, role, name, automationId,
-                    current.IsEnabled, current.IsOffscreen, password, patterns));
+                    current.IsEnabled, current.IsOffscreen, password, patterns, elementId));
                 if (item.Depth >= maxDepth) continue;
 
                 var children = new List<AutomationElement>();
@@ -107,7 +148,9 @@ internal static class WindowInspector
                     stack.Push((children[i], item.Path + "." + i, item.Depth + 1, parentIndex));
             }
             return new(WindowInspectCode.COMPLETED, nodes.ToArray(), truncated || stack.Count != 0,
-                ElapsedMs: clock.ElapsedMilliseconds);
+                ElapsedMs: clock.ElapsedMilliseconds,
+                ElementRefExpiresUtc:windowId is null ? null :
+                    DateTimeOffset.FromUnixTimeMilliseconds(snapshotMs).AddSeconds(ElementRefSeconds));
         }
         catch (ElementNotAvailableException) { return new(WindowInspectCode.STALE_WINDOW, [], ElapsedMs: clock.ElapsedMilliseconds); }
         catch (COMException e) { return new(WindowInspectCode.UIA_UNAVAILABLE, [], Detail: e.HResult.ToString("X8"), ElapsedMs: clock.ElapsedMilliseconds); }
