@@ -132,7 +132,34 @@ try{
     # A separate actual installation/upgrade/rollback exercise. CI only:
     # retire the first install journal and enable stopped startup registrations
     # as a fixture for an accepted baseline, not as remote acceptance evidence.
-    $baseline=& $installer -Action Install -PackagePath $Package -ExpectedSha256 $Sha256|ConvertFrom-Json
+    # Build the exact previously installed source in the existing isolated CI.
+    # Do not use a different manifest on the same executable as rollback evidence.
+    $legacyCommit='fed40dc07d9a6f6651430e54b0c48529b80f0327'
+    $legacyRoot=Join-Path $env:RUNNER_TEMP ('legacy-'+[guid]::NewGuid().ToString('N'))
+    $legacyPublish=$legacyRoot+'-publish'
+    $legacyPackage=$legacyRoot+'.zip'
+    $legacyAdded=$false
+    try{
+        & git fetch --no-tags --depth=1 origin $legacyCommit
+        if($LASTEXITCODE -ne 0){throw 'LEGACY_FETCH_FAILED'}
+        & git worktree add --detach $legacyRoot $legacyCommit
+        if($LASTEXITCODE -ne 0){throw 'LEGACY_WORKTREE_FAILED'}
+        $legacyAdded=$true
+        $observedCommit=(& git -C $legacyRoot rev-parse HEAD).Trim()
+        Check ($LASTEXITCODE -eq 0 -and $observedCommit -ceq $legacyCommit) 'h1.exact_legacy_source'
+        Push-Location $legacyRoot
+        try{
+            & dotnet publish src/WindowsAdminMcp/WindowsAdminMcp.csproj -c Release -r win-x64 --self-contained true -p:RestoreLockedMode=true -o $legacyPublish
+            if($LASTEXITCODE -ne 0){throw 'LEGACY_BUILD_FAILED'}
+            $receipt=& ./installer/New-NativePackage.ps1 -PublishDirectory $legacyPublish -Output $legacyPackage -Commit $legacyCommit|ConvertFrom-Json
+        }finally{Pop-Location}
+        $baseline=& $installer -Action Install -PackagePath $legacyPackage -ExpectedSha256 $receipt.sha256|ConvertFrom-Json
+        Check ($baseline.commit -ceq $legacyCommit) 'h1.actual_legacy_package_installed'
+    }finally{
+        if($legacyAdded){& git worktree remove --force $legacyRoot;if($LASTEXITCODE -ne 0){throw 'LEGACY_WORKTREE_CLEANUP_FAILED'}}
+        if(Test-Path -LiteralPath $legacyPublish){Remove-Item -LiteralPath $legacyPublish -Recurse -Force}
+        if(Test-Path -LiteralPath $legacyPackage){Remove-Item -LiteralPath $legacyPackage -Force}
+    }
     $null=& $installer -Action Prepare -ExpectedCommit $baseline.commit
     $task=Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel'
     $trigger=$task.Triggers[0];$trigger.Enabled=$true
@@ -171,6 +198,7 @@ try{
             Start-Sleep -Milliseconds 100
         }while($clock.Elapsed.TotalSeconds -lt 10)
         if($s.status -ne 'OK'){throw 'SERVICE_NOT_READY'}
+        Check ($s.versions.informational_version.EndsWith('+'+$legacyCommit)) 'h1.legacy_binary_running'
         Call-Tool $p 2 'powershell_exec' @{command="Write-Output 'upgrade-preserved'";operation_key='package-upgrade-durable';timeout_seconds=10}
     }
     Check ($saved.status -eq 'COMPLETED' -and $saved.stdout.Trim() -ceq 'upgrade-preserved') 'r6.update_durable_job_created'
@@ -201,7 +229,8 @@ try{
         [IO.Compression.ZipFile]::ExtractToDirectory($Package,$replacementRoot)
         $manifestFile=Join-Path $replacementRoot 'manifest.json'
         $manifest=Get-Content -LiteralPath $manifestFile -Raw|ConvertFrom-Json -AsHashtable
-        $manifest.commit='1111111111111111111111111111111111111111'
+        $candidateCommit=$manifest.commit
+        Check ($candidateCommit -cne $legacyCommit) 'h1.candidate_distinct_from_legacy'
         $marker=Join-Path $replacementRoot 'native\upgrade-fixture.txt'
         [IO.File]::WriteAllText($marker,'second package fixture')
         $manifest.files['native/upgrade-fixture.txt']=(Get-FileHash -LiteralPath $marker).Hash
@@ -228,6 +257,23 @@ try{
         }
         $read=Read-SavedJob
         Check ($read.status -eq 'OK' -and $read.job.job_id -eq $saved.job_id -and $read.job.execution.stdout.Trim() -ceq 'upgrade-preserved') 'r6.job_preserved_after_package_update'
+        Start-Service WindowsAdminMCP
+        try{
+            $candidateSaved=With-Client {
+                param($p)
+                $clock=[Diagnostics.Stopwatch]::StartNew()
+                do{
+                    $s=Call-Tool $p 1 'powershell_status' @{}
+                    if($s.status -eq 'OK'){break}
+                    Start-Sleep -Milliseconds 100
+                }while($clock.Elapsed.TotalSeconds -lt 10)
+                if($s.status -ne 'OK'){throw 'SERVICE_NOT_READY'}
+                Check ($s.versions.informational_version.EndsWith('+'+$candidateCommit)) 'h1.candidate_binary_running'
+                Call-Tool $p 2 'powershell_exec' @{command="[Console]::Error.Write(('e'*16000)); Write-Output 'candidate-preserved'";operation_key='h1-candidate-durable';timeout_seconds=10}
+            }
+            Check ($candidateSaved.status -eq 'COMPLETED' -and $candidateSaved.audit_persisted -and
+                $candidateSaved.stderr.Length -eq 16000 -and -not $candidateSaved.output_truncated) 'h1.candidate_durable_result_written'
+        }finally{Stop-Service WindowsAdminMCP}
         # Negative metadata fixture: target claims schema 2, current SQLite
         # is really schema 4. No old executable or DB is actually restored.
         $priorManifest=Join-Path $root '.rollback\manifest.json'
@@ -244,6 +290,25 @@ try{
         Check ($restored.status -eq 'ROLLED_BACK_OFFLINE' -and -not(Test-Path (Join-Path $root 'native\upgrade-fixture.txt'))) 'r6.actual_compatible_package_rollback'
         $read=Read-SavedJob
         Check ($read.status -eq 'OK' -and $read.job.job_id -eq $saved.job_id -and $read.job.execution.stdout.Trim() -ceq 'upgrade-preserved') 'r6.job_preserved_after_rollback'
+        Start-Service WindowsAdminMCP
+        try{
+            $crossVersion=With-Client {
+                param($p)
+                $clock=[Diagnostics.Stopwatch]::StartNew()
+                do{
+                    $s=Call-Tool $p 1 'powershell_status' @{}
+                    if($s.status -eq 'OK'){break}
+                    Start-Sleep -Milliseconds 100
+                }while($clock.Elapsed.TotalSeconds -lt 10)
+                if($s.status -ne 'OK'){throw 'SERVICE_NOT_READY'}
+                Check ($s.versions.informational_version.EndsWith('+'+$legacyCommit)) 'h1.actual_rollback_legacy_binary'
+                Call-Tool $p 2 'powershell_job' @{action='logs';job_id=$candidateSaved.job_id}
+            }
+            Check ($crossVersion.status -eq 'OK' -and $crossVersion.job.job_id -eq $candidateSaved.job_id -and
+                $crossVersion.job.execution.stdout -ceq $candidateSaved.stdout -and
+                $crossVersion.job.execution.stderr -ceq $candidateSaved.stderr -and
+                $crossVersion.job.execution.audit_persisted) 'h1.legacy_reads_actual_candidate_result'
+        }finally{Stop-Service WindowsAdminMCP}
         $prepared=& $installer -Action Prepare -ExpectedCommit $baseline.commit|ConvertFrom-Json
         Check ($prepared.status -eq 'TRIAL_PREPARED' -and -not $prepared.logon_enabled -and -not $prepared.rollback_retained) 'r6.restored_baseline_reprepare'
         $null=& $installer -Action Maintenance -ExpectedCommit $baseline.commit
@@ -261,10 +326,10 @@ try{
         try{
             $failed=$false
             try{& $installer -Action Install -PackagePath $replacementZip -ExpectedSha256 $repairDigest -ReplaceUnaccepted|Out-Null}catch{$failed=$true}
-            Check ($failed -and (Test-Path (Join-Path $root '.rollback\journal.json')) -and -not(Test-Path (Join-Path $root '.trial-backup-1111111111111111111111111111111111111111')) -and (Get-Content (Join-Path $root 'manifest.json') -Raw|ConvertFrom-Json).commit -eq '1111111111111111111111111111111111111111') 'r6.failed_forward_repair_restores_prior_trial_journal'
+            Check ($failed -and (Test-Path (Join-Path $root '.rollback\journal.json')) -and -not(Test-Path (Join-Path $root ('.trial-backup-'+$candidateCommit))) -and (Get-Content (Join-Path $root 'manifest.json') -Raw|ConvertFrom-Json).commit -eq $candidateCommit) 'r6.failed_forward_repair_restores_prior_trial_journal'
         }finally{$held.Dispose()}
         $repair=& $installer -Action Install -PackagePath $replacementZip -ExpectedSha256 $repairDigest -ReplaceUnaccepted|ConvertFrom-Json
-        Check ($repair.status -eq 'INSTALLED_OFFLINE' -and $repair.commit -eq $manifest.commit -and -not $repair.autostart -and (Test-Path (Join-Path $root '.trial-backup-1111111111111111111111111111111111111111\journal.json'))) 'r6.forward_trial_repair_retains_backup_without_acceptance'
+        Check ($repair.status -eq 'INSTALLED_OFFLINE' -and $repair.commit -eq $manifest.commit -and -not $repair.autostart -and (Test-Path (Join-Path $root ('.trial-backup-'+$candidateCommit+'\journal.json')))) 'r6.forward_trial_repair_retains_backup_without_acceptance'
         $read=Read-SavedJob
         Check ($read.job.job_id -eq $saved.job_id -and $read.job.execution.stdout.Trim() -ceq 'upgrade-preserved') 'r6.forward_trial_repair_preserves_jobs'
     }finally{

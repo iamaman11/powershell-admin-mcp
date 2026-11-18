@@ -45,7 +45,26 @@ var nonTerminating = await Run("Write-Error 'expected error' -ErrorAction Contin
 Check(nonTerminating.Status == ExecutionState.COMMAND_ERROR && nonTerminating.Stderr.Contains("expected error"), "r2.nonterminating_error");
 var large = await Run("[Console]::Out.Write(('a' * 100000)); [Console]::Error.Write(('b' * 100000))");
 Check(large.Status == ExecutionState.COMPLETED && large.OutputTruncated && large.Stdout.Length == 16000 &&
-    large.Stderr.TrimEnd().Length == 16000, "r2.bounded_concurrent_drain");
+    large.Stderr.Length == PowerShellRunner.OutputLimit, "r2.bounded_concurrent_drain");
+foreach(int count in new[]{15998,15999,16000,30000})
+{
+    var boundary=await Run($"[Console]::Error.Write(('e'*{count})); Write-Output 'boundary'");
+    Check(boundary.Status==ExecutionState.COMPLETED &&
+        boundary.Stderr==new string('e',Math.Min(count,PowerShellRunner.OutputLimit)) &&
+        boundary.OutputTruncated==(count>PowerShellRunner.OutputLimit),
+        $"h1.stderr_exact_boundary_{count}");
+}
+var lf=await Run("for($i=0;$i -lt 8000;$i++){[Console]::Error.Write(\"e+`n\")}");
+Check(lf.Status==ExecutionState.COMPLETED && lf.Stderr.Length==PowerShellRunner.OutputLimit &&
+    lf.Stderr==string.Concat(Enumerable.Repeat("e+",5333).Select(value=>value+"\n"))+"e" &&
+    lf.OutputTruncated,"h1.lf_stream_never_expands");
+var unicodeBoundary=await Run("[Console]::Error.Write(('e'*15999)+'🚀')");
+Check(unicodeBoundary.Status==ExecutionState.COMPLETED && unicodeBoundary.Stderr==new string('e',15999) &&
+    unicodeBoundary.OutputTruncated,"h1.stderr_surrogate_safe_boundary");
+var mixedWarnings=await Run("Write-Warning 'fixture'; [Console]::Error.Write(('e'*30000))");
+Check(mixedWarnings.Status==ExecutionState.COMPLETED && mixedWarnings.Warnings?.Contains("fixture")==true &&
+    mixedWarnings.Stderr.Length<PowerShellRunner.OutputLimit && mixedWarnings.OutputTruncated,
+    "h1.warning_filter_preserves_capture_bound");
 var cwd = await Run("(Get-Location).Path", cwd: Path.GetTempPath());
 Check(cwd.Status == ExecutionState.COMPLETED && Path.TrimEndingDirectorySeparator(cwd.Stdout.Trim()) ==
     Path.TrimEndingDirectorySeparator(Path.GetTempPath()), "r2.working_directory");
@@ -131,6 +150,27 @@ using(var fixture=NativeChildProcess.Start(InertChild()))
     Check(end==TunnelEnd.ACCESS_DENIED,"r6.real_child_auth_stop");
     fixture.StopTree();
     Check(fixture.Process.WaitForExit(5000),"r6.auth_denied_child_terminated");
+}
+
+// Real child, local fault injection only, never touch the installed tunnel.
+using(var fixture=NativeChildProcess.Start(InertChild()))
+{
+    fixture.Input.Close();
+    var workerFailure=Task.FromException(new IOException("isolated USER worker fault"));
+    int checks=0;
+    // The pre-H3 watch path has no worker signal: it observes only vendor/TUN.
+    var priorEnd=await TunnelLifetime.WatchAsync(fixture.Process,
+        ()=>++checks==2?TunReadiness.ADAPTER_DOWN:TunReadiness.READY,
+        ()=>Task.FromResult(false),TimeSpan.FromMilliseconds(10));
+    Check(workerFailure.IsFaulted && priorEnd==TunnelEnd.TUN_LOST&&!fixture.Process.HasExited,
+        "h1.old_watch_without_worker_signal_misses_fault");
+    var candidateEnd=await TunnelLifetime.WatchAsync(fixture.Process,()=>TunReadiness.READY,
+        ()=>Task.FromResult(false),TimeSpan.FromMilliseconds(10),workerFailure);
+    Check(candidateEnd==TunnelEnd.USER_WORKER_STOPPED && !fixture.Process.HasExited,
+        "h1.worker_fault_observed_while_vendor_alive");
+    _=workerFailure.Exception;
+    fixture.StopTree();
+    Check(fixture.Process.WaitForExit(5000),"h1.worker_fault_owned_child_terminated");
 }
 
 var startUtc=new DateTimeOffset(2026,1,1,12,0,0,TimeSpan.Zero);
@@ -373,6 +413,30 @@ try
     var readback=routing.Dispatch(new(AdminOperation.Job,JobAction.logs,Key:"user-job"),"fixture",owner.Sid,owner);
     Check(readback.Job is {State:JobState.COMPLETED,Execution:{ExecutionContext:CommandContext.USER,AuditPersisted:true,ExecutionSessionId:1}},"user.persisted_context");
     Check(routing.Dispatch(req,"fixture",owner.Sid,laterLogin).Status==StatusCode.CONFLICT,"user.no_replay_new_logon");
+    // Real PowerShell result through the real coordinator and real SQLite.
+    // The fixture intentionally does not impersonate another Windows logon.
+    foreach(string errorScript in new[]{
+        "[Console]::Error.Write(('e'*15999))",
+        "[Console]::Error.Write(('e'*16000))",
+        "[Console]::Out.Write(('o'*30000)); [Console]::Error.Write(('e'*30000))"})
+    {
+        string key="bounded-output-"+Guid.NewGuid().ToString("N");
+        routing.DispatchWorker(new(WorkerAction.poll),owner);
+        var accepted=routing.Dispatch(req with {Key=key,Command=errorScript},"fixture",owner.Sid,owner);
+        var claim=routing.DispatchWorker(new(WorkerAction.poll),owner).Work;
+        Check(accepted.Status==StatusCode.OK && claim is not null && claim.JobId==accepted.Job?.JobId,
+            "h1.real_output_claim");
+        if(claim is null)throw new InvalidOperationException("Missing bounded output lease");
+        var actual=await Run(claim.Command);
+        Check(actual.Status==ExecutionState.COMPLETED && actual.Stderr.Length<=PowerShellRunner.OutputLimit,
+            "h1.real_runner_contract");
+        Check(routing.DispatchWorker(new(WorkerAction.complete,claim.LeaseId,actual),owner).Status==StatusCode.OK,
+            "h1.real_completion_ack");
+        var saved=routing.Dispatch(new(AdminOperation.Job,JobAction.logs,Key:key),"fixture",owner.Sid,owner);
+        Check(saved.Job is {State:JobState.COMPLETED,Execution:{AuditPersisted:true}} &&
+            saved.Job.Execution.Stderr==actual.Stderr && saved.Job.Execution.Stdout==actual.Stdout &&
+            saved.Job.Execution.OutputTruncated==actual.OutputTruncated,"h1.real_output_persisted");
+    }
 }
 finally{Directory.Delete(routingRoot,true);}
 
@@ -397,3 +461,153 @@ Check(ExecutionBudget.Evaluate(5,32*gib,20*gib,20*gib).CanStart,"parallel.capaci
 Check(!ExecutionBudget.Evaluate(5,32*gib,1*gib,20*gib).CanStart,"parallel.physical_pressure");
 Check(!ExecutionBudget.Evaluate(5,32*gib,20*gib,1*gib).CanStart,"parallel.commit_pressure");
 Check(ExecutionBudget.Evaluate(40,128*gib,100*gib,100*gib).CanStart,"parallel.no_fixed_slot_count");
+
+
+// USER fault injection through the production execution loop (no live service or real commands).
+Check(UserWorker.RemainingAuthorityMs(1000,13000)==0 &&
+    UserWorker.RemainingAuthorityMs(1000,12000)==1000,"user.authority_from_request_dispatch");
+Check(UserWorker.IsTransient(StatusCode.IPC_TIMEOUT) &&
+    !UserWorker.IsTransient(StatusCode.LEASE_LOST) &&
+    !UserWorker.IsTransient(StatusCode.ACCESS_DENIED),"user.authoritative_denial_not_retryable");
+var workerFixture=new UserWork("lease","job",1,"fixture",30,Environment.SystemDirectory);
+var finished=new TaskCompletionSource<ExecutionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+int pulseCount=0,launches=0;
+ExecutionResult? delivered=null;
+WorkerObservation? workerObservation=null;
+Task<ExecutionResult> FakeRunner(string cmd,int timeout,string? cwd,CancellationToken token)
+{
+    launches++;
+    token.Register(()=>finished.TrySetResult(new(ExecutionState.CANCELLED_UNKNOWN_EFFECT,"fixture-hash",1)));
+    return finished.Task;
+}
+Task<AdminResponse> TransientThenSuccess(WorkerRequest request,CancellationToken token)
+{
+    if(request.Action==WorkerAction.complete)
+    {
+        delivered=request.Result;
+        return Task.FromResult(new AdminResponse(StatusCode.OK,"complete",Worker:new(StatusCode.OK)));
+    }
+    pulseCount++;
+    if(pulseCount==1)return Task.FromResult(new AdminResponse(StatusCode.IPC_TIMEOUT,"injected-timeout"));
+    finished.TrySetResult(new(ExecutionState.COMPLETED,"fixture-hash",10,0));
+    return Task.FromResult(new AdminResponse(StatusCode.OK,"pulse",Worker:new(StatusCode.OK)));
+}
+await UserWorker.ExecuteAsync(workerFixture,Environment.TickCount64,TransientThenSuccess,FakeRunner,
+    CancellationToken.None,TimeSpan.FromMilliseconds(1),observe:value=>workerObservation=value).WaitAsync(TimeSpan.FromSeconds(5));
+Check(launches==1 && pulseCount==2 &&
+    delivered is {Status:ExecutionState.COMPLETED,Stage:null} &&
+    workerObservation is {Signal:WorkerStopSignal.NONE,TransientFailures:1,LastFailure:StatusCode.IPC_TIMEOUT,Correlation:"injected-timeout"},
+    "user.transient_ipc_does_not_cancel_or_replay");
+
+finished=new(TaskCreationOptions.RunContinuationsAsynchronously);
+delivered=null;
+launches=0;
+Task<AdminResponse> LeaseLost(WorkerRequest request,CancellationToken token)
+{
+    if(request.Action==WorkerAction.complete)delivered=request.Result;
+    return Task.FromResult(new AdminResponse(StatusCode.LEASE_LOST,"lease-lost",Worker:new(StatusCode.LEASE_LOST)));
+}
+await UserWorker.ExecuteAsync(workerFixture,Environment.TickCount64,LeaseLost,FakeRunner,
+    CancellationToken.None,TimeSpan.FromMilliseconds(1)).WaitAsync(TimeSpan.FromSeconds(5));
+Check(launches==1 && delivered is {Status:ExecutionState.CANCELLED_UNKNOWN_EFFECT,
+    Stage:"USER_LEASE_LOST"},"user.authoritative_lease_loss_stops");
+
+finished=new(TaskCreationOptions.RunContinuationsAsynchronously);
+delivered=null;
+launches=0;
+Task<AdminResponse> ExplicitCancel(WorkerRequest request,CancellationToken token)
+{
+    if(request.Action==WorkerAction.complete)delivered=request.Result;
+    return Task.FromResult(new AdminResponse(StatusCode.OK,"cancel",Worker:new(StatusCode.OK,CancelRequested:true)));
+}
+await UserWorker.ExecuteAsync(workerFixture,Environment.TickCount64,ExplicitCancel,FakeRunner,
+    CancellationToken.None,TimeSpan.FromMilliseconds(1)).WaitAsync(TimeSpan.FromSeconds(5));
+Check(launches==1 && delivered is {Status:ExecutionState.CANCELLED_UNKNOWN_EFFECT,
+    Stage:"USER_OPERATOR_CANCELLED"},"user.explicit_cancel_distinguished");
+
+using(var siblingLifetime=new CancellationTokenSource())
+{
+    var sibling=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var siblingTask=UserWorker.RunIsolatedAsync(()=>sibling.Task,_=>siblingLifetime.Cancel());
+    Exception? observedFault=null;
+    await UserWorker.RunIsolatedAsync(()=>Task.FromException(new IOException("injected")),e=>observedFault=e);
+    Check(observedFault is IOException && !siblingTask.IsCompleted && !siblingLifetime.IsCancellationRequested,
+        "user.faulted_job_does_not_cancel_sibling");
+    sibling.SetResult();
+    await siblingTask;
+}
+
+// Completion delivery: exact durable readback after lost ACK, bounded identical
+// retry when no commit is observed, and no false success for a different result.
+var receiptPayload=new ExecutionResult(ExecutionState.COMPLETED,"receipt-hash",33,0,"one");
+var persistedReceipt=receiptPayload with {AuditPersisted=true,ExecutionContext=CommandContext.USER,
+    ExecutionSid="fixture",ExecutionSessionId=1,QueueWaitMs=2,StepStartedUtc="start",StepFinishedUtc="finish"};
+int completionCalls=0,readbackCalls=0;
+Task<AdminResponse> LostAcknowledgement(WorkerRequest request,CancellationToken token)
+{
+    completionCalls++;
+    Check(request.Action==WorkerAction.complete && request.Result==receiptPayload,"user.completion_retry_same_payload");
+    return Task.FromResult(new AdminResponse(StatusCode.IPC_TIMEOUT,"lost-ack"));
+}
+Task<ExecutionResult?> CommittedReadback(UserWork work,CancellationToken token)
+{
+    readbackCalls++;
+    return Task.FromResult<ExecutionResult?>(persistedReceipt);
+}
+var unconfirmed=await UserWorker.ConfirmCompletionAsync(workerFixture,receiptPayload,LostAcknowledgement,
+    CommittedReadback,CancellationToken.None);
+Check(unconfirmed is null && completionCalls==1 && readbackCalls==1,"user.lost_ack_exact_durable_readback");
+completionCalls=0;
+readbackCalls=0;
+Task<ExecutionResult?> DifferentReadback(UserWork work,CancellationToken token)
+{
+    readbackCalls++;
+    return Task.FromResult<ExecutionResult?>(persistedReceipt with {Stdout="different"});
+}
+unconfirmed=await UserWorker.ConfirmCompletionAsync(workerFixture,receiptPayload,LostAcknowledgement,
+    DifferentReadback,CancellationToken.None);
+Check(unconfirmed?.Code==StatusCode.IPC_TIMEOUT && completionCalls==2 && readbackCalls==2,
+    "user.completion_mismatch_never_confirmed");
+Check(!UserWorker.CompletionMatches(receiptPayload,persistedReceipt with {AuditPersisted=false}),
+    "user.completion_not_durable_never_confirmed");
+
+// Frozen public/durable schema-4 field set from fed40dc0. The old strict JSON
+// reader rejects unknown members. Keep new causes in the existing stage string.
+var rollbackShape=System.Text.Json.JsonSerializer.Serialize(delivered,PipeWire.Json);
+using(var rollbackJson=System.Text.Json.JsonDocument.Parse(rollbackShape))
+{
+    string[] legacyFields=["status","command_sha256","elapsed_ms","exit_code","stdout","stderr",
+        "warnings","output_truncated","stage","native_error","job_id","operation_key","correlation_id",
+        "audit_persisted","execution_context","execution_sid","execution_session_id","queue_wait_ms",
+        "step_started_utc","step_finished_utc","timing","pruned_output"];
+    Check(rollbackJson.RootElement.EnumerateObject().Select(p=>p.Name).ToHashSet(StringComparer.Ordinal)
+        .SetEquals(legacyFields) && rollbackJson.RootElement.GetProperty("stage").GetString()=="USER_OPERATOR_CANCELLED",
+        "h1.schema4_durable_result_exact_legacy_shape");
+}
+
+// Actual elapsed watchdog budget: a late successful heartbeat may not revive
+// an execution after the last confirmed authority has expired.
+var expiredClaim=new UserWork("lease-expiry","job-expiry",1,"fixture",60,Environment.SystemDirectory);
+var stopped=new TaskCompletionSource<ExecutionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+ExecutionResult? lateResult=null;
+int lateHeartbeat=0;
+Task<ExecutionResult> AuthorityRunner(string command,int timeout,string? cwd,CancellationToken cancel)
+{
+    cancel.Register(()=>stopped.TrySetResult(new(ExecutionState.CANCELLED_UNKNOWN_EFFECT,"fixture-hash",1,Stage:"PROCESS_INTERRUPTED")));
+    return stopped.Task;
+}
+async Task<AdminResponse> LateHeartbeat(WorkerRequest request,CancellationToken cancel)
+{
+    if(request.Action==WorkerAction.complete)
+    {
+        lateResult=request.Result;
+        return new(StatusCode.OK,"complete",Worker:new(StatusCode.OK));
+    }
+    lateHeartbeat++;
+    await Task.Delay(3000,cancel);
+    return new(StatusCode.OK,"late-success",Worker:new(StatusCode.OK));
+}
+await UserWorker.ExecuteAsync(expiredClaim,Environment.TickCount64-10000,LateHeartbeat,AuthorityRunner,
+    CancellationToken.None,TimeSpan.FromMilliseconds(10)).WaitAsync(TimeSpan.FromSeconds(10));
+Check(lateHeartbeat==1 && lateResult is {Status:ExecutionState.CANCELLED_UNKNOWN_EFFECT,Stage:"USER_WATCHDOG_EXPIRED"},
+    "h1.late_heartbeat_cannot_revive_expired_authority");
