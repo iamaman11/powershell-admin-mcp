@@ -45,7 +45,26 @@ var nonTerminating = await Run("Write-Error 'expected error' -ErrorAction Contin
 Check(nonTerminating.Status == ExecutionState.COMMAND_ERROR && nonTerminating.Stderr.Contains("expected error"), "r2.nonterminating_error");
 var large = await Run("[Console]::Out.Write(('a' * 100000)); [Console]::Error.Write(('b' * 100000))");
 Check(large.Status == ExecutionState.COMPLETED && large.OutputTruncated && large.Stdout.Length == 16000 &&
-    large.Stderr.TrimEnd().Length == 16000, "r2.bounded_concurrent_drain");
+    large.Stderr.Length == PowerShellRunner.OutputLimit, "r2.bounded_concurrent_drain");
+foreach(int count in new[]{15998,15999,16000,30000})
+{
+    var boundary=await Run($"[Console]::Error.Write(('e'*{count})); Write-Output 'boundary'");
+    Check(boundary.Status==ExecutionState.COMPLETED &&
+        boundary.Stderr==new string('e',Math.Min(count,PowerShellRunner.OutputLimit)) &&
+        boundary.OutputTruncated==(count>PowerShellRunner.OutputLimit),
+        $"h1.stderr_exact_boundary_{count}");
+}
+var lf=await Run("for($i=0;$i -lt 8000;$i++){[Console]::Error.Write(\"e+`n\")}");
+Check(lf.Status==ExecutionState.COMPLETED && lf.Stderr.Length==PowerShellRunner.OutputLimit &&
+    lf.Stderr==string.Concat(Enumerable.Repeat("e+",5333).Select(value=>value+"\n"))+"e" &&
+    lf.OutputTruncated,"h1.lf_stream_never_expands");
+var unicodeBoundary=await Run("[Console]::Error.Write(('e'*15999)+'🚀')");
+Check(unicodeBoundary.Status==ExecutionState.COMPLETED && unicodeBoundary.Stderr==new string('e',15999) &&
+    unicodeBoundary.OutputTruncated,"h1.stderr_surrogate_safe_boundary");
+var mixedWarnings=await Run("Write-Warning 'fixture'; [Console]::Error.Write(('e'*30000))");
+Check(mixedWarnings.Status==ExecutionState.COMPLETED && mixedWarnings.Warnings?.Contains("fixture")==true &&
+    mixedWarnings.Stderr.Length<PowerShellRunner.OutputLimit && mixedWarnings.OutputTruncated,
+    "h1.warning_filter_preserves_capture_bound");
 var cwd = await Run("(Get-Location).Path", cwd: Path.GetTempPath());
 Check(cwd.Status == ExecutionState.COMPLETED && Path.TrimEndingDirectorySeparator(cwd.Stdout.Trim()) ==
     Path.TrimEndingDirectorySeparator(Path.GetTempPath()), "r2.working_directory");
@@ -373,6 +392,30 @@ try
     var readback=routing.Dispatch(new(AdminOperation.Job,JobAction.logs,Key:"user-job"),"fixture",owner.Sid,owner);
     Check(readback.Job is {State:JobState.COMPLETED,Execution:{ExecutionContext:CommandContext.USER,AuditPersisted:true,ExecutionSessionId:1}},"user.persisted_context");
     Check(routing.Dispatch(req,"fixture",owner.Sid,laterLogin).Status==StatusCode.CONFLICT,"user.no_replay_new_logon");
+    // Real PowerShell result through the real coordinator and real SQLite.
+    // The fixture intentionally does not impersonate another Windows logon.
+    foreach(string errorScript in new[]{
+        "[Console]::Error.Write(('e'*15999))",
+        "[Console]::Error.Write(('e'*16000))",
+        "[Console]::Out.Write(('o'*30000)); [Console]::Error.Write(('e'*30000))"})
+    {
+        string key="bounded-output-"+Guid.NewGuid().ToString("N");
+        routing.DispatchWorker(new(WorkerAction.poll),owner);
+        var accepted=routing.Dispatch(req with {Key=key,Command=errorScript},"fixture",owner.Sid,owner);
+        var claim=routing.DispatchWorker(new(WorkerAction.poll),owner).Work;
+        Check(accepted.Status==StatusCode.OK && claim is not null && claim.JobId==accepted.Job?.JobId,
+            "h1.real_output_claim");
+        if(claim is null)throw new InvalidOperationException("Missing bounded output lease");
+        var actual=await Run(claim.Command);
+        Check(actual.Status==ExecutionState.COMPLETED && actual.Stderr.Length<=PowerShellRunner.OutputLimit,
+            "h1.real_runner_contract");
+        Check(routing.DispatchWorker(new(WorkerAction.complete,claim.LeaseId,actual),owner).Status==StatusCode.OK,
+            "h1.real_completion_ack");
+        var saved=routing.Dispatch(new(AdminOperation.Job,JobAction.logs,Key:key),"fixture",owner.Sid,owner);
+        Check(saved.Job is {State:JobState.COMPLETED,Execution:{AuditPersisted:true}} &&
+            saved.Job.Execution.Stderr==actual.Stderr && saved.Job.Execution.Stdout==actual.Stdout &&
+            saved.Job.Execution.OutputTruncated==actual.OutputTruncated,"h1.real_output_persisted");
+    }
 }
 finally{Directory.Delete(routingRoot,true);}
 

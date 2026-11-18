@@ -581,7 +581,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
             }
             if(request.Action!=WorkerAction.complete || request.Result is not {} result ||
                 result.CommandSha256!=Hash(current.Work.Script) || result.ElapsedMs<0 ||
-                result.Stdout is null || result.Stderr is null || result.Stdout.Length>16000 || result.Stderr.Length>16000 ||
+                result.Stdout is null || result.Stderr is null || result.Stdout.Length>PowerShellRunner.OutputLimit || result.Stderr.Length>PowerShellRunner.OutputLimit ||
                 (result.Status==ExecutionState.COMPLETED && result.ExitCode!=0) ||
                 result.Status is not (ExecutionState.COMPLETED or ExecutionState.COMMAND_ERROR or ExecutionState.INVALID_ARGUMENT
                     or ExecutionState.POWERSHELL_NOT_FOUND or ExecutionState.EXECUTION_FAILED or ExecutionState.TIMEOUT_BEFORE_EXECUTION

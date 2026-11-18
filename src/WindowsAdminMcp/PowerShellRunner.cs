@@ -51,7 +51,7 @@ public sealed record ExecutionResult(
 
 internal static class PowerShellRunner
 {
-    private const int OutputLimit = 16000;
+    internal const int OutputLimit = 16000;
     internal static string Executable => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
         "PowerShell", "7", "pwsh.exe");
 
@@ -134,11 +134,20 @@ internal static class PowerShellRunner
             var errors = await err;
             var warnings = new List<string>();
             var diagnostic = new StringBuilder();
-            foreach (string text in errors.Text.Split('\n'))
+            // Preserve the retained stream's actual line endings, including
+            // an unterminated last line. Filtering warnings must never expand
+            // the raw capture beyond the shared result contract.
+            string[] lines = errors.Text.Split('\n');
+            for (int i = 0; i < lines.Length; i++)
             {
+                string text = lines[i];
                 if (text.StartsWith("MCP_WARNING:", StringComparison.Ordinal))
                     warnings.Add(text[12..].TrimEnd('\r'));
-                else if (text.Length > 0) diagnostic.AppendLine(text.TrimEnd('\r'));
+                else
+                {
+                    diagnostic.Append(text);
+                    if (i < lines.Length - 1) diagnostic.Append('\n');
+                }
             }
             ExecutionState state = interrupted ?? (await sent ?
                 (exit == 0 ? ExecutionState.COMPLETED : ExecutionState.COMMAND_ERROR) : ExecutionState.OUTPUT_INCOMPLETE);
