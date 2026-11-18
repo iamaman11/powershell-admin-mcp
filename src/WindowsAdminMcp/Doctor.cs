@@ -68,7 +68,7 @@ internal static class Doctor
         var store=service?response.Store:null;
         var storeReason=store is null?DoctorReason.STORE_NOT_CONFIRMED:
             store.NeedsReconciliation>0?DoctorReason.RECONCILIATION_REQUIRED:
-            store.Detailed>=store.TotalLimit || store.Queued+store.Running+store.CancelRequested+store.WaitingForResume+store.WaitingForReboot>=store.ActiveLimit
+            store.Detailed>=store.TotalLimit
             ?DoctorReason.STORE_AT_CAPACITY:store.CapacityWarning?DoctorReason.STORE_CAPACITY_WARNING:DoctorReason.OBSERVED;
         Add(DoctorComponent.Store,storeReason==DoctorReason.OBSERVED?DoctorState.OK:DoctorState.DEGRADED,storeReason,
             storeReason==DoctorReason.OBSERVED?DoctorAction.NONE:DoctorAction.INSPECT_JOBS);

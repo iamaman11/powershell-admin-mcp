@@ -10,14 +10,13 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
     private readonly object gate = new();
     private readonly SemaphoreSlim wake = new(0, 1);
     private SqliteConnection? connection;
-    private CancellationTokenSource? active;
-    private string? activeId;
+    private readonly Dictionary<string,Work> active=new(StringComparer.Ordinal);
     private readonly Dictionary<UserSession,long> workers=new();
-    private UserLease? userLease;
+    private readonly Dictionary<string,UserLease> leases=new(StringComparer.Ordinal);
     private const long PresenceMs=6000, LeaseMs=20000;
     private long recoveryHoldUntil;
     private SqliteConnection Db => connection ?? throw new InvalidOperationException("Store unavailable");
-    private const string Columns = "job_id,op_key,state,command_hash,created_utc,updated_utc,completed_steps,step_count,reboot_evidence,reconciliation,history_pruned_utc,user_sid,user_session,user_logon_sid";
+    private const string Columns = "job_id,op_key,state,command_hash,created_utc,updated_utc,completed_steps,step_count,reboot_evidence,reconciliation,history_pruned_utc,user_sid,user_session,user_logon_sid,resource_key";
     internal const int DetailedLimit=10000, RetentionDays=30, PruneBatch=8;
     private static string Now() => DateTimeOffset.UtcNow.ToString("O");
     private static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
@@ -63,7 +62,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                   created_utc TEXT NOT NULL, updated_utc TEXT NOT NULL,
                   completed_steps INTEGER NOT NULL DEFAULT 0, step_count INTEGER NOT NULL CHECK(step_count BETWEEN 1 AND 8),
                   reboot_stamp TEXT, reboot_evidence TEXT, reconciliation BLOB, history_pruned_utc TEXT,
-                  user_sid TEXT, user_session INTEGER, user_logon_sid TEXT,
+                  user_sid TEXT, user_session INTEGER, user_logon_sid TEXT, resource_key TEXT,
                   CHECK((user_sid IS NULL AND user_session IS NULL AND user_logon_sid IS NULL) OR
                         (user_sid IS NOT NULL AND user_session>0 AND user_logon_sid IS NOT NULL)),
                   CHECK(completed_steps BETWEEN 0 AND step_count),
@@ -92,6 +91,8 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                     DROP TABLE jobs_legacy;
                     """,tx);
                 migration.ExecuteNonQuery();
+                using var exclusive=Command("UPDATE jobs SET resource_key='*' WHERE EXISTS(SELECT 1 FROM job_steps s WHERE s.job_id=jobs.job_id AND s.reboot_after=1)",tx);
+                exclusive.ExecuteNonQuery();
             }
             using(var check=Command("PRAGMA foreign_key_check",tx))
             using(var rows=check.ExecuteReader())
@@ -145,7 +146,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
             using var row=cmd.ExecuteReader();
             if(!row.Read())throw new InvalidOperationException("Store count unavailable.");
             return new(row.GetInt64(0),row.GetInt64(1),row.GetInt64(2),row.GetInt64(3),row.GetInt64(4),
-                row.GetInt64(5),row.GetInt64(6),row.GetInt64(7),row.GetInt64(8),row.GetInt64(9),StoreSchema.Current,16,DetailedLimit,row.GetInt64(10),row.GetInt64(11),row.GetInt64(12),RetentionDays);
+                row.GetInt64(5),row.GetInt64(6),row.GetInt64(7),row.GetInt64(8),row.GetInt64(9),StoreSchema.Current,null,DetailedLimit,row.GetInt64(10),row.GetInt64(11),row.GetInt64(12),RetentionDays,ExecutionBudget.Observe(active.Count));
         }
     }
 
@@ -167,7 +168,8 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
             ((request.Decision is not null || request.Evidence is not null) && action!=JobAction.reconcile) ||
             (request.RetainDays is not null && action!=JobAction.prune) || request.RetainDays is <0 or >RetentionDays ||
             (request.ExecutionContext is not null && action!=JobAction.submit) ||
-            (request.IncludeInterruptedCommand && action!=JobAction.logs))
+            (request.IncludeInterruptedCommand && action!=JobAction.logs) ||
+            (request.ResourceKey is not null && action!=JobAction.submit))
             return Reply(StatusCode.INVALID_ARGUMENT);
 
         lock (gate)
@@ -191,8 +193,16 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 string cwd = request.WorkingDirectory ?? (owner is null?Environment.SystemDirectory:"");
                 if(cwd.Length>1024 || (cwd.Length==0 && request.WorkingDirectory is not null) ||
                     (cwd.Length!=0 && !Path.IsPathFullyQualified(cwd)))return Reply(StatusCode.INVALID_ARGUMENT);
-                string payload=owner is null?Hash(JsonSerializer.Serialize(new {steps,cwd})):
-                    Hash(JsonSerializer.Serialize(new {steps,cwd,owner}));
+                string? resource=request.ResourceKey?.Trim().ToLowerInvariant();
+                if(resource is {Length:0 or >128} || (resource is not null && resource.Any(char.IsControl)))
+                    return Reply(StatusCode.INVALID_ARGUMENT);
+                bool rebootPlan=steps.Any(s=>s.RebootAfter);
+                if(rebootPlan && resource is not (null or "*"))return Reply(StatusCode.INVALID_ARGUMENT);
+                // Preserve legacy idempotency hashes for clients omitting the new argument.
+                string payload=resource is null
+                    ?owner is null?Hash(JsonSerializer.Serialize(new {steps,cwd})):Hash(JsonSerializer.Serialize(new {steps,cwd,owner}))
+                    :Hash(JsonSerializer.Serialize(new {steps,cwd,owner,resource}));
+                if(rebootPlan)resource="*";
                 using var tx = Db.BeginTransaction();
                 var prior = Find(key, null, tx);
                 if (prior is not null)
@@ -204,8 +214,6 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 }
                 if(owner is null && !Directory.Exists(cwd))return Reply(StatusCode.INVALID_ARGUMENT);
                 if(owner is not null && !UserAvailable(owner))return Reply(StatusCode.USER_CONTEXT_UNAVAILABLE);
-                using var count = Command("SELECT count(*) FROM jobs WHERE state IN ('QUEUED','RUNNING','CANCEL_REQUESTED','WAITING_FOR_RESUME','WAITING_FOR_REBOOT')", tx);
-                if ((long)count.ExecuteScalar()! >= 16) return Reply(StatusCode.BUSY);
                 if(CountDetails(tx)>=DetailedLimit)
                 {
                     PruneExpired(tx,RetentionDays);
@@ -219,12 +227,12 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 string id = Guid.NewGuid().ToString("N"), now = Now(),
                     hash = steps.Length == 1 ? Hash(steps[0].Command) : Hash(JsonSerializer.Serialize(steps));
                 using var insert = Command("""
-                    INSERT INTO jobs(job_id,op_key,payload_hash,command_hash,cwd,state,created_utc,updated_utc,step_count,user_sid,user_session,user_logon_sid)
-                    VALUES($id,$key,$payload,$hash,$cwd,'QUEUED',$now,$now,$count,$sid,$session,$logon)
+                    INSERT INTO jobs(job_id,op_key,payload_hash,command_hash,cwd,state,created_utc,updated_utc,step_count,user_sid,user_session,user_logon_sid,resource_key)
+                    VALUES($id,$key,$payload,$hash,$cwd,'QUEUED',$now,$now,$count,$sid,$session,$logon,$resource)
                     """, tx, ("$id",id), ("$key",key), ("$payload",payload), ("$hash",hash),
                     ("$cwd",JobDataProtection.Protect(cwd,id,"cwd")), ("$now",now), ("$count",steps.Length),
                     ("$sid",(object?)owner?.Sid??DBNull.Value),("$session",(object?)owner?.SessionId??DBNull.Value),
-                    ("$logon",(object?)owner?.LogonSid??DBNull.Value));
+                    ("$logon",(object?)owner?.LogonSid??DBNull.Value),("$resource",(object?)resource??DBNull.Value));
                 insert.ExecuteNonQuery();
                 for (int i = 0; i < steps.Length; i++)
                 {
@@ -242,7 +250,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 Signal();
                 logger.LogInformation("Job admitted {JobId} correlation {Correlation}, step count {Count}",id,correlation,steps.Length);
                 return Reply(StatusCode.OK,new(id,key,JobState.QUEUED,hash,now,now,TotalSteps:steps.Length,ExecutionContext:context,ExecutionSid:owner?.Sid??"S-1-5-18",
-                    ExecutionSessionId:owner?.SessionId??0),store:usage);
+                    ExecutionSessionId:owner?.SessionId??0,ResourceKey:resource),store:usage);
             }
 
             if (request.Command is not null || request.WorkingDirectory is not null || request.Steps is not null)
@@ -260,7 +268,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 while(reader.Read())
                 {
                     if(jobs.Count==size){next=last;break;}
-                    jobs.Add(Read(reader,includeReconciliation:false));last=reader.GetInt64(14);
+                    jobs.Add(Read(reader,includeReconciliation:false));last=reader.GetInt64(15);
                 }
                 reader.Close();
                 return Reply(StatusCode.OK,jobs:jobs.ToArray(),nextBeforeSeq:next,store:Summary());
@@ -282,8 +290,14 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 callerSid!="S-1-5-18" && callerSid!=job.ExecutionSid)return Reply(StatusCode.ACCESS_DENIED);
             if(action==JobAction.status)
             {
-                if(job.ExecutionContext==CommandContext.USER && job.State==JobState.QUEUED)
-                    job=job with {WaitingForUser=!UserAvailable(ReadOwner(job.JobId,change))};
+                if(job.State==JobState.QUEUED)
+                {
+                    bool missing=job.ExecutionContext==CommandContext.USER && !UserAvailable(ReadOwner(job.JobId,change));
+                    var reason=missing?QueueWaitReason.USER_UNAVAILABLE:Environment.TickCount64<recoveryHoldUntil?
+                        QueueWaitReason.RECOVERY_HOLD:!ExecutionBudget.Observe(active.Count).CanStart?QueueWaitReason.RESOURCE_PRESSURE:
+                        Blocked(job.ResourceKey)?QueueWaitReason.RESOURCE_BUSY:QueueWaitReason.READY_OR_EARLIER_JOB;
+                    job=job with {WaitingForUser=job.ExecutionContext==CommandContext.USER?missing:null,QueueReason=reason};
+                }
                 return Reply(StatusCode.OK,job);
             }
             if (action == JobAction.logs)
@@ -360,11 +374,11 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 return Reply(StatusCode.OK,job with {State=JobState.CANCELLED,UpdatedUtc=now});
             }
             if (job.State is JobState.CANCEL_REQUESTED or JobState.CANCELLED) return Reply(StatusCode.OK,job);
-            if (job.State != JobState.RUNNING || activeId != job.JobId || active is null)
+            if (job.State != JobState.RUNNING || !active.TryGetValue(job.JobId,out var running))
                 return Reply(StatusCode.NOT_CANCELLABLE,job);
             string when=Now();
             using var cancel=Command("UPDATE jobs SET state='CANCEL_REQUESTED',updated_utc=$now WHERE job_id=$id",change,("$now",when),("$id",job.JobId));
-            cancel.ExecuteNonQuery();change.Commit();active.Cancel();
+            cancel.ExecuteNonQuery();change.Commit();running.Cancel.Cancel();
             return Reply(StatusCode.OK,job with {State=JobState.CANCEL_REQUESTED,UpdatedUtc=when});
         }
     }
@@ -397,7 +411,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
         HistoryPrunedUtc:r.IsDBNull(10)?null:r.GetString(10),
         ExecutionContext:r.IsDBNull(11)?CommandContext.SYSTEM:CommandContext.USER,
         ExecutionSid:r.IsDBNull(11)?"S-1-5-18":r.GetString(11),
-        ExecutionSessionId:r.IsDBNull(12)?0:r.GetInt32(12));
+        ExecutionSessionId:r.IsDBNull(12)?0:r.GetInt32(12),ResourceKey:r.IsDBNull(14)?null:r.GetString(14));
     private SqliteCommand Command(string sql,SqliteTransaction? tx,params (string Name,object Value)[] parameters)
     {
         var cmd=Db.CreateCommand();cmd.Transaction=tx;cmd.CommandText=sql;
@@ -459,7 +473,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
         }
     }
 
-    private sealed record Work(string Id,int Index,int Count,string Script,int Timeout,string Cwd,bool PauseAfter,bool RebootAfter,CancellationTokenSource Cancel,UserSession? Owner,long QueueWaitMs,string StartedUtc);
+    private sealed record Work(string Id,int Index,int Count,string Script,int Timeout,string Cwd,bool PauseAfter,bool RebootAfter,CancellationTokenSource Cancel,UserSession? Owner,long QueueWaitMs,string StartedUtc,string? ResourceKey);
     private sealed record UserLease(string Id,Work Work,long Expires);
     private UserSession? ReadOwner(string id,SqliteTransaction tx)
     {
@@ -474,16 +488,28 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
             Environment.TickCount64-seen<PresenceMs;
     }
 
-    // All execution contexts compete for the same FIFO among runnable jobs.
-    // A missing user's old logon never blocks unrelated SYSTEM jobs.
-    private (long Seq,UserSession? Owner,string QueuedUtc)? NextRunnable(SqliteTransaction tx)
+    private bool Blocked(string? resource)
+        =>active.Values.Any(w=>w.ResourceKey=="*" || resource=="*" ||
+            (resource is not null && StringComparer.OrdinalIgnoreCase.Equals(resource,w.ResourceKey)));
+
+    // Same durable FIFO among eligible work. A blocked ordinary resource does
+    // not block unrelated work; a reachable exclusive job drains active work
+    // before starting rather than allowing an endless stream to starve it.
+    private (long Seq,UserSession? Owner,string QueuedUtc,string? Resource)? NextRunnable(SqliteTransaction tx)
     {
-        using var cmd=Command("SELECT seq,user_sid,user_session,user_logon_sid,updated_utc FROM jobs WHERE state='QUEUED' ORDER BY seq",tx);
+        using var cmd=Command("SELECT seq,user_sid,user_session,user_logon_sid,updated_utc,resource_key FROM jobs WHERE state='QUEUED' ORDER BY seq",tx);
         using var row=cmd.ExecuteReader();
         while(row.Read())
         {
             UserSession? owner=row.IsDBNull(1)?null:new(row.GetString(1),row.GetInt32(2),row.GetString(3));
-            if(owner is null||UserAvailable(owner))return (row.GetInt64(0),owner,row.GetString(4));
+            if(owner is not null && !UserAvailable(owner))continue;
+            string? resource=row.IsDBNull(5)?null:row.GetString(5);
+            if(Blocked(resource))
+            {
+                if(resource=="*")return null;
+                continue;
+            }
+            return (row.GetInt64(0),owner,row.GetString(4),resource);
         }
         return null;
     }
@@ -492,7 +518,8 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
     {
         lock(gate)
         {
-            if(stop.IsCancellationRequested || active is not null || Environment.TickCount64<recoveryHoldUntil)return null;
+            if(stop.IsCancellationRequested || Environment.TickCount64<recoveryHoldUntil ||
+                !ExecutionBudget.Observe(active.Count).CanStart)return null;
             using var tx=Db.BeginTransaction();
             var next=NextRunnable(tx);
             if(next is null || next.Value.Owner!=user)return null;
@@ -519,8 +546,10 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 timeout=row.GetInt32(1);pause=row.GetInt32(2)!=0;reboot=row.GetInt32(3)!=0;
             }
             tx.Commit(); // durable start intent
-            active=CancellationTokenSource.CreateLinkedTokenSource(stop);activeId=id;
-            return new(id,index,count,script,timeout,cwd,pause,reboot,active,user,queueWait,started);
+            var work=new Work(id,index,count,script,timeout,cwd,pause,reboot,
+                CancellationTokenSource.CreateLinkedTokenSource(stop),user,queueWait,started,next.Value.Resource);
+            active.Add(id,work);
+            return work;
         }
     }
 
@@ -539,15 +568,15 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 var work=Take(CancellationToken.None,user);
                 if(work is null)return new(StatusCode.OK);
                 var lease=new UserLease(Guid.NewGuid().ToString("N"),work,now+LeaseMs);
-                userLease=lease;
+                leases.Add(lease.Id,lease);
                 return new(StatusCode.OK,new(lease.Id,work.Id,work.Index,work.Script,work.Timeout,work.Cwd));
             }
-            if(userLease is not {} current || current.Work.Owner!=user || current.Id!=request.LeaseId)
+            if(request.LeaseId is null || !leases.TryGetValue(request.LeaseId,out var current) || current.Work.Owner!=user)
                 return new(StatusCode.LEASE_LOST);
             if(request.Action==WorkerAction.heartbeat && request.Result is null)
             {
                 workers[user]=now;
-                userLease=current with {Expires=now+LeaseMs};
+                leases[current.Id]=current with {Expires=now+LeaseMs};
                 return new(StatusCode.OK,CancelRequested:current.Work.Cancel.IsCancellationRequested);
             }
             if(request.Action!=WorkerAction.complete || request.Result is not {} result ||
@@ -569,9 +598,10 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
     {
         lock(gate)
         {
-            if(userLease is {} lease && Environment.TickCount64>=lease.Expires)
+            foreach(var lease in leases.Values.Where(l=>Environment.TickCount64>=l.Expires).ToArray())
             {
                 // A lost worker might already have produced an effect. Never requeue the step.
+                lease.Work.Cancel.Cancel();
                 CompleteWork(lease.Work,new(ExecutionState.EXECUTION_FAILED,Hash(lease.Work.Script),0,
                     Stage:"USER_WORKER_LEASE_LOST"),null);
             }
@@ -620,33 +650,58 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
 
     internal async Task RunAsync(CancellationToken stop)
     {
+        using var lifetime=CancellationTokenSource.CreateLinkedTokenSource(stop);
+        var running=new HashSet<Task>();
         long nextBootProbe=0,nextHistoryMaintenance=0;
-        while(!stop.IsCancellationRequested)
+        try
         {
-            long now=Environment.TickCount64;
-            ExpireUserLease();
-            if(now>=nextBootProbe)
+            while(!stop.IsCancellationRequested)
             {
-                ObserveRebootBoundaries();
-                nextBootProbe=Environment.TickCount64+5000;
+                foreach(var done in running.Where(x=>x.IsCompleted).ToArray())
+                {
+                    running.Remove(done);
+                    await done; // a failed durable transition is fatal, never a successful/forgotten job
+                }
+                long now=Environment.TickCount64;
+                ExpireUserLease();
+                if(now>=nextBootProbe)
+                {
+                    ObserveRebootBoundaries();
+                    nextBootProbe=Environment.TickCount64+5000;
+                }
+                var work=Take(lifetime.Token);
+                if(work is not null)
+                {
+                    // No fixed slot count, no resident PowerShell processes.
+                    // Durable start intent and memory reservation precede launch.
+                    running.Add(Task.Run(()=>ExecuteSystem(work)));
+                    continue;
+                }
+                if(now>=nextHistoryMaintenance)
+                {
+                    MaintainHistory();
+                    nextHistoryMaintenance=Environment.TickCount64+60000;
+                }
+                await wake.WaitAsync(TimeSpan.FromMilliseconds(250),stop);
             }
-            var work=Take(stop);
-            if(work is null)
-            {
-                if(now>=nextHistoryMaintenance){MaintainHistory();nextHistoryMaintenance=Environment.TickCount64+60000;}
-                await wake.WaitAsync(TimeSpan.FromSeconds(1),stop);continue;
-            }
-            // Capture prior boot before this step executes. Even if this step
-            // changes configuration or requests a shutdown, only a committed
-            // success may become a reboot boundary. An interrupted step never will.
-            BootObservation? boot=work.RebootAfter?BootEvidence.Observe():null;
-            var result=work.RebootAfter && boot?.Stamp is null
-                ? new ExecutionResult(ExecutionState.COMMAND_ERROR,Hash(work.Script),0,Stage:"BOOT_EVIDENCE_UNAVAILABLE_BEFORE_EXECUTION")
-                : await PowerShellRunner.RunAsync(work.Script,work.Timeout,work.Cwd,work.Cancel.Token);
-            string? rebootStamp=boot?.Stamp is {} stamp && result.Status==ExecutionState.COMPLETED
-                ? JsonSerializer.Serialize(stamp,PipeWire.Json):null;
-            CompleteWork(work,result,rebootStamp);
         }
+        catch(OperationCanceledException) when(stop.IsCancellationRequested){}
+        finally
+        {
+            await lifetime.CancelAsync();
+            await Task.WhenAll(running); // finish/cancel all owned system trees before disposing store
+        }
+    }
+
+    private async Task ExecuteSystem(Work work)
+    {
+        BootObservation? boot=work.RebootAfter?BootEvidence.Observe():null;
+        var result=work.RebootAfter && boot?.Stamp is null
+            ?new ExecutionResult(ExecutionState.COMMAND_ERROR,Hash(work.Script),0,Stage:"BOOT_EVIDENCE_UNAVAILABLE_BEFORE_EXECUTION")
+            :await PowerShellRunner.RunAsync(work.Script,work.Timeout,work.Cwd,work.Cancel.Token);
+        string? rebootStamp=boot?.Stamp is {} stamp && result.Status==ExecutionState.COMPLETED
+            ?JsonSerializer.Serialize(stamp,PipeWire.Json):null;
+        CompleteWork(work,result,rebootStamp);
     }
 
     private void CompleteWork(Work work,ExecutionResult result,string? rebootStamp)
@@ -693,9 +748,11 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 clear.ExecuteNonQuery();
             }
             tx.Commit(); // output and checkpoint become visible together
-            active=null;activeId=null;userLease=null;work.Cancel.Dispose();Signal();
+                        if(!active.Remove(work.Id))throw new InvalidOperationException("Missing active execution.");
+            foreach(var lease in leases.Values.Where(l=>l.Work.Id==work.Id).ToArray())leases.Remove(lease.Id);
+            work.Cancel.Dispose();Signal();
         }
         logger.LogInformation("Job {JobId} step {Step} finished {State}",work.Id,work.Index,end);
     }
-    public void Dispose(){active?.Cancel();active?.Dispose();connection?.Dispose();wake.Dispose();}
+    public void Dispose(){foreach(var work in active.Values){work.Cancel.Cancel();work.Cancel.Dispose();}connection?.Dispose();wake.Dispose();}
 }

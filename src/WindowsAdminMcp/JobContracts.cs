@@ -41,7 +41,9 @@ public sealed record JobInfo(
     [property:JsonPropertyName("execution_sid")] string? ExecutionSid = null,
     [property:JsonPropertyName("execution_session_id")] int? ExecutionSessionId = null,
     [property:JsonPropertyName("waiting_for_user")] bool? WaitingForUser = null,
-    [property:JsonPropertyName("interrupted_command")] string? InterruptedCommand = null);
+    [property:JsonPropertyName("interrupted_command")] string? InterruptedCommand = null,
+    [property:JsonPropertyName("resource_key")] string? ResourceKey = null,
+    [property:JsonPropertyName("queue_reason")] QueueWaitReason? QueueReason = null);
 
 public sealed record JobReply(
     [property:JsonPropertyName("status")] StatusCode Status,
@@ -56,11 +58,14 @@ public sealed record JobReply(
     [property:JsonPropertyName("timing")] ToolTiming? Timing = null);
 
 public sealed record StoreSummary(long Total,long Queued,long Running,long CancelRequested,long WaitingForResume,
-    long WaitingForReboot,long NeedsReconciliation,long Completed,long Failed,long Cancelled,int SchemaVersion,int ActiveLimit,int TotalLimit,
-    long Detailed,long Pruned,long Reconciled,int RetentionDays)
+    long WaitingForReboot,long NeedsReconciliation,long Completed,long Failed,long Cancelled,int SchemaVersion,int? ActiveLimit,int TotalLimit,
+    long Detailed,long Pruned,long Reconciled,int RetentionDays,ExecutionBudget Budget)
 {
     public bool CapacityWarning => Detailed>=TotalLimit*8/10;
 }
 internal sealed record AdminResponse(StatusCode Code, string Correlation, AdminStatus? Info = null, JobReply? Job = null,
     [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] StoreSummary? Store = null,
     [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] WorkerReply? Worker = null,long? ServiceElapsedMs=null);
+
+[JsonConverter(typeof(JsonStringEnumConverter<QueueWaitReason>))]
+public enum QueueWaitReason { USER_UNAVAILABLE, RECOVERY_HOLD, RESOURCE_PRESSURE, RESOURCE_BUSY, READY_OR_EARLIER_JOB }

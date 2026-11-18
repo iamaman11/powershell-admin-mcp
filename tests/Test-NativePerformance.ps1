@@ -100,7 +100,7 @@ try{
     if($ExerciseJobs){
         $prefix='perf-'+[guid]::NewGuid().ToString('N')
         $sequence++
-        $hold=Call $clients[0] $sequence 'powershell_job' @{action='submit';operation_key=$prefix+'-hold';command="Start-Sleep -Seconds 35; Write-Output 'perf-fixture'";timeout_seconds=55}
+        $hold=Call $clients[0] $sequence 'powershell_job' @{action='submit';operation_key=$prefix+'-hold';resource_key=$prefix;command="Start-Sleep -Seconds 35; Write-Output 'perf-fixture'";timeout_seconds=55}
         if($hold.status -ne 'OK'){throw 'PERF_HOLD_ADMISSION'}
         $watch=[Diagnostics.Stopwatch]::StartNew()
         do{
@@ -111,9 +111,9 @@ try{
             Start-Sleep -Milliseconds 50
         }while($watch.Elapsed.TotalSeconds -lt 10)
         if($s.job.state -ne 'RUNNING'){throw 'PERF_HOLD_NOT_RUNNING'}
-        # Synchronous short client wait while the single runner is occupied.
+        # Synchronous short client wait while the same named resource is occupied.
         $sequence++;$watch=[Diagnostics.Stopwatch]::StartNew()
-        $pending=Call $clients[0] $sequence 'powershell_exec' @{operation_key=$prefix+'-exec-queued';command="Write-Output 'must not execute'";timeout_seconds=1}
+        $pending=Call $clients[0] $sequence 'powershell_exec' @{operation_key=$prefix+'-exec-queued';resource_key=$prefix;command="Write-Output 'must not execute'";timeout_seconds=1}
         $execQueued.Add($watch.Elapsed.TotalMilliseconds)
         if($pending.status -ne 'PENDING' -or -not $pending.job_id){throw 'PERF_PENDING_EXPECTED'}
         $sequence++;$cancelled=Call $clients[1] $sequence 'powershell_job' @{action='cancel';job_id=$pending.job_id}
@@ -125,7 +125,7 @@ try{
             $logs.Add($watch.Elapsed.TotalMilliseconds)
             if($logged.status -ne 'OK'){throw 'PERF_LOGS_FAILED'}
             $sequence++;$watch=[Diagnostics.Stopwatch]::StartNew()
-            $j=Call $clients[$i%3] $sequence 'powershell_job' @{action='submit';operation_key=$prefix+'-'+$i;command="Write-Output 'must remain queued'";timeout_seconds=10}
+            $j=Call $clients[$i%3] $sequence 'powershell_job' @{action='submit';operation_key=$prefix+'-'+$i;resource_key=$prefix;command="Write-Output 'must remain queued'";timeout_seconds=10}
             $admission.Add($watch.Elapsed.TotalMilliseconds)
             if($j.status -ne 'OK' -or $j.job.state -ne 'QUEUED'){throw 'PERF_ADMISSION_FAILED'}
             $sequence++;$watch=[Diagnostics.Stopwatch]::StartNew()

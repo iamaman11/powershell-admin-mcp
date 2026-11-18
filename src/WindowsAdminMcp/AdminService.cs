@@ -115,7 +115,7 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                         request.Command is null && request.Steps is null && request.WorkingDirectory is null &&
                         request.StepIndex is null && request.ExpectedCompletedSteps is null && request.StateFilter is null &&
                         request.PageSize is null && request.BeforeSeq is null && request.Decision is null &&
-                        request.Evidence is null && request.RetainDays is null && !request.IncludeInterruptedCommand && user is not null)
+                        request.Evidence is null && request.RetainDays is null && !request.IncludeInterruptedCommand && request.ResourceKey is null && user is not null)
                     {
                         try
                         {
@@ -133,7 +133,7 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                         request.Steps is null && request.StepIndex is null && request.ExpectedCompletedSteps is null &&
                         request.StateFilter is null && request.PageSize is null && request.BeforeSeq is null &&
                         request.Decision is null && request.Evidence is null && request.RetainDays is null &&
-                        request.ExecutionContext is null && request.Worker is null && !request.IncludeInterruptedCommand)
+                        request.ExecutionContext is null && request.Worker is null && !request.IncludeInterruptedCommand && request.ResourceKey is null)
                     {
                         using var actual = WindowsIdentity.GetCurrent();
                         var status = new AdminStatus(StatusCode.OK, correlation, Environment.ProcessId, Environment.MachineName,

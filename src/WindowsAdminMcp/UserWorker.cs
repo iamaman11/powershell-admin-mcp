@@ -11,18 +11,31 @@ internal static class UserWorker
         using var process=Process.GetCurrentProcess();
         if(identity.IsSystem || process.SessionId==0 || !Environment.UserInteractive ||
             !new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))return;
+        using var lifetime=CancellationTokenSource.CreateLinkedTokenSource(stop);
+        var running=new HashSet<Task>();
         try
         {
             while(!stop.IsCancellationRequested)
             {
+                foreach(var done in running.Where(x=>x.IsCompleted).ToArray())
+                {
+                    running.Remove(done);
+                    await done;
+                }
                 var reply=await Request(new(WorkerAction.poll),stop);
                 if(reply.Code==StatusCode.OK && reply.Worker?.Work is {} work)
-                    await Execute(work,stop);
+                    running.Add(Task.Run(()=>Execute(work,lifetime.Token)));
                 else
-                    await Task.Delay(1000,stop);
+                    await Task.Delay(500,stop);
             }
         }
         catch(OperationCanceledException) when(stop.IsCancellationRequested){}
+        finally
+        {
+            await lifetime.CancelAsync();
+            try { await Task.WhenAll(running); }
+            catch(OperationCanceledException) when(lifetime.IsCancellationRequested){}
+        }
     }
 
     private static Task<AdminResponse> Request(WorkerRequest request,CancellationToken token)=>

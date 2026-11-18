@@ -89,10 +89,11 @@ public sealed class AdminTools
         ReconciliationDecision? decision=null,string? evidence=null,int? retain_days=null,
         [Description("Submit only: USER (default for non-SYSTEM clients) runs in the same authenticated interactive logon; SYSTEM explicitly requests service context.")] CommandContext? execution_context=null,
         [Description("Logs only, unresolved interrupted step. May contain sensitive original script; request only with explicit operator authorization.")] bool include_interrupted_command=false,
+        [Description("Submit only: equal resource_key values serialize active steps, * requests global exclusive execution. Omit for independent work.")] string? resource_key=null,
         CancellationToken cancellationToken=default)
     {
         var reply=await Call(new(AdminOperation.Job,action,operation_key,job_id,command,timeout_seconds,working_directory,steps,step_index,expected_completed_steps,state_filter,page_size,before_seq,decision,evidence,retain_days,
-            execution_context??(action==JobAction.submit?DefaultContext():null),IncludeInterruptedCommand:include_interrupted_command),cancellationToken);
+            execution_context??(action==JobAction.submit?DefaultContext():null),IncludeInterruptedCommand:include_interrupted_command,ResourceKey:resource_key),cancellationToken);
         return reply.Job??new(reply.Code,reply.Correlation,OperationKey:operation_key);
     }
 
@@ -120,7 +121,7 @@ public sealed class AdminTools
     [McpServerTool(Name="powershell_exec",UseStructuredContent=true),
         Description("Execute a short script using the same durable queue. USER is the default for non-SYSTEM clients; specify SYSTEM for service operations. No automatic context fallback. (timeout_seconds 1..120 is the execution deadline, not the client wait). The synchronous wait is at most 90 seconds from tool entry, leaving a 30-second transport reserve. PENDING includes the admitted job_id; inspect it without replay. audit_persisted means a step result has been durably saved, not merely admitted. Disconnect does not cancel an admitted job.")]
     public static async Task<ExecutionResult> Exec(string command,int timeout_seconds=30,
-        string? working_directory=null,string? operation_key=null,CommandContext? execution_context=null,CancellationToken cancellationToken=default)
+        string? working_directory=null,string? operation_key=null,CommandContext? execution_context=null,string? resource_key=null,CancellationToken cancellationToken=default)
     {
         var clock=Stopwatch.StartNew();
         var started=DateTimeOffset.UtcNow;
@@ -139,7 +140,7 @@ public sealed class AdminTools
         if(timeout_seconds is <1 or >120)
             return Finish(new(ExecutionState.INVALID_ARGUMENT,hash,clock.ElapsedMilliseconds,OperationKey:operation_key));
         var admitted=await Job(JobAction.submit,operation_key,command:command,timeout_seconds:timeout_seconds,
-            working_directory:working_directory,execution_context:execution_context,cancellationToken:cancellationToken);
+            working_directory:working_directory,execution_context:execution_context,resource_key:resource_key,cancellationToken:cancellationToken);
         Observe(admitted.Timing);
         if(admitted.Status!=StatusCode.OK || admitted.Job is null)
         {

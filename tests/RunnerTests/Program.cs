@@ -364,3 +364,11 @@ Check(AcceptanceEvidence.Validate(receiptFixture with {TunnelPid=789},receiptFix
     "doctor.receipt_rejects_other_tunnel");
 Check(AcceptanceEvidence.Validate(receiptFixture with {ScreenshotSessionId=2},receiptFixture.Commit,serviceFixture,456,receiptFixture.TunnelStartedUtc,1,observed)==EvidenceCode.INVALID,
     "doctor.receipt_rejects_other_desktop");
+
+
+// Deterministic budget arithmetic: no fixed worker count, fail closed on memory pressure.
+const ulong gib=1024UL*1024UL*1024UL;
+Check(ExecutionBudget.Evaluate(5,32*gib,20*gib,20*gib).CanStart,"parallel.capacity_above_four");
+Check(!ExecutionBudget.Evaluate(5,32*gib,1*gib,20*gib).CanStart,"parallel.physical_pressure");
+Check(!ExecutionBudget.Evaluate(5,32*gib,20*gib,1*gib).CanStart,"parallel.commit_pressure");
+Check(ExecutionBudget.Evaluate(40,128*gib,100*gib,100*gib).CanStart,"parallel.no_fixed_slot_count");

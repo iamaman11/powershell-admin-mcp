@@ -16,7 +16,7 @@ internal sealed record AdminRequest([property: JsonRequired] AdminOperation Oper
     JobState? StateFilter = null, int? PageSize = null, long? BeforeSeq = null,
     ReconciliationDecision? Decision = null, string? Evidence = null, int? RetainDays = null,
     CommandContext? ExecutionContext = null, WorkerRequest? Worker = null,
-    string? TraceId = null, bool IncludeInterruptedCommand = false);
+    string? TraceId = null, bool IncludeInterruptedCommand = false, string? ResourceKey = null);
 
 [JsonConverter(typeof(JsonStringEnumConverter<CommandContext>))]
 public enum CommandContext { SYSTEM, USER, UNCONFIRMED }

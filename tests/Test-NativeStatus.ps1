@@ -122,14 +122,18 @@ try{
     $boundaryId=$boundary.job_id
     $boundaryResult=Wait-JobState $b $boundaryId 'COMPLETED'
     Assert ($boundaryResult.execution.stdout.Trim() -ceq 'BOUNDARY_OK' -and $boundaryResult.execution.audit_persisted) 'hardening.boundary_result_saved'
-    $first=Job $a 12 @{action='submit';operation_key='shared';command="Start-Sleep -Seconds 5; Write-Output 'first'";timeout_seconds=20}
+    $first=Job $a 12 @{action='submit';operation_key='shared';resource_key='fixture-fifo';command="Start-Sleep -Seconds 12; Write-Output 'first'";timeout_seconds=20}
     Assert ($first.status -eq 'OK' -and $first.job.state -eq 'QUEUED') 'r3.durable_admission'
     $null=Wait-JobState $b $first.job.job_id 'RUNNING'
-    Send $b 13 'tools/call' @{name='powershell_job';arguments=@{action='submit';operation_key='next';command="Write-Output 'second'";timeout_seconds=10};_meta=$meta}
-    Send $c 13 'tools/call' @{name='powershell_job';arguments=@{action='submit';operation_key='shared';command="Start-Sleep -Seconds 5; Write-Output 'first'";timeout_seconds=20};_meta=$meta}
+    $independent=Job $c 120 @{action='submit';operation_key='parallel-short';command="Write-Output 'INDEPENDENT'";timeout_seconds=10}
+    $fast=Wait-JobState $c $independent.job.job_id 'COMPLETED'
+    $still=Job $b 121 @{action='status';job_id=$first.job.job_id}
+    Assert ($fast.execution.stdout.Trim() -ceq 'INDEPENDENT' -and $still.job.state -eq 'RUNNING') 'parallel.short_finishes_while_long_active'
+    Send $b 13 'tools/call' @{name='powershell_job';arguments=@{action='submit';operation_key='next';resource_key='fixture-fifo';command="Write-Output 'second'";timeout_seconds=10};_meta=$meta}
+    Send $c 13 'tools/call' @{name='powershell_job';arguments=@{action='submit';operation_key='shared';resource_key='fixture-fifo';command="Start-Sleep -Seconds 12; Write-Output 'first'";timeout_seconds=20};_meta=$meta}
     $next=(Receive $b 13).structuredContent;$dup=(Receive $c 13).structuredContent
-    Assert ($next.job.state -eq 'QUEUED' -and $dup.job.job_id -eq $first.job.job_id) 'r3.concurrent_fifo_and_idempotency'
-    $conflict=Job $c 14 @{action='submit';operation_key='shared';command="Write-Output 'different'"}
+    Assert ($next.job.state -eq 'QUEUED' -and $dup.job.job_id -eq $first.job.job_id) 'parallel.explicit_resource_fifo_and_idempotency'
+    $conflict=Job $c 14 @{action='submit';operation_key='shared';resource_key='fixture-fifo';command="Write-Output 'different'"}
     Assert ($conflict.status -eq 'CONFLICT') 'r3.same_key_different_payload_conflict'
     $a.Kill($true);$a.WaitForExit()
     $one=Wait-JobState $b $first.job.job_id 'COMPLETED'
@@ -165,8 +169,8 @@ try{
     $safePath=$marker.Replace("'","''")
     $scriptA="[IO.File]::AppendAllText('$safePath','A'); Start-Sleep -Seconds 90"
     $scriptB="[IO.File]::AppendAllText('$safePath','B'); Write-Output 'R4_OUTPUT_FIXTURE_7A98E1'"
-    $active=Job $b 30 @{action='submit';operation_key='r4-crash-active';command=$scriptA;timeout_seconds=120}
-    $queued=Job $c 31 @{action='submit';operation_key='r4-crash-queued';command=$scriptB;timeout_seconds=20}
+    $active=Job $b 30 @{action='submit';operation_key='r4-crash-active';resource_key='fixture-crash';command=$scriptA;timeout_seconds=120}
+    $queued=Job $c 31 @{action='submit';operation_key='r4-crash-queued';resource_key='fixture-crash';command=$scriptB;timeout_seconds=20}
     Assert ($active.status -eq 'OK' -and $queued.status -eq 'OK') 'r4.durable_pending_jobs'
     $deadline=[Diagnostics.Stopwatch]::StartNew()
     while($deadline.Elapsed.TotalSeconds -lt 10){
@@ -188,7 +192,7 @@ try{
     Assert ((-not $unknown.Contains('execution') -or $null -eq $unknown['execution']) -and $unknown.job_id -eq $active.job.job_id) 'r4.unknown_effect_not_replayed'
     $recovered=Wait-JobState $c $queued.job.job_id 'COMPLETED'
     Assert ($recovered.execution.stdout.Trim() -eq 'R4_OUTPUT_FIXTURE_7A98E1' -and [IO.File]::ReadAllText($marker) -ceq 'AB') 'r4.queued_runs_after_crash_effect_exactly_once_in_fixture'
-    $again=Job $b 32 @{action='submit';operation_key='r4-crash-active';command=$scriptA;timeout_seconds=120}
+    $again=Job $b 32 @{action='submit';operation_key='r4-crash-active';resource_key='fixture-crash';command=$scriptA;timeout_seconds=120}
     Assert ($again.job.job_id -eq $active.job.job_id -and $again.job.state -eq 'NEEDS_RECONCILIATION') 'r4.retry_cannot_replay_unknown_effect'
     Stop-Service $name
     # Read actual persisted database bytes only while SCM service is stopped.
