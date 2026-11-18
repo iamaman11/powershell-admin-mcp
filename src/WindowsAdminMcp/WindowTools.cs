@@ -100,7 +100,7 @@ internal static class WindowCatalog
             if (titleLength <= 0) return true;
             var title = new StringBuilder(Math.Min(titleLength + 1, 1024));
             if (GetWindowTextW(hwnd, title, title.Capacity) == 0) return true;
-            _ = GetWindowThreadProcessId(hwnd, out uint pid);
+            GetWindowThreadProcessId(hwnd, out uint pid);
             if (pid == 0 || pid > int.MaxValue) return true;
             try
             {
