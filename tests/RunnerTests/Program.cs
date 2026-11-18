@@ -452,7 +452,7 @@ var workerFixture=new UserWork("lease","job",1,"fixture",30,Environment.SystemDi
 var finished=new TaskCompletionSource<ExecutionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
 int pulseCount=0,launches=0;
 ExecutionResult? delivered=null;
-WorkerObservation? observed=null;
+WorkerObservation? workerObservation=null;
 Task<ExecutionResult> FakeRunner(string cmd,int timeout,string? cwd,CancellationToken token)
 {
     launches++;
@@ -472,10 +472,10 @@ Task<AdminResponse> TransientThenSuccess(WorkerRequest request,CancellationToken
     return Task.FromResult(new AdminResponse(StatusCode.OK,"pulse",Worker:new(StatusCode.OK)));
 }
 await UserWorker.ExecuteAsync(workerFixture,Environment.TickCount64,TransientThenSuccess,FakeRunner,
-    CancellationToken.None,TimeSpan.FromMilliseconds(1),observe:value=>observed=value).WaitAsync(TimeSpan.FromSeconds(5));
+    CancellationToken.None,TimeSpan.FromMilliseconds(1),observe:value=>workerObservation=value).WaitAsync(TimeSpan.FromSeconds(5));
 Check(launches==1 && pulseCount==2 &&
     delivered is {Status:ExecutionState.COMPLETED,Stage:null} &&
-    observed is {Signal:WorkerStopSignal.NONE,TransientFailures:1,LastFailure:StatusCode.IPC_TIMEOUT,Correlation:"injected-timeout"},
+    workerObservation is {Signal:WorkerStopSignal.NONE,TransientFailures:1,LastFailure:StatusCode.IPC_TIMEOUT,Correlation:"injected-timeout"},
     "user.transient_ipc_does_not_cancel_or_replay");
 
 finished=new(TaskCreationOptions.RunContinuationsAsynchronously);
