@@ -68,6 +68,10 @@ internal static class WindowCapture
             new(new(code, id, Detail: detail, ElapsedMs: timer.ElapsedMilliseconds));
         if (hwnd == IntPtr.Zero || !Valid(id, maxWidth)) return Fail(WindowCaptureCode.INVALID_ARGUMENT);
         if (IsIconic(hwnd)) return Fail(WindowCaptureCode.WINDOW_MINIMIZED);
+        // Respect a target application's declared capture exclusion. If the
+        // affinity cannot be read, WGC itself still enforces OS protection.
+        if (GetWindowDisplayAffinity(hwnd, out uint affinity) && affinity != 0)
+            return Fail(WindowCaptureCode.ACCESS_DENIED, "CAPTURE_PROTECTED");
         try
         {
             if (!GraphicsCaptureSession.IsSupported()) return Fail(WindowCaptureCode.CAPTURE_UNSUPPORTED);
@@ -265,4 +269,8 @@ internal static class WindowCapture
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsIconic(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowDisplayAffinity(IntPtr hwnd, out uint affinity);
 }
