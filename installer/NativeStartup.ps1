@@ -93,10 +93,11 @@ function Assert-RemoteEvidence {
     $m=$health.components['mcp']
     $c=$health.components['control-plane']
     $delivery=$health.components['response-delivery']
-    # Require real MCP discovery from the same child, never a fixed tool catalog.
-    # Tool names are versioned API surface and belong in acceptance tests, not startup.
-    if($m.state -ne 'discovered' -or $m.details.child_state -ne 'running' -or $m.details.evidence -ne 'same_child' -or
-        $m.details.tools_list.complete -ne $true -or $m.details.tools_list.ok -ne $true){throw 'TRIAL_MCP_DISCOVERY_UNVERIFIED'}
+    # Remote clients may reuse an MCP catalog after a trial restart.
+    # Require the live same-child identity plus actual response delivery;
+    # tool schemas and names are verified externally, never by autostart.
+    if($m.details.child_state -ne 'running' -or $m.details.evidence -ne 'same_child' -or
+        [string]::IsNullOrWhiteSpace([string]$m.details.child_generation)){throw 'TRIAL_MCP_CHILD_UNVERIFIED'}
     if($c.status -ne 'ok' -or $delivery.status -ne 'ok' -or $delivery.details.accepted -lt 1){throw 'TRIAL_RESPONSE_DELIVERY_UNVERIFIED'}
     $after=@(Get-NetTCPConnection -LocalAddress '127.0.0.1' -LocalPort 8080 -State Listen)
     if($after.Count -ne 1 -or $after[0].OwningProcess -ne $v.ProcessId){throw 'TRIAL_VENDOR_CHANGED'}

@@ -10,11 +10,12 @@ if(Test-Path -LiteralPath $root){throw 'FIXTURE_ROOT_EXISTS'}
 if(Get-Service WindowsAdminMCP -ErrorAction SilentlyContinue){throw 'FIXTURE_SERVICE_EXISTS'}
 function Check($ok,$name){if(-not $ok){throw "FAIL $name"};Write-Host "PASS $name"}
 $startupText=Get-Content -LiteralPath (Join-Path $PSScriptRoot '../installer/NativeStartup.ps1') -Raw
-Check ($startupText.Contains('$m.details.tools_list.complete -ne $true') -and
-    $startupText.Contains('$m.details.tools_list.ok -ne $true') -and
+Check ($startupText.Contains('$m.details.child_state -ne ''running''') -and
     $startupText.Contains('$m.details.evidence -ne ''same_child''') -and
+    $startupText.Contains('[string]::IsNullOrWhiteSpace([string]$m.details.child_generation)') -and
     $startupText.Contains('$delivery.details.accepted -lt 1') -and
-    -not $startupText.Contains('tools_list.tool_names')) 'r6.mcp_discovery_independent_of_tool_catalog'
+    -not $startupText.Contains('tools_list') -and
+    -not $startupText.Contains('$m.state -ne ''discovered''')) 'r6.accept_does_not_require_fresh_tool_discovery'
 $verified=& $installer -PackagePath $Package -ExpectedSha256 $Sha256|ConvertFrom-Json
 Check ($verified.status -eq 'VERIFIED' -and -not(Test-Path -LiteralPath $root)) 'r6.package_verify_no_install'
 $rejected=$false
