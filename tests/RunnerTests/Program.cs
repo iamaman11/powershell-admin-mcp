@@ -452,6 +452,7 @@ var workerFixture=new UserWork("lease","job",1,"fixture",30,Environment.SystemDi
 var finished=new TaskCompletionSource<ExecutionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
 int pulseCount=0,launches=0;
 ExecutionResult? delivered=null;
+WorkerObservation? observed=null;
 Task<ExecutionResult> FakeRunner(string cmd,int timeout,string? cwd,CancellationToken token)
 {
     launches++;
@@ -471,9 +472,10 @@ Task<AdminResponse> TransientThenSuccess(WorkerRequest request,CancellationToken
     return Task.FromResult(new AdminResponse(StatusCode.OK,"pulse",Worker:new(StatusCode.OK)));
 }
 await UserWorker.ExecuteAsync(workerFixture,Environment.TickCount64,TransientThenSuccess,FakeRunner,
-    CancellationToken.None,TimeSpan.FromMilliseconds(1)).WaitAsync(TimeSpan.FromSeconds(5));
+    CancellationToken.None,TimeSpan.FromMilliseconds(1),observe:value=>observed=value).WaitAsync(TimeSpan.FromSeconds(5));
 Check(launches==1 && pulseCount==2 &&
-    delivered is {Status:ExecutionState.COMPLETED,WorkerEvidence:{ObservedStopSignal:WorkerStopSignal.NONE,TransientIpcFailures:1,LastFailureStatus:StatusCode.IPC_TIMEOUT,LastFailureCorrelationId:"injected-timeout"}},
+    delivered is {Status:ExecutionState.COMPLETED,Stage:null} &&
+    observed is {Signal:WorkerStopSignal.NONE,TransientFailures:1,LastFailure:StatusCode.IPC_TIMEOUT,Correlation:"injected-timeout"},
     "user.transient_ipc_does_not_cancel_or_replay");
 
 finished=new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -487,7 +489,7 @@ Task<AdminResponse> LeaseLost(WorkerRequest request,CancellationToken token)
 await UserWorker.ExecuteAsync(workerFixture,Environment.TickCount64,LeaseLost,FakeRunner,
     CancellationToken.None,TimeSpan.FromMilliseconds(1)).WaitAsync(TimeSpan.FromSeconds(5));
 Check(launches==1 && delivered is {Status:ExecutionState.CANCELLED_UNKNOWN_EFFECT,
-    WorkerEvidence:{ObservedStopSignal:WorkerStopSignal.LEASE_LOST}},"user.authoritative_lease_loss_stops");
+    Stage:"USER_LEASE_LOST"},"user.authoritative_lease_loss_stops");
 
 finished=new(TaskCreationOptions.RunContinuationsAsynchronously);
 delivered=null;
@@ -500,7 +502,7 @@ Task<AdminResponse> ExplicitCancel(WorkerRequest request,CancellationToken token
 await UserWorker.ExecuteAsync(workerFixture,Environment.TickCount64,ExplicitCancel,FakeRunner,
     CancellationToken.None,TimeSpan.FromMilliseconds(1)).WaitAsync(TimeSpan.FromSeconds(5));
 Check(launches==1 && delivered is {Status:ExecutionState.CANCELLED_UNKNOWN_EFFECT,
-    WorkerEvidence:{ObservedStopSignal:WorkerStopSignal.OPERATOR_CANCELLED}},"user.explicit_cancel_distinguished");
+    Stage:"USER_OPERATOR_CANCELLED"},"user.explicit_cancel_distinguished");
 
 using(var siblingLifetime=new CancellationTokenSource())
 {
@@ -547,3 +549,17 @@ Check(unconfirmed?.Code==StatusCode.IPC_TIMEOUT && completionCalls==2 && readbac
     "user.completion_mismatch_never_confirmed");
 Check(!UserWorker.CompletionMatches(receiptPayload,persistedReceipt with {AuditPersisted=false}),
     "user.completion_not_durable_never_confirmed");
+
+// Frozen public/durable schema-4 field set from fed40dc0. The old strict JSON
+// reader rejects unknown members. Keep new causes in the existing stage string.
+var rollbackShape=System.Text.Json.JsonSerializer.Serialize(delivered,PipeWire.Json);
+using(var rollbackJson=System.Text.Json.JsonDocument.Parse(rollbackShape))
+{
+    string[] legacyFields=["status","command_sha256","elapsed_ms","exit_code","stdout","stderr",
+        "warnings","output_truncated","stage","native_error","job_id","operation_key","correlation_id",
+        "audit_persisted","execution_context","execution_sid","execution_session_id","queue_wait_ms",
+        "step_started_utc","step_finished_utc","timing","pruned_output"];
+    Check(rollbackJson.RootElement.EnumerateObject().Select(p=>p.Name).ToHashSet(StringComparer.Ordinal)
+        .SetEquals(legacyFields) && rollbackJson.RootElement.GetProperty("stage").GetString()=="USER_OPERATOR_CANCELLED",
+        "h1.schema4_durable_result_exact_legacy_shape");
+}

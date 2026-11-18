@@ -4,6 +4,10 @@ using System.Text.Json;
 
  // Runs within the already-authorized interactive tunnel host. No new process
  // identity, credential access, token duplication or additional network listener.
+internal enum WorkerStopSignal { NONE, OPERATOR_CANCELLED, WATCHDOG_EXPIRED, LEASE_LOST, WORKER_STOPPING, IPC_REJECTED }
+
+internal sealed record WorkerObservation(WorkerStopSignal Signal,int TransientFailures,StatusCode? LastFailure,string? Correlation);
+
 internal static class UserWorker
 {
     private const int WatchdogMs=12000;
@@ -30,7 +34,7 @@ internal static class UserWorker
                 var reply=await Request(new(WorkerAction.poll),stop);
                 if(reply.Code==StatusCode.OK && reply.Worker?.Work is {} work)
                     running.Add(Task.Run(()=>RunIsolatedAsync(
-                        ()=>ExecuteAsync(work,sent,Request,PowerShellRunner.RunAsync,lifetime.Token,PulseInterval,ReadCompletion),
+                        ()=>ExecuteAsync(work,sent,Request,PowerShellRunner.RunAsync,lifetime.Token,PulseInterval,ReadCompletion,observation=>Report(work,"USER_WORKER_OBSERVATION",observation:observation)),
                         e=>Report(work,"USER_JOB_FAULT",error:e))));
                 else
                     await Task.Delay(500,stop);
@@ -57,13 +61,13 @@ internal static class UserWorker
     private static Task<AdminResponse> Request(WorkerRequest request,CancellationToken token)=>
         AdminTools.Call(new(AdminOperation.UserWorker,Worker:request),token);
 
-    private static void Report(UserWork work,string code,AdminResponse? reply=null,Exception? error=null)
+    private static void Report(UserWork work,string code,AdminResponse? reply=null,Exception? error=null,WorkerObservation? observation=null)
     {
         // No command, output, exception message or credential in Event Log.
         try
         {
             EventLog.WriteEntry("WindowsAdminMCP",
-                $"{code} job_id={work.JobId} step={work.Step} status={reply?.Code} correlation_id={reply?.Correlation} error_type={error?.GetType().Name} hresult={error?.HResult}",
+                $"{code} job_id={work.JobId} step={work.Step} worker_pid={Environment.ProcessId} status={reply?.Code??observation?.LastFailure} correlation_id={reply?.Correlation??observation?.Correlation} signal={observation?.Signal} transient_failures={observation?.TransientFailures} error_type={error?.GetType().Name} hresult={error?.HResult}",
                 EventLogEntryType.Warning);
         }
         catch(Exception e) when(e is System.Security.SecurityException or System.ComponentModel.Win32Exception or
@@ -80,7 +84,8 @@ internal static class UserWorker
         Func<WorkerRequest,CancellationToken,Task<AdminResponse>> request,
         Func<string,int,string?,CancellationToken,Task<ExecutionResult>> run,
         CancellationToken stop,TimeSpan pulseInterval,
-        Func<UserWork,CancellationToken,Task<ExecutionResult?>>? readback=null)
+        Func<UserWork,CancellationToken,Task<ExecutionResult?>>? readback=null,
+        Action<WorkerObservation>? observe=null)
     {
         using var cancel=new CancellationTokenSource();
         using var watchdog=new CancellationTokenSource();
@@ -144,10 +149,18 @@ internal static class UserWorker
                 }
             }
             var result=await running;
-            // This is observed worker evidence, not an assertion of the external effect.
+            // Retain the old durable result format. Stage is already a string
+            // in schema 4; never add unknown properties to the strict reader.
+            // Only attribute a runner-observed cancellation to a stop signal,
+            // never replace a real exit or a separate stream-drain failure.
+            watchdog.CancelAfter(Timeout.InfiniteTimeSpan);
             var signal=(WorkerStopSignal)Volatile.Read(ref observedSignal);
             if(signal!=WorkerStopSignal.NONE || lastFailure is not null)
-                result=result with {WorkerEvidence=new(signal,transientFailures,lastFailure,failureCorrelation)};
+                observe?.Invoke(new(signal,transientFailures,lastFailure,failureCorrelation));
+            if(signal!=WorkerStopSignal.NONE &&
+                result.Status is (ExecutionState.CANCELLED_UNKNOWN_EFFECT or ExecutionState.CANCELLED_BEFORE_EXECUTION) &&
+                result.Stage is (null or "PROCESS_INTERRUPTED" or "BEFORE_START"))
+                result=result with {Stage="USER_"+signal};
             if(!stop.IsCancellationRequested)
             {
                 var ack=await ConfirmCompletionAsync(work,result,request,readback,stop);
@@ -194,7 +207,7 @@ internal static class UserWorker
     {
         if(!saved.AuditPersisted || saved.ExecutionContext!=CommandContext.USER)return false;
         // Only remove metadata owned/added by the coordinator. Preserve state,
-        // hash, exit code, output, warnings, stage and worker evidence exactly.
+        // hash, exit code, output, warnings and stage exactly.
         static ExecutionResult Payload(ExecutionResult value)=>value with
         {
             AuditPersisted=false,ExecutionContext=null,ExecutionSid=null,ExecutionSessionId=null,

@@ -13,15 +13,6 @@ public enum ExecutionState
     IPC_FAILED, NOT_FOUND, CONFLICT, BUSY, STORE_FULL, NOT_CANCELLABLE, ADMISSION_UNCONFIRMED, CANCELLED, RECONCILED, HISTORY_PRUNED, STORE_UNAVAILABLE, USER_CONTEXT_UNAVAILABLE, LEASE_LOST
 }
 
-[JsonConverter(typeof(JsonStringEnumConverter<WorkerStopSignal>))]
-public enum WorkerStopSignal { NONE, OPERATOR_CANCELLED, WATCHDOG_EXPIRED, LEASE_LOST, WORKER_STOPPING, IPC_REJECTED }
-
-public sealed record WorkerEvidence(
-    [property:JsonPropertyName("observed_stop_signal")] WorkerStopSignal ObservedStopSignal,
-    [property:JsonPropertyName("transient_ipc_failures")] int TransientIpcFailures,
-    [property:JsonPropertyName("last_failure_status")] StatusCode? LastFailureStatus,
-    [property:JsonPropertyName("last_failure_correlation_id")] string? LastFailureCorrelationId);
-
 public sealed record ExecutionResult(
     [property:JsonPropertyName("status")] ExecutionState Status,
     [property:JsonPropertyName("command_sha256")] string CommandSha256,
@@ -46,8 +37,7 @@ public sealed record ExecutionResult(
     [property:JsonPropertyName("step_started_utc")] string? StepStartedUtc=null,
     [property:JsonPropertyName("step_finished_utc")] string? StepFinishedUtc=null,
     [property:JsonPropertyName("timing")] ToolTiming? Timing=null,
-    [property:JsonPropertyName("pruned_output")] PrunedOutput? PrunedOutput=null,
-    [property:JsonPropertyName("worker_evidence"),JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] WorkerEvidence? WorkerEvidence=null);
+    [property:JsonPropertyName("pruned_output")] PrunedOutput? PrunedOutput=null);
 
 internal static class PowerShellRunner
 {
