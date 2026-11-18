@@ -57,6 +57,25 @@ else if (args is ["window-inspect-worker", var windowId, var depthText, var maxT
         : new(WindowInspectCode.INVALID_ARGUMENT, []);
     Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, PipeWire.Json));
 }
+else if (args is ["window-action-worker"])
+{
+    // No action values in process arguments. Parent sends bounded JSON via stdin.
+    WindowActionResult result;
+    try
+    {
+        string raw = await Console.In.ReadToEndAsync();
+        var request = raw.Length <= 16000
+            ? System.Text.Json.JsonSerializer.Deserialize<WindowActionRequest>(raw, PipeWire.Json)
+            : null;
+        result = request is null ? new(WindowActionCode.INVALID_ARGUMENT) :
+            WindowAction.InvokeInWorker(request);
+    }
+    catch (System.Text.Json.JsonException)
+    {
+        result = new(WindowActionCode.INVALID_ARGUMENT);
+    }
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, PipeWire.Json));
+}
 else if (args is ["stdio"])
 {
     // The SDK frontend is not a runtime credential owner.
