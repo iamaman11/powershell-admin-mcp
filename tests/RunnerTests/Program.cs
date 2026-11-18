@@ -463,6 +463,16 @@ Check(ExecutionBudget.Evaluate(5,32*gib,20*gib,20*gib).CanStart,"parallel.capaci
 Check(!ExecutionBudget.Evaluate(5,32*gib,1*gib,20*gib).CanStart,"parallel.physical_pressure");
 Check(!ExecutionBudget.Evaluate(5,32*gib,20*gib,1*gib).CanStart,"parallel.commit_pressure");
 Check(ExecutionBudget.Evaluate(40,128*gib,100*gib,100*gib).CanStart,"parallel.no_fixed_slot_count");
+ulong admissionThreshold=(32*gib)/20+ExecutionBudget.Reservation;
+Check(ExecutionBudget.Evaluate(0,32*gib,2*gib,20*gib) is {CanStart:true,ReserveBytes:var loweredReserve} &&
+    loweredReserve==32*gib/20,"budget.lowered_five_percent_large_machine");
+Check(ExecutionBudget.Evaluate(0,8*gib,2*gib,20*gib).ReserveBytes==gib,
+    "budget.preserve_one_gib_minimum");
+Check(ExecutionBudget.Evaluate(0,32*gib,admissionThreshold,20*gib).CanStart &&
+    !ExecutionBudget.Evaluate(0,32*gib,admissionThreshold-1,20*gib).CanStart,
+    "budget.physical_exact_admission_boundary");
+Check(!ExecutionBudget.Evaluate(0,32*gib,20*gib,admissionThreshold-1).CanStart,
+    "budget.commit_exact_admission_boundary");
 
 
 // USER fault injection through the production execution loop (no live service or real commands).
