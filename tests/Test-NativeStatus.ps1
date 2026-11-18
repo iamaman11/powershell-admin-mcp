@@ -133,7 +133,8 @@ try{
         $ready=Join-Path $parallelDir ('ready-'+$i)
         $safeReady=$ready.Replace("'","''")
         $command="[IO.File]::WriteAllText('$safeReady',[string]`$PID); while(-not [IO.File]::Exists('$safeRelease')){Start-Sleep -Milliseconds 100}; Write-Output 'parallel-$i'"
-        $admitted=Job @($a,$b,$c)[$i%3] (3000+$i) @{action='submit';operation_key=('parallel-many-'+$i);command=$command;timeout_seconds=60}
+        $client=@($a,$b,$c)[$i%3]
+        $admitted=Job $client (3000+$i) @{action='submit';operation_key=('parallel-many-'+$i);command=$command;timeout_seconds=60}
         Assert ($admitted.status -eq 'OK' -and $admitted.job.job_id) ('parallel.admitted.'+$i)
         $runs+=@{id=$admitted.job.job_id;ready=$ready;marker=('parallel-'+$i)}
     }
