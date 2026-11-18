@@ -85,6 +85,8 @@ try{
     Send $a 34 'tools/call' @{name='windows.inspect_window';arguments=@{window_id='w1:7fffffffffffffff:1092:1dbaf8d88b62800:1';max_depth=3};_meta=$meta}
     $restrictedInspect=(Receive $a 34).structuredContent
     Assert ($restrictedInspect.status -eq 'USER_CONTEXT_UNAVAILABLE' -and @($restrictedInspect.elements).Count -eq 0) 'windows.inspect_reject_unbound_ci_frontend'
+    $inspectorWorker=(& $Exe window-inspect-worker 'bad' 3 60 | ConvertFrom-Json)
+    Assert ($inspectorWorker.status -eq 'INVALID_ARGUMENT' -and @($inspectorWorker.elements).Count -eq 0) 'windows.inspect_worker_wire'
     foreach($p in @($a,$b,$c)){Send $p 2 'tools/call' @{name='powershell_status';arguments=@{};_meta=$meta}}
     $results=@(foreach($p in @($a,$b,$c)){(Receive $p 2).structuredContent})
     Assert (@($results|Where-Object {$_.status -eq 'OK' -and $_.service_pid -eq $svc.ProcessId}).Count -eq 3) 'r1.one_service_three_stdio_clients'
