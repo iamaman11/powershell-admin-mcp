@@ -17,6 +17,7 @@ try{
     Copy-Item -Path (Join-Path $PublishDirectory '*') -Destination $native -Recurse
     if(-not(Test-Path -LiteralPath (Join-Path $native 'WindowsAdminMCP.exe') -PathType Leaf)){throw 'PUBLISH_EXE_MISSING'}
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'NativeStartup.ps1') -Destination $native
+    Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'WindowsAdminMCP.ps1') -Destination $native
     Invoke-WebRequest -Uri 'https://github.com/openai/tunnel-client/releases/download/v0.0.21/tunnel-client-runtime-v0.0.21-windows-amd64.zip' -OutFile $zip
     if((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne 'D991623BD171049E2100B402D72AF7EBC8EDF558051AE8FC924173373D1611A8'){throw 'VENDOR_ZIP_HASH_INVALID'}
     $archive=[IO.Compression.ZipFile]::OpenRead($zip)
@@ -31,7 +32,10 @@ try{
         $relative=[IO.Path]::GetRelativePath($stage,$file.FullName).Replace('\','/')
         $files[$relative]=(Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
     }
-    $metadata=[ordered]@{schema=1;commit=$Commit;vendor_version='0.0.21';store_schema=3;files=$files}
+    $product=[Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $native 'WindowsAdminMCP.exe')).ProductVersion
+    $mcpVersion=($product -split '\+')[0]
+    if($mcpVersion -notmatch '^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$'){throw 'MCP_VERSION_METADATA_INVALID'}
+    $metadata=[ordered]@{schema=1;commit=$Commit;mcp_version=$mcpVersion;vendor_version='0.0.21';store_schema=4;files=$files}
     [IO.File]::WriteAllText((Join-Path $stage 'manifest.json'),($metadata|ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
     [IO.Compression.ZipFile]::CreateFromDirectory($stage,$Output,[IO.Compression.CompressionLevel]::Optimal,$false)
     [pscustomobject]@{package=$Output;sha256=(Get-FileHash -LiteralPath $Output).Hash;files=$files.Count;commit=$Commit}|ConvertTo-Json -Compress

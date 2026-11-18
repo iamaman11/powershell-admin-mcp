@@ -103,6 +103,10 @@ internal static class TunnelHost
             }while(clock.Elapsed<TimeSpan.FromSeconds(30));
             if(!ready)return Report(stage,3);
 
+            using var workerStop=new CancellationTokenSource();
+            Task? workerTask=null;
+            try
+            {
             // Local dependency only: read OS state, never execute or reconfigure INTERNET.
             // Poll slowly while blocked and log transitions, not every observation.
             while (true)
@@ -171,6 +175,7 @@ internal static class TunnelHost
                 // Job Object closes the complete owned tree on task stop or launcher crash.
                 // The vendor owns its protocol and network recovery while the dependency is alive.
                 child.Input.Close();
+                workerTask??=UserWorker.RunAsync(workerStop.Token);
                 Report(Code.STARTED,0,vendorPid:child.Process.Id);
                 var stdout=Task.Run(()=>child.Output.CopyTo(Stream.Null));
                 var stderr=Task.Run(()=>child.Error.CopyTo(Stream.Null));
@@ -187,6 +192,12 @@ internal static class TunnelHost
                 Report(Code.TUN_LOST,0,vendorPid:child.Process.Id);
             }
             await Task.Delay(TimeSpan.FromSeconds(5));
+            }
+            }
+            finally
+            {
+                await workerStop.CancelAsync();
+                if(workerTask is not null)await workerTask;
             }
         }
         catch(Exception e) when(e is IOException or UnauthorizedAccessException or Win32Exception or

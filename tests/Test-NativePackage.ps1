@@ -135,6 +135,7 @@ try{
         try{& $Body $p}finally{$p.StandardInput.Close();if(-not $p.WaitForExit(3000)){$p.Kill($true);$p.WaitForExit()};$p.Dispose()}
     }
     function Call-Tool($p,$id,$name,$arguments){
+        if($name -eq 'powershell_exec' -or ($name -eq 'powershell_job' -and $arguments.action -eq 'submit')){$arguments.execution_context='SYSTEM'}
         $msg=@{jsonrpc='2.0';id=$id;method='tools/call';params=@{name=$name;arguments=$arguments;_meta=$meta}}
         $p.StandardInput.WriteLine(($msg|ConvertTo-Json -Depth 10 -Compress));$p.StandardInput.Flush()
         do{
@@ -200,7 +201,7 @@ try{
         $read=Read-SavedJob
         Check ($read.status -eq 'OK' -and $read.job.job_id -eq $saved.job_id -and $read.job.execution.stdout.Trim() -ceq 'upgrade-preserved') 'r6.job_preserved_after_package_update'
         # Negative metadata fixture: target claims schema 2, current SQLite
-        # is really schema 3. No old executable or DB is actually restored.
+        # is really schema 4. No old executable or DB is actually restored.
         $priorManifest=Join-Path $root '.rollback\manifest.json'
         $original=[IO.File]::ReadAllText($priorManifest)
         try{

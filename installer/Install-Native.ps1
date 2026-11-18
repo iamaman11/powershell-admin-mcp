@@ -45,7 +45,7 @@ function Read-Manifest($dir){
     Assert-Protected $p
     $m=Get-Content -LiteralPath $p -Raw|ConvertFrom-Json -AsHashtable
     if($m.schema -ne 1 -or $m.vendor_version -ne '0.0.21' -or $m.commit -cnotmatch '^[a-f0-9]{40}$' -or $m.files -isnot [Collections.IDictionary]){throw 'MANIFEST_INVALID'}
-    if($m.Contains('store_schema') -and $m.store_schema -notin @(2,3)){throw 'MANIFEST_STORE_SCHEMA_INVALID'}
+    if($m.Contains('store_schema') -and $m.store_schema -notin @(2,3,4)){throw 'MANIFEST_STORE_SCHEMA_INVALID'}
     if($m.files.Count -lt 3 -or $m.files.Count -gt 2000){throw 'MANIFEST_SIZE_INVALID'}
     $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach($name in $m.files.Keys){
@@ -196,7 +196,7 @@ if($Action -eq 'Rollback'){
         if(Test-Path -LiteralPath $dbRoot){
             Assert-Protected $dbRoot
             $current=Read-Manifest $root
-            if(-not $current.Contains('store_schema') -or $current.store_schema -ne 3){throw 'ROLLBACK_READER_UNPROVEN'}
+            if(-not $current.Contains('store_schema') -or $current.store_schema -notin @(3,4)){throw 'ROLLBACK_READER_UNPROVEN'}
             $targetSchema=$null
             if(Test-Path -LiteralPath (Join-Path $backup 'manifest.json')){
                 $old=Read-Manifest $backup
@@ -267,7 +267,7 @@ try{
         }
     }
     if(Test-Path -LiteralPath (Join-Path $root '.rollback')){throw 'UNACCEPTED_PREVIOUS_INSTALLATION'}
-    if(-not $m.Contains('store_schema') -or $m.store_schema -ne 3){throw 'PACKAGE_STORE_SCHEMA_REQUIRED'}
+    if(-not $m.Contains('store_schema') -or $m.store_schema -ne 4){throw 'PACKAGE_STORE_SCHEMA_REQUIRED'}
     Assert-StoreCompatible (Join-Path $incoming 'native\WindowsAdminMCP.exe') ([int]$m.store_schema)
     $swapAttempted=$true
     Invoke-NativeFileSwap -Root $root -Incoming $incoming -ServiceExisted ([bool]$service) -BeforeRestore {param($j) Restore-ServiceRegistration $j} -Validate {

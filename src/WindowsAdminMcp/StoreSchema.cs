@@ -7,7 +7,7 @@ internal enum StoreSchemaCode { ABSENT, OBSERVED, READBACK_FAILED }
 internal sealed record StoreSchemaObservation(StoreSchemaCode Status,int? Version=null,int? NativeError=null);
 internal static class StoreSchema
 {
-    internal const int Current=3;
+    internal const int Current=4;
     // Only a verified installer invokes this mode, with the SCM stopped and
     // maintenance lock held. Never open a second connection to a running service.
     internal static StoreSchemaObservation ObserveOffline()

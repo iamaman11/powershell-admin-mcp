@@ -14,6 +14,8 @@ static async Task<ExecutionResult> Run(string command, int timeout = 10, string?
 if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true")
     throw new InvalidOperationException("Isolated Windows CI only");
 Check(File.Exists(PowerShellRunner.Executable), "r2.machine_wide_pwsh");
+Check(AdminTools.ExecWaitBudget(120)==TimeSpan.FromSeconds(90) && AdminTools.ExecWaitBudget(85)==TimeSpan.FromSeconds(90) &&
+    AdminTools.ExecWaitBudget(10)==TimeSpan.FromSeconds(15), "transport.exec_wait_budget");
 var simple = await Run("Write-Output 'hello'");
 Check(simple.Status == ExecutionState.COMPLETED && simple.ExitCode == 0 && simple.Stdout.Trim() == "hello", "r2.stdout_exit");
 string prefix = "Write-Output 'Проверка Unicode 🚀'\n#";
@@ -192,13 +194,13 @@ try
         store.Initialize(database);
         var saved=store.Dispatch(new(AdminOperation.Job,JobAction.logs,JobId:id),"migration");
         Check(saved.Status==StatusCode.OK && saved.Job?.State==JobState.COMPLETED &&
-            saved.Job.Execution?.Stdout=="v2 preserved","r4.real_v2_migration_preserves_encrypted_result");
+            saved.Job.Execution is {Stdout:"v2 preserved",AuditPersisted:true},"r4.real_v2_migration_preserves_encrypted_result_and_audit");
         var duplicate=store.Dispatch(new(AdminOperation.Job,JobAction.submit,Key:key,Command:command,WorkingDirectory:v2Cwd),"migration");
         Check(duplicate.Status==StatusCode.OK && duplicate.Job?.JobId==id,"r4.v2_payload_hash_unchanged");
         var counts=store.Summary();
-        Check(counts.SchemaVersion==3 && counts.Total==1 && counts.Completed==1,"r4.migration_store_counts");
+        Check(counts.SchemaVersion==4 && counts.Total==1 && counts.Completed==1,"r4.migration_store_counts");
     }
-    Check(StoreSchema.ObserveFile(database) is {Status:StoreSchemaCode.OBSERVED,Version:3},"r6.offline_store_schema_v3");
+    Check(StoreSchema.ObserveFile(database) is {Status:StoreSchemaCode.OBSERVED,Version:4},"r6.offline_store_schema_v4");
     Check(StoreSchema.ObserveFile(Path.Combine(migrationRoot,"missing.db")).Status==StoreSchemaCode.ABSENT,"r6.offline_store_absent");
     var orphan=Path.Combine(migrationRoot,"orphan.db");
     File.WriteAllText(orphan+"-wal","fixture");
@@ -214,7 +216,171 @@ try
     {
         store.Initialize(database);
         Check(store.Summary().Completed==1 && Directory.GetFiles(migrationRoot,"jobs.db.schema2-*.backup").Length==1,
-            "r4.v3_reopen_no_duplicate_migration");
+            "r4.v4_reopen_no_duplicate_migration");
     }
 }
 finally{Directory.Delete(migrationRoot,true);}
+
+// Isolated real store: keyset pagination is stable, filtered and rejects invalid ranges.
+string pagingRoot=Path.Combine(Path.GetTempPath(),"WindowsAdminMCP-paging-"+Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(pagingRoot);
+try
+{
+    using var store=new JobCoordinator(Microsoft.Extensions.Logging.Abstractions.NullLogger<JobCoordinator>.Instance);
+    store.Initialize(Path.Combine(pagingRoot,"jobs.db"));
+    JobReply Call(AdminRequest req)=>store.Dispatch(req,"paging");
+    for(int i=0;i<5;i++)
+        Check(Call(new(AdminOperation.Job,JobAction.submit,Key:"paging-"+i,Command:"Write-Output 1")).Status==StatusCode.OK,"paging.admission."+i);
+    Check(Call(new(AdminOperation.Job,JobAction.cancel,Key:"paging-3")).Status==StatusCode.OK,"paging.cancel");
+    var p1=Call(new(AdminOperation.Job,JobAction.list,StateFilter:JobState.QUEUED,PageSize:2));
+    Check(p1.Status==StatusCode.OK && p1.Jobs is {Length:2} && p1.Jobs[0].OperationKey=="paging-4" &&
+        p1.Jobs[1].OperationKey=="paging-2" && p1.NextBeforeSeq is >0,"paging.first");
+    var p2=Call(new(AdminOperation.Job,JobAction.list,StateFilter:JobState.QUEUED,PageSize:2,BeforeSeq:p1.NextBeforeSeq));
+    Check(p2.Status==StatusCode.OK && p2.Jobs is {Length:2} && p2.Jobs[0].OperationKey=="paging-1" &&
+        p2.Jobs[1].OperationKey=="paging-0" && p2.NextBeforeSeq is null,"paging.second");
+    Check(Call(new(AdminOperation.Job,JobAction.list,PageSize:0)).Status==StatusCode.INVALID_ARGUMENT &&
+        Call(new(AdminOperation.Job,JobAction.status,Key:"paging-0",BeforeSeq:1)).Status==StatusCode.INVALID_ARGUMENT,"paging.invalid");
+    var lookup=Call(new(AdminOperation.Job,JobAction.status,Key:"paging-3"));
+    Check(lookup.Job?.State==JobState.CANCELLED,"paging.key_lookup");
+}
+finally{Directory.Delete(pagingRoot,true);}
+
+
+// Schema 3 fixture: migrate encrypted legacy results and retain permanent job keys.
+string retentionRoot=Path.Combine(Path.GetTempPath(),"WindowsAdminMCP-retention-"+Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(retentionRoot);
+try
+{
+    string path=Path.Combine(retentionRoot,"jobs.db"), cmdText="Write-Output 'old-audit'";
+    string Digest(string value)=>Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+    string payload=Digest(System.Text.Json.JsonSerializer.Serialize(new {steps=new[]{new JobStep(cmdText)},cwd=Environment.SystemDirectory}));
+    string old=DateTimeOffset.UtcNow.AddDays(-45).ToString("O");
+    using(var db=new Microsoft.Data.Sqlite.SqliteConnection("Data Source="+path+";Pooling=False"))
+    {
+        db.Open();
+        using var schema=db.CreateCommand();
+        schema.CommandText="""
+            CREATE TABLE jobs(seq INTEGER PRIMARY KEY AUTOINCREMENT,job_id TEXT NOT NULL UNIQUE,op_key TEXT NOT NULL UNIQUE,
+              payload_hash TEXT NOT NULL,command_hash TEXT NOT NULL,cwd BLOB NOT NULL,state TEXT NOT NULL,
+              created_utc TEXT NOT NULL,updated_utc TEXT NOT NULL,completed_steps INTEGER NOT NULL,step_count INTEGER NOT NULL,
+              reboot_stamp TEXT,reboot_evidence TEXT);
+            CREATE TABLE job_steps(job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,step_index INTEGER NOT NULL,
+              command BLOB,timeout_seconds INTEGER NOT NULL,pause_after INTEGER NOT NULL,result BLOB,reboot_after INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(job_id,step_index));
+            PRAGMA user_version=3;
+            """;
+        schema.ExecuteNonQuery();
+        foreach(var (id,state,completed) in new[]{("old-finished","COMPLETED",1),("old-unknown","NEEDS_RECONCILIATION",0)})
+        {
+            using var seed=db.CreateCommand();
+            seed.CommandText="""
+                INSERT INTO jobs(job_id,op_key,payload_hash,command_hash,cwd,state,created_utc,updated_utc,completed_steps,step_count)
+                VALUES($id,$id,$payload,$hash,$cwd,$state,$old,$old,$completed,1);
+                INSERT INTO job_steps(job_id,step_index,command,timeout_seconds,pause_after,result)
+                VALUES($id,1,NULL,30,0,$result);
+                """;
+            seed.Parameters.AddWithValue("$id",id);
+            seed.Parameters.AddWithValue("$payload",payload);
+            seed.Parameters.AddWithValue("$hash",Digest(cmdText));
+            seed.Parameters.AddWithValue("$cwd",JobDataProtection.Protect(Environment.SystemDirectory,id,"cwd"));
+            seed.Parameters.AddWithValue("$state",state);
+            seed.Parameters.AddWithValue("$old",old);
+            seed.Parameters.AddWithValue("$completed",completed);
+            var execution=new ExecutionResult(completed==1?ExecutionState.COMPLETED:ExecutionState.TIMEOUT_UNKNOWN_EFFECT,Digest(cmdText),345,completed==1?0:null,"old-audit");
+            seed.Parameters.AddWithValue("$result",JobDataProtection.Protect(System.Text.Json.JsonSerializer.Serialize(execution,PipeWire.Json),id,"step/1/result"));
+            seed.ExecuteNonQuery();
+        }
+    }
+    using(var store=new JobCoordinator(Microsoft.Extensions.Logging.Abstractions.NullLogger<JobCoordinator>.Instance))
+    {
+        store.Initialize(path);
+        var original=store.Dispatch(new(AdminOperation.Job,JobAction.logs,JobId:"old-unknown"),"fixture");
+        Check(original.Job is {State:JobState.NEEDS_RECONCILIATION,InterruptedSourceAvailable:false,Execution.Status:ExecutionState.TIMEOUT_UNKNOWN_EFFECT},"reconcile.v3_unknown_preserved");
+        var prune=store.Dispatch(new(AdminOperation.Job,JobAction.prune),"fixture");
+        Check(prune.Status==StatusCode.OK && prune.PrunedCount==1 && prune.Store is {Detailed:1,Pruned:1,NeedsReconciliation:1},"history.compacts_only_eligible");
+        var logs=store.Dispatch(new(AdminOperation.Job,JobAction.logs,Key:"old-finished"),"fixture");
+        Check(logs.Status==StatusCode.HISTORY_PRUNED && logs.Job is {HistoryPrunedUtc:not null,Execution:{Status:ExecutionState.COMPLETED,Stdout:"",ElapsedMs:345,AuditPersisted:true,PrunedOutput:{StdoutBytes:9}}},"history.retains_audit_metadata");
+        var retry=store.Dispatch(new(AdminOperation.Job,JobAction.submit,Key:"old-finished",Command:cmdText),"fixture");
+        Check(retry.Status==StatusCode.OK && retry.Job is {JobId:"old-finished",HistoryPrunedUtc:not null},"history.permanent_idempotency");
+        Check(store.Dispatch(new(AdminOperation.Job,JobAction.submit,Key:"old-finished",Command:"different"),"fixture").Status==StatusCode.CONFLICT,"history.pruned_key_conflict");
+        var resolve=store.Dispatch(new(AdminOperation.Job,JobAction.reconcile,JobId:"old-unknown",Decision:ReconciliationDecision.UNKNOWN,Evidence:"No source retained in v3."),"fixture","S-1-5-18");
+        Check(resolve.Job is {State:JobState.RECONCILED,Reconciliation.Decision:ReconciliationDecision.UNKNOWN},"reconcile.legacy_unknown_closed_without_success");
+        var noPrune=store.Dispatch(new(AdminOperation.Job,JobAction.prune),"fixture");
+        Check(noPrune.PrunedCount==0 && noPrune.Store is {Reconciled:1,NeedsReconciliation:0},"reconcile.fresh_evidence_not_pruned");
+    }
+    Check(Directory.GetFiles(retentionRoot,"jobs.db.schema3-*.backup").Length==1 &&
+        StoreSchema.ObserveFile(path) is {Status:StoreSchemaCode.OBSERVED,Version:4},"migration.v3_backup_and_v4_schema");
+    using(var store=new JobCoordinator(Microsoft.Extensions.Logging.Abstractions.NullLogger<JobCoordinator>.Instance))
+    {
+        store.Initialize(path);
+        var resolved=store.Dispatch(new(AdminOperation.Job,JobAction.logs,JobId:"old-unknown"),"fixture");
+        Check(resolved.Job is {State:JobState.RECONCILED,Reconciliation.Decision:ReconciliationDecision.UNKNOWN,Execution.Stdout:"old-audit"} &&
+            Directory.GetFiles(retentionRoot,"jobs.db.schema3-*.backup").Length==1,"reconcile.v4_reopen_preserves_evidence");
+    }
+}
+finally{Directory.Delete(retentionRoot,true);}
+
+
+// A genuine SQLite/DPAPI fixture exercises session routing without impersonating users.
+string routingRoot=Path.Combine(Path.GetTempPath(),"WindowsAdminMCP-routing-"+Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(routingRoot);
+try
+{
+    using var routing=new JobCoordinator(Microsoft.Extensions.Logging.Abstractions.NullLogger<JobCoordinator>.Instance);
+    routing.Initialize(Path.Combine(routingRoot,"jobs.db"));
+    var owner=new UserSession("S-1-5-21-1-2-3-1001",1,"S-1-5-5-1-2");
+    var other=new UserSession("S-1-5-21-1-2-3-1002",2,"S-1-5-5-1-3");
+    var laterLogin=owner with {LogonSid="S-1-5-5-1-4"};
+    var req=new AdminRequest(AdminOperation.Job,JobAction.submit,Key:"user-job",Command:"Write-Output 1",ExecutionContext:CommandContext.USER);
+    Check(routing.Dispatch(req,"fixture",owner.Sid,owner).Status==StatusCode.USER_CONTEXT_UNAVAILABLE,"user.no_system_fallback");
+    Check(routing.DispatchWorker(new(WorkerAction.poll),owner).Status==StatusCode.OK,"user.worker_presence");
+    var admission=routing.Dispatch(req,"fixture",owner.Sid,owner);
+    Check(admission.Job is {ExecutionContext:CommandContext.USER,ExecutionSessionId:1},"user.bound_admission");
+    Check(routing.DispatchWorker(new(WorkerAction.poll),other).Work is null &&
+        routing.DispatchWorker(new(WorkerAction.poll),laterLogin).Work is null,"user.no_other_session_claim");
+    var lease=routing.DispatchWorker(new(WorkerAction.poll),owner).Work;
+    Check(lease is not null && lease.JobId==admission.Job?.JobId,"user.owner_claim");
+    if(lease is null)throw new InvalidOperationException("Missing fixture lease");
+    var secondAdmission=routing.Dispatch(req with {Key="user-job-two",Command="Write-Output 2"},"fixture",owner.Sid,owner);
+    var secondLease=routing.DispatchWorker(new(WorkerAction.poll),owner).Work;
+    Check(secondLease is not null && secondLease.JobId==secondAdmission.Job?.JobId && secondLease.LeaseId!=lease.LeaseId,
+        "user.two_independent_leases");
+    if(secondLease is null)throw new InvalidOperationException("Missing second fixture lease.");
+    Check(routing.Dispatch(new(AdminOperation.Job,JobAction.cancel,JobId:secondLease.JobId),"fixture",owner.Sid,owner).Job?.State==JobState.CANCEL_REQUESTED,
+        "user.cancel_individual_lease");
+    Check(routing.DispatchWorker(new(WorkerAction.heartbeat,secondLease.LeaseId),owner).CancelRequested &&
+        !routing.DispatchWorker(new(WorkerAction.heartbeat,lease.LeaseId),owner).CancelRequested,"user.cancel_not_cross_job");
+    string secondHash=Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(secondLease.Command))).ToLowerInvariant();
+    Check(routing.DispatchWorker(new(WorkerAction.complete,secondLease.LeaseId,new(ExecutionState.CANCELLED_UNKNOWN_EFFECT,secondHash,100)),owner).Status==StatusCode.OK,
+        "user.second_lease_independent_completion");
+    Check(routing.DispatchWorker(new(WorkerAction.heartbeat,lease.LeaseId),other).Status==StatusCode.LEASE_LOST,"user.no_other_session_heartbeat");
+    string hash=Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(lease.Command))).ToLowerInvariant();
+    var result=new ExecutionResult(ExecutionState.COMPLETED,hash,100,0,"user fixture");
+    Check(routing.DispatchWorker(new(WorkerAction.complete,lease.LeaseId,result),other).Status==StatusCode.LEASE_LOST,"user.no_other_session_completion");
+    Check(routing.DispatchWorker(new(WorkerAction.complete,lease.LeaseId,result),owner).Status==StatusCode.OK,"user.durable_completion");
+    var readback=routing.Dispatch(new(AdminOperation.Job,JobAction.logs,Key:"user-job"),"fixture",owner.Sid,owner);
+    Check(readback.Job is {State:JobState.COMPLETED,Execution:{ExecutionContext:CommandContext.USER,AuditPersisted:true,ExecutionSessionId:1}},"user.persisted_context");
+    Check(routing.Dispatch(req,"fixture",owner.Sid,laterLogin).Status==StatusCode.CONFLICT,"user.no_replay_new_logon");
+}
+finally{Directory.Delete(routingRoot,true);}
+
+
+// Receipt matching is separate from live remote acceptance.
+var observed=DateTimeOffset.UtcNow;
+var serviceFixture=new AdminStatus(StatusCode.OK,Guid.NewGuid().ToString("N"),123,StartedUtc:observed.AddMinutes(-5));
+var receiptFixture=new AcceptanceReceipt(1,new string('a',40),"fixture",observed,123,serviceFixture.StartedUtc!.Value,
+    456,observed.AddMinutes(-4),Guid.NewGuid().ToString("N"),Guid.NewGuid().ToString("N"),Guid.NewGuid().ToString("N"),Guid.NewGuid().ToString("N"),
+    Guid.NewGuid().ToString("N"),1,16,16,148,"image/png");
+Check(AcceptanceEvidence.Validate(receiptFixture,receiptFixture.Commit,serviceFixture,456,receiptFixture.TunnelStartedUtc,1,observed)==EvidenceCode.MATCHED,
+    "doctor.external_receipt_matches_generation");
+Check(AcceptanceEvidence.Validate(receiptFixture with {TunnelPid=789},receiptFixture.Commit,serviceFixture,456,receiptFixture.TunnelStartedUtc,1,observed)==EvidenceCode.STALE_OR_DIFFERENT_INSTALLATION,
+    "doctor.receipt_rejects_other_tunnel");
+Check(AcceptanceEvidence.Validate(receiptFixture with {ScreenshotSessionId=2},receiptFixture.Commit,serviceFixture,456,receiptFixture.TunnelStartedUtc,1,observed)==EvidenceCode.INVALID,
+    "doctor.receipt_rejects_other_desktop");
+
+
+// Deterministic budget arithmetic: no fixed worker count, fail closed on memory pressure.
+const ulong gib=1024UL*1024UL*1024UL;
+Check(ExecutionBudget.Evaluate(5,32*gib,20*gib,20*gib).CanStart,"parallel.capacity_above_four");
+Check(!ExecutionBudget.Evaluate(5,32*gib,1*gib,20*gib).CanStart,"parallel.physical_pressure");
+Check(!ExecutionBudget.Evaluate(5,32*gib,20*gib,1*gib).CanStart,"parallel.commit_pressure");
+Check(ExecutionBudget.Evaluate(40,128*gib,100*gib,100*gib).CanStart,"parallel.no_fixed_slot_count");

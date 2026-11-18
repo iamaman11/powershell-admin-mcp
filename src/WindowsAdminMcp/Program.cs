@@ -30,9 +30,9 @@ else if (args is ["maintenance", "store-schema"])
     Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(schema,PipeWire.Json));
     Environment.ExitCode=schema.Status==StoreSchemaCode.READBACK_FAILED?1:0;
 }
-else if (args is ["doctor"])
+else if (args is ["doctor"] || args is ["doctor","--evidence",_])
 {
-    var report=await Doctor.ObserveAsync();
+    var report=await Doctor.ObserveAsync(args.Length==3?args[2]:null);
     Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(report,PipeWire.Json));
     Environment.ExitCode=report.Status==DoctorState.OK?0:1;
 }
@@ -53,12 +53,12 @@ else if (args is ["stdio"])
     builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
     builder.Services.AddMcpServer(options =>
     {
-        options.ServerInfo = new() { Name = "windows-admin-mcp", Version = "0.8.0-dev" };
+        options.ServerInfo = new() { Name = "windows-admin-mcp", Version = BuildIdentity.McpVersion };
     }).WithStdioServerTransport().WithTools<AdminTools>();
     await builder.Build().RunAsync();
 }
 else
 {
-    Console.Error.WriteLine("Usage: WindowsAdminMCP.exe service|stdio|tunnel|doctor [boot]|maintenance store-schema");
+    Console.Error.WriteLine("Usage: WindowsAdminMCP.exe service|stdio|tunnel|doctor [boot|--evidence path]|maintenance store-schema");
     Environment.ExitCode = 2;
 }

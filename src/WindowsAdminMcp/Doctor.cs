@@ -11,9 +11,9 @@ internal enum DoctorState { OK, DEGRADED, NOT_TESTED }
 internal enum DoctorReason
 {
     OBSERVED, MISSING, ACCESS_OR_READBACK_FAILED, NOT_CANONICAL, HASH_MISMATCH,
-    MULTIPLE_PROCESSES, SERVICE_NOT_CONFIRMED, STORE_NOT_CONFIRMED, STORE_AT_CAPACITY,
+    MULTIPLE_PROCESSES, SERVICE_NOT_CONFIRMED, STORE_NOT_CONFIRMED, STORE_AT_CAPACITY, STORE_CAPACITY_WARNING,
     RECONCILIATION_REQUIRED, NETWORK_NOT_READY, BOOT_UNPROVEN, REMOTE_NOT_TESTED,
-    STARTUP_NOT_TESTED, DESKTOP_NOT_TESTED, MANIFEST_UNVERIFIED, STARTUP_NOT_READY, STARTUP_READBACK_FAILED
+    STARTUP_NOT_TESTED, DESKTOP_NOT_TESTED, EXTERNAL_RECEIPT_MATCHED, EXTERNAL_RECEIPT_INVALID, MANIFEST_UNVERIFIED, STARTUP_NOT_READY, STARTUP_READBACK_FAILED
 }
 [JsonConverter(typeof(JsonStringEnumConverter<DoctorComponent>))]
 internal enum DoctorComponent { Native, Package, PowerShell, Service, Store, Boot, Tun, Vendor, Remote, Startup, Desktop }
@@ -25,13 +25,14 @@ internal sealed record DoctorReport(int SchemaVersion,DoctorState Status,string 
     long ElapsedMs,DoctorCheck[] Checks,string RuntimeVersion,string? Executable,string PowerShellPath,
     AdminStatus? Service,StoreSummary? Store,BootObservation Boot,TunReadiness Tun,
     int? TunnelPid,string? VendorSha256,int SessionId,bool UserInteractive,
-    PackageObservation Package,StartupObservation? Startup);
+    PackageObservation Package,StartupObservation? Startup,VersionIdentity Versions,string RequiredTunAdapter,string RequiredDataplanePath,
+    EvidenceObservation RemoteEvidence,DateTimeOffset? TunnelStartedUtc,int? TunnelSessionId);
 
 internal static class Doctor
 {
     // No process start, screenshots, credentials, external requests, scheduler
     // changes or second SQLite connection. The service owns the store summary.
-    internal static async Task<DoctorReport> ObserveAsync()
+    internal static async Task<DoctorReport> ObserveAsync(string? evidencePath=null)
     {
         var clock=Stopwatch.StartNew();
         var checks=new List<DoctorCheck>();
@@ -67,8 +68,8 @@ internal static class Doctor
         var store=service?response.Store:null;
         var storeReason=store is null?DoctorReason.STORE_NOT_CONFIRMED:
             store.NeedsReconciliation>0?DoctorReason.RECONCILIATION_REQUIRED:
-            store.Total>=store.TotalLimit || store.Queued+store.Running+store.CancelRequested+store.WaitingForResume+store.WaitingForReboot>=store.ActiveLimit
-            ?DoctorReason.STORE_AT_CAPACITY:DoctorReason.OBSERVED;
+            store.Detailed>=store.TotalLimit
+            ?DoctorReason.STORE_AT_CAPACITY:store.CapacityWarning?DoctorReason.STORE_CAPACITY_WARNING:DoctorReason.OBSERVED;
         Add(DoctorComponent.Store,storeReason==DoctorReason.OBSERVED?DoctorState.OK:DoctorState.DEGRADED,storeReason,
             storeReason==DoctorReason.OBSERVED?DoctorAction.NONE:DoctorAction.INSPECT_JOBS);
         var boot=BootEvidence.Observe();
@@ -78,7 +79,7 @@ internal static class Doctor
         var tun=TunDependency.Observe();
         Add(DoctorComponent.Tun,tun==TunReadiness.READY?DoctorState.OK:DoctorState.DEGRADED,
             tun==TunReadiness.READY?DoctorReason.OBSERVED:DoctorReason.NETWORK_NOT_READY,tun==TunReadiness.READY?DoctorAction.NONE:DoctorAction.CHECK_INTERNET);
-        string? vendorHash=null;int? tunnelPid=null;
+        string? vendorHash=null;int? tunnelPid=null,tunnelSession=null;DateTimeOffset? tunnelStarted=null;
         DoctorReason vendorReason=DoctorReason.MISSING;
         try
         {
@@ -95,7 +96,8 @@ internal static class Doctor
                 else if(processes.Length==1)
                 {
                     if(string.Equals(processes[0].MainModule?.FileName,vendor,StringComparison.OrdinalIgnoreCase))
-                        tunnelPid=processes[0].Id;
+                        {tunnelPid=processes[0].Id;tunnelSession=processes[0].SessionId;
+                        tunnelStarted=new DateTimeOffset(processes[0].StartTime.ToUniversalTime());}
                     else vendorReason=DoctorReason.NOT_CANONICAL;
                 }
                 else if(vendorReason==DoctorReason.OBSERVED)vendorReason=DoctorReason.MISSING;
@@ -106,8 +108,15 @@ internal static class Doctor
         {vendorReason=DoctorReason.ACCESS_OR_READBACK_FAILED;}
         Add(DoctorComponent.Vendor,vendorReason==DoctorReason.OBSERVED?DoctorState.OK:DoctorState.DEGRADED,vendorReason,
             vendorReason==DoctorReason.OBSERVED?DoctorAction.NONE:DoctorAction.VERIFY_INSTALLATION);
-        // Process/file existence is not remote authorization or actual MCP traffic.
-        Add(DoctorComponent.Remote,DoctorState.NOT_TESTED,DoctorReason.REMOTE_NOT_TESTED,DoctorAction.VERIFY_SUPPORTED_REMOTE_ACCESS);
+        // Explicit external evidence is matched to the current installed commit,
+        // service/tunnel generation and durable jobs. It is not a live cloud probe.
+        var evidence=await AcceptanceEvidence.ObserveAsync(evidencePath,
+            package.Status==PackageCode.VERIFIED?package.Commit:null,service?response.Info:null,
+            vendorReason==DoctorReason.OBSERVED?tunnelPid:null,tunnelStarted,tunnelSession);
+        Add(DoctorComponent.Remote,evidence.RemoteReceiptMatched?DoctorState.OK:DoctorState.NOT_TESTED,
+            evidence.RemoteReceiptMatched?DoctorReason.EXTERNAL_RECEIPT_MATCHED:
+            evidence.Status==EvidenceCode.NOT_SUPPLIED?DoctorReason.REMOTE_NOT_TESTED:DoctorReason.EXTERNAL_RECEIPT_INVALID,
+            evidence.RemoteReceiptMatched?DoctorAction.NONE:DoctorAction.VERIFY_SUPPORTED_REMOTE_ACCESS);
         // Reuse the owner of Task Scheduler definition validation. Never execute
         // the installed script unless its complete protected package verifies.
         var startup=package.Status==PackageCode.VERIFIED && canonical && pwsh
@@ -116,12 +125,16 @@ internal static class Doctor
             startup.Ready?DoctorReason.OBSERVED:DoctorReason.STARTUP_NOT_READY;
         Add(DoctorComponent.Startup,startupReason==DoctorReason.OBSERVED?DoctorState.OK:DoctorState.DEGRADED,
             startupReason,startupReason==DoctorReason.OBSERVED?DoctorAction.NONE:DoctorAction.VERIFY_STARTUP);
-        Add(DoctorComponent.Desktop,DoctorState.NOT_TESTED,DoctorReason.DESKTOP_NOT_TESTED,DoctorAction.VERIFY_INTERACTIVE_DESKTOP);
+        Add(DoctorComponent.Desktop,evidence.DesktopReceiptMatched?DoctorState.OK:DoctorState.NOT_TESTED,
+            evidence.DesktopReceiptMatched?DoctorReason.EXTERNAL_RECEIPT_MATCHED:DoctorReason.DESKTOP_NOT_TESTED,
+            evidence.DesktopReceiptMatched?DoctorAction.NONE:DoctorAction.VERIFY_INTERACTIVE_DESKTOP);
         using var self=Process.GetCurrentProcess();
-        return new(1,checks.Any(c=>c.Status==DoctorState.DEGRADED)?DoctorState.DEGRADED:DoctorState.NOT_TESTED,
+        return new(1,checks.Any(c=>c.Status==DoctorState.DEGRADED)?DoctorState.DEGRADED:
+            checks.Any(c=>c.Status==DoctorState.NOT_TESTED)?DoctorState.NOT_TESTED:DoctorState.OK,
             Guid.NewGuid().ToString("N"),DateTimeOffset.UtcNow,clock.ElapsedMilliseconds,checks.ToArray(),
             RuntimeInformation.FrameworkDescription,Environment.ProcessPath,PowerShellRunner.Executable,
-            response.Info,store,boot,tun,tunnelPid,vendorHash,self.SessionId,Environment.UserInteractive,package,startup);
+            response.Info,store,boot,tun,tunnelPid,vendorHash,self.SessionId,Environment.UserInteractive,package,startup,
+            BuildIdentity.Observe(),TunDependency.AdapterName,TunDependency.DataplanePath,evidence,tunnelStarted,tunnelSession);
     }
 
     private static async Task<StartupObservation?> ReadStartupAsync(string root)

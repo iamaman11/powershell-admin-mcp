@@ -21,12 +21,18 @@ function Connect {
     return $p
 }
 function Send($p,$id,$method,$params){
+    if($method -eq 'tools/call' -and ($params.name -eq 'powershell_exec' -or
+        ($params.name -eq 'powershell_job' -and $params.arguments.action -eq 'submit')) -and
+        -not $params.arguments.ContainsKey('execution_context')){$params.arguments.execution_context='SYSTEM'}
     $m=@{jsonrpc='2.0';id=$id;method=$method;params=$params}
     $p.StandardInput.WriteLine(($m|ConvertTo-Json -Depth 12 -Compress));$p.StandardInput.Flush()
 }
-function Receive($p,$id){
+function Receive($p,$id,[int]$timeout=10){
+    $watch=[Diagnostics.Stopwatch]::StartNew()
     while($true){
-        $line=$p.StandardOutput.ReadLineAsync().WaitAsync([TimeSpan]::FromSeconds(10)).GetAwaiter().GetResult()
+        $remaining=[TimeSpan]::FromSeconds($timeout)-$watch.Elapsed
+        if($remaining.TotalMilliseconds -le 0){throw 'RECEIVE_TIMEOUT'}
+        $line=$p.StandardOutput.ReadLineAsync().WaitAsync($remaining).GetAwaiter().GetResult()
         if($null -eq $line){throw 'UNEXPECTED_EOF'}
         $m=$line|ConvertFrom-Json -AsHashtable
         if($m.Contains('id') -and $m.id -eq $id){
@@ -62,6 +68,10 @@ try{
         Assert (@($list.tools|Where-Object {$_.name -eq 'powershell_status' -and $_.Contains('outputSchema')}).Count -eq 1) 'r1.typed_status_schema'
         $v=Wait-Status $p 'OK'
         Assert ($v.service_pid -eq $svc.ProcessId -and $v.execution_sid -eq 'S-1-5-18' -and $v.elevated) 'r1.scm_pid_and_real_execution_identity'
+        $caller=[Security.Principal.WindowsIdentity]::GetCurrent()
+        Assert ($v.frontend.pid -eq $p.Id -and $v.frontend.sid -eq $caller.User.Value -and
+            $v.frontend.session_id -eq $p.SessionId -and $v.command_context -in @('SYSTEM','UNCONFIRMED') -and
+            $v.versions.mcp_version -eq '0.8.1-dev' -and $v.versions.store_schema -eq 4 -and $v.timing.ipc_ms -ge 0) 'hardening.separate_frontend_and_runner_identity'
     }
     foreach($p in @($a,$b,$c)){Send $p 2 'tools/call' @{name='powershell_status';arguments=@{};_meta=$meta}}
     $results=@(foreach($p in @($a,$b,$c)){(Receive $p 2).structuredContent})
@@ -70,6 +80,7 @@ try{
     Stop-Service $name
     $offline=Wait-Status $a 'SERVICE_UNAVAILABLE'
     Assert ($offline.native_error -eq 1062) 'r1.typed_service_offline'
+    Assert ($offline.command_context -eq 'UNCONFIRMED' -and $offline.frontend.pid -eq $a.Id) 'hardening.offline_context_not_falsely_confirmed'
     Start-Service $name
     $now=Wait-Status $a 'OK'
     $newSvc=Get-CimInstance Win32_Service -Filter "Name='$name'"
@@ -90,23 +101,90 @@ try{
     }
     $x=ToolCall $a 10 'powershell_exec' @{command="Write-Output 'real-exec'; [Security.Principal.WindowsIdentity]::GetCurrent().User.Value";timeout_seconds=10;operation_key='short'}
     Assert ($x.status -eq 'COMPLETED' -and $x.stdout.Contains('real-exec') -and $x.stdout.Contains('S-1-5-18') -and $x.audit_persisted) 'r3.actual_exec_service_context'
+    $unavailable=Job $a 119 @{action='submit';operation_key='no-user-worker';command="Write-Output 'MUST_NOT_RUN'";execution_context='USER'}
+    Assert ($unavailable.status -eq 'USER_CONTEXT_UNAVAILABLE' -and (-not $unavailable.Contains('job') -or $null -eq $unavailable.job)) 'hardening.no_silent_system_fallback'
     $prefix="Write-Output 'Проверка 🚀'"+[char]10+'#'
     $long=$prefix+('x'*(11982-$prefix.Length))
+    $shortLog=Job $b 101 @{action='logs';operation_key='short';step_index=1}
+    Assert ($shortLog.job.execution.audit_persisted -and $shortLog.job.execution.stdout.Contains('real-exec') -and
+        $shortLog.timing.store_ms -ge 0 -and $shortLog.job.execution.queue_wait_ms -ge 0) 'hardening.exec_and_logs_same_persisted_audit'
+    $badIndex=Job $b 102 @{action='logs';operation_key='short';step_index=0}
+    Assert ($badIndex.status -eq 'INVALID_ARGUMENT') 'hardening.zero_step_index_rejected'
     $x=ToolCall $b 11 'powershell_exec' @{command=$long;timeout_seconds=10;operation_key='long'}
     Assert ($x.status -eq 'COMPLETED' -and $x.stdout.Trim() -ceq 'Проверка 🚀') 'r3.long_unicode_through_mcp'
-    $first=Job $a 12 @{action='submit';operation_key='shared';command="Start-Sleep -Seconds 5; Write-Output 'first'";timeout_seconds=20}
+    # A 100-second benign runner command must return PENDING in the 90-second client budget
+    # and continue to completion through the same durable job API.
+    $boundaryClock=[Diagnostics.Stopwatch]::StartNew()
+    Send $a 103 'tools/call' @{name='powershell_exec';arguments=@{command="Start-Sleep -Seconds 100; Write-Output 'BOUNDARY_OK'";timeout_seconds=120;operation_key='boundary-exec'};_meta=$meta}
+    $boundary=(Receive $a 103 110).structuredContent
+    Assert ($boundary.status -eq 'PENDING' -and $boundary.job_id -and
+        -not $boundary.audit_persisted -and $boundaryClock.Elapsed.TotalSeconds -lt 110) 'hardening.exec_boundary_pending_before_tunnel_deadline'
+    $boundaryId=$boundary.job_id
+    $boundaryResult=Wait-JobState $b $boundaryId 'COMPLETED'
+    Assert ($boundaryResult.execution.stdout.Trim() -ceq 'BOUNDARY_OK' -and $boundaryResult.execution.audit_persisted) 'hardening.boundary_result_saved'
+    # Real workload overlap: six distinct live PowerShell trees, three SDK
+    # frontends, then a seventh independent short command before releasing them.
+    $parallelDir=Join-Path $data 'parallel-fixture'
+    [IO.Directory]::CreateDirectory($parallelDir)|Out-Null
+    $release=Join-Path $parallelDir 'release'
+    $safeRelease=$release.Replace("'","''")
+    $runs=@()
+    for($i=0;$i -lt 6;$i++){
+        $ready=Join-Path $parallelDir ('ready-'+$i)
+        $safeReady=$ready.Replace("'","''")
+        $command="[IO.File]::WriteAllText('$safeReady',[string]`$PID); while(-not [IO.File]::Exists('$safeRelease')){Start-Sleep -Milliseconds 100}; Write-Output 'parallel-$i'"
+        $client=@($a,$b,$c)[$i%3]
+        $admitted=Job $client (3000+$i) @{action='submit';operation_key=('parallel-many-'+$i);command=$command;timeout_seconds=60}
+        Assert ($admitted.status -eq 'OK' -and $admitted.job.job_id) ('parallel.admitted.'+$i)
+        $runs+=@{id=$admitted.job.job_id;ready=$ready;marker=('parallel-'+$i)}
+    }
+    $parallelClock=[Diagnostics.Stopwatch]::StartNew()
+    try{
+        do{
+            $readyCount=@($runs|Where-Object {Test-Path -LiteralPath $_.ready}).Count
+            if($readyCount -eq 6){break}
+            Start-Sleep -Milliseconds 100
+        }while($parallelClock.Elapsed.TotalSeconds -lt 25)
+        if($readyCount -ne 6){
+            $details=Job $b 3100 @{action='list';page_size=100}
+            Write-Host ('PARALLEL_CAPACITY '+($details.store.budget|ConvertTo-Json -Compress))
+            throw 'PARALLEL_SIX_PROCESSES_NOT_OBSERVED'
+        }
+        $processIds=@($runs|ForEach-Object {[int](Get-Content -LiteralPath $_.ready -Raw)})
+        Assert (@($processIds|Select-Object -Unique).Count -eq 6 -and @($processIds|ForEach-Object {Get-Process -Id $_ -ErrorAction SilentlyContinue}).Count -eq 6) 'parallel.six_real_live_powershell_processes'
+        $fast=ToolCall $c 3101 'powershell_exec' @{operation_key='parallel-seventh';command="Write-Output 'SEVENTH'";timeout_seconds=10}
+        Assert ($fast.status -eq 'COMPLETED' -and $fast.stdout.Trim() -ceq 'SEVENTH') 'parallel.seventh_completes_while_six_active'
+        $ack=Job $b 3102 @{action='cancel';job_id=$runs[0].id}
+        Assert ($ack.status -eq 'OK' -and $ack.job.state -eq 'CANCEL_REQUESTED') 'parallel.cancel_one'
+        $interrupted=Wait-JobState $c $runs[0].id 'NEEDS_RECONCILIATION'
+        Assert ($interrupted.execution.status -eq 'CANCELLED_UNKNOWN_EFFECT') 'parallel.cancelled_tree_unknown_not_replayed'
+        $remaining=Job $b 3103 @{action='status';job_id=$runs[1].id}
+        Assert ($remaining.job.state -eq 'RUNNING') 'parallel.cancel_does_not_interrupt_other_job'
+        Assert (-not (Get-Process -Id $processIds[0] -ErrorAction SilentlyContinue)) 'parallel.cancelled_pid_gone'
+    }finally{
+        [IO.File]::WriteAllText($release,'release')
+    }
+    for($i=1;$i -lt 6;$i++){
+        $done=Wait-JobState $b $runs[$i].id 'COMPLETED'
+        Assert ($done.execution.stdout.Trim() -ceq $runs[$i].marker -and $done.execution.audit_persisted) ('parallel.distinct_saved_result.'+$i)
+    }
+    $first=Job $a 12 @{action='submit';operation_key='shared';resource_key='fixture-fifo';command="Start-Sleep -Seconds 12; Write-Output 'first'";timeout_seconds=20}
     Assert ($first.status -eq 'OK' -and $first.job.state -eq 'QUEUED') 'r3.durable_admission'
     $null=Wait-JobState $b $first.job.job_id 'RUNNING'
-    Send $b 13 'tools/call' @{name='powershell_job';arguments=@{action='submit';operation_key='next';command="Write-Output 'second'";timeout_seconds=10};_meta=$meta}
-    Send $c 13 'tools/call' @{name='powershell_job';arguments=@{action='submit';operation_key='shared';command="Start-Sleep -Seconds 5; Write-Output 'first'";timeout_seconds=20};_meta=$meta}
+    $independent=Job $c 120 @{action='submit';operation_key='parallel-short';command="Write-Output 'INDEPENDENT'";timeout_seconds=10}
+    $fast=Wait-JobState $c $independent.job.job_id 'COMPLETED'
+    $still=Job $b 121 @{action='status';job_id=$first.job.job_id}
+    Assert ($fast.execution.stdout.Trim() -ceq 'INDEPENDENT' -and $still.job.state -eq 'RUNNING') 'parallel.short_finishes_while_long_active'
+    Send $b 13 'tools/call' @{name='powershell_job';arguments=@{action='submit';operation_key='next';resource_key='fixture-fifo';command="Write-Output 'second'";timeout_seconds=10};_meta=$meta}
+    Send $c 13 'tools/call' @{name='powershell_job';arguments=@{action='submit';operation_key='shared';resource_key='fixture-fifo';command="Start-Sleep -Seconds 12; Write-Output 'first'";timeout_seconds=20};_meta=$meta}
     $next=(Receive $b 13).structuredContent;$dup=(Receive $c 13).structuredContent
-    Assert ($next.job.state -eq 'QUEUED' -and $dup.job.job_id -eq $first.job.job_id) 'r3.concurrent_fifo_and_idempotency'
-    $conflict=Job $c 14 @{action='submit';operation_key='shared';command="Write-Output 'different'"}
+    Assert ($next.job.state -eq 'QUEUED' -and $dup.job.job_id -eq $first.job.job_id) 'parallel.explicit_resource_fifo_and_idempotency'
+    $conflict=Job $c 14 @{action='submit';operation_key='shared';resource_key='fixture-fifo';command="Write-Output 'different'"}
     Assert ($conflict.status -eq 'CONFLICT') 'r3.same_key_different_payload_conflict'
     $a.Kill($true);$a.WaitForExit()
     $one=Wait-JobState $b $first.job.job_id 'COMPLETED'
     $two=Wait-JobState $c $next.job.job_id 'COMPLETED'
-    Assert ($one.execution.stdout.Trim() -eq 'first' -and $two.execution.stdout.Trim() -eq 'second') 'r3.disconnect_and_distinct_results'
+    Assert ($one.execution.stdout.Trim() -eq 'first' -and $two.execution.stdout.Trim() -eq 'second' -and $one.execution.audit_persisted -and $two.execution.audit_persisted) 'r3.disconnect_and_distinct_results'
     $kill=Job $b 15 @{action='submit';operation_key='cancel';command='Start-Sleep -Seconds 30';timeout_seconds=60}
     $null=Wait-JobState $c $kill.job.job_id 'RUNNING'
     Start-Sleep -Milliseconds 700
@@ -117,18 +195,28 @@ try{
     Stop-Service $name
     Start-Service $name
     $null=Wait-Status $b 'OK'
+    $unknownSource=Job $c 114 @{action='logs';job_id=$kill.job.job_id;step_index=1;include_interrupted_command=$true}
+    Assert ($unknownSource.job.interrupted_source_available -and $unknownSource.job.interrupted_command -ceq 'Start-Sleep -Seconds 30') 'hardening.interrupted_source_retained'
+    $decision=Job $c 115 @{action='reconcile';job_id=$kill.job.job_id;decision='UNKNOWN';evidence='Isolated cancellation fixture: effect deliberately unknown.'}
+    Assert ($decision.status -eq 'OK' -and $decision.job.state -eq 'RECONCILED' -and $decision.job.reconciliation.decision -eq 'UNKNOWN') 'hardening.reconcile_unknown'
+    $repeat=Job $b 116 @{action='reconcile';job_id=$kill.job.job_id;decision='UNKNOWN';evidence='Isolated cancellation fixture: effect deliberately unknown.'}
+    Assert ($repeat.status -eq 'OK' -and $repeat.job.reconciliation.correlation_id -eq $decision.job.reconciliation.correlation_id) 'hardening.reconciliation_idempotent'
+    $change=Job $b 117 @{action='reconcile';job_id=$kill.job.job_id;decision='EFFECT_CONFIRMED';evidence='Different decision'}
+    Assert ($change.status -eq 'CONFLICT') 'hardening.reconciliation_immutable'
+    $noreplay=Job $b 118 @{action='submit';operation_key='cancel';command='Start-Sleep -Seconds 30';timeout_seconds=60}
+    Assert ($noreplay.job.state -eq 'RECONCILED' -and $noreplay.job.job_id -eq $kill.job.job_id) 'hardening.reconciled_key_no_replay'
     $saved=Job $c 17 @{action='logs';job_id=$first.job.job_id}
     Assert ($saved.job.state -eq 'COMPLETED' -and $saved.job.execution.stdout.Trim() -eq 'first') 'r3.persisted_real_output'
     $list=Job $c 18 @{action='list'}
-    Assert (@($list.jobs|Where-Object {$_.job_id -eq $kill.job.job_id -and $_.state -eq 'NEEDS_RECONCILIATION'}).Count -eq 1) 'r3.list_recovery'
+    Assert (@($list.jobs|Where-Object {$_.job_id -eq $kill.job.job_id -and $_.state -eq 'RECONCILED'}).Count -eq 1) 'r3.list_recovery'
     Write-Host 'R3_NATIVE_JOBS=PASS (actual service and PowerShell, three SDK stdio clients; no live tunnel/reboot)'
     # Real non-idempotent local side effect, followed by a deliberate interruption.
     $marker=Join-Path $data 'recovery-marker.txt'
     $safePath=$marker.Replace("'","''")
     $scriptA="[IO.File]::AppendAllText('$safePath','A'); Start-Sleep -Seconds 90"
     $scriptB="[IO.File]::AppendAllText('$safePath','B'); Write-Output 'R4_OUTPUT_FIXTURE_7A98E1'"
-    $active=Job $b 30 @{action='submit';operation_key='r4-crash-active';command=$scriptA;timeout_seconds=120}
-    $queued=Job $c 31 @{action='submit';operation_key='r4-crash-queued';command=$scriptB;timeout_seconds=20}
+    $active=Job $b 30 @{action='submit';operation_key='r4-crash-active';resource_key='fixture-crash';command=$scriptA;timeout_seconds=120}
+    $queued=Job $c 31 @{action='submit';operation_key='r4-crash-queued';resource_key='fixture-crash';command=$scriptB;timeout_seconds=20}
     Assert ($active.status -eq 'OK' -and $queued.status -eq 'OK') 'r4.durable_pending_jobs'
     $deadline=[Diagnostics.Stopwatch]::StartNew()
     while($deadline.Elapsed.TotalSeconds -lt 10){
@@ -150,7 +238,7 @@ try{
     Assert ((-not $unknown.Contains('execution') -or $null -eq $unknown['execution']) -and $unknown.job_id -eq $active.job.job_id) 'r4.unknown_effect_not_replayed'
     $recovered=Wait-JobState $c $queued.job.job_id 'COMPLETED'
     Assert ($recovered.execution.stdout.Trim() -eq 'R4_OUTPUT_FIXTURE_7A98E1' -and [IO.File]::ReadAllText($marker) -ceq 'AB') 'r4.queued_runs_after_crash_effect_exactly_once_in_fixture'
-    $again=Job $b 32 @{action='submit';operation_key='r4-crash-active';command=$scriptA;timeout_seconds=120}
+    $again=Job $b 32 @{action='submit';operation_key='r4-crash-active';resource_key='fixture-crash';command=$scriptA;timeout_seconds=120}
     Assert ($again.job.job_id -eq $active.job.job_id -and $again.job.state -eq 'NEEDS_RECONCILIATION') 'r4.retry_cannot_replay_unknown_effect'
     Stop-Service $name
     # Read actual persisted database bytes only while SCM service is stopped.
@@ -254,7 +342,7 @@ try{
     }finally{if(-not $doctorProc.HasExited){$doctorProc.Kill($true);$doctorProc.WaitForExit()};$doctorProc.Dispose()}
     $doctor=$rawDoctor|ConvertFrom-Json -AsHashtable
     Assert ($doctor.schemaVersion -eq 1 -and $doctor.status -eq 'DEGRADED' -and $doctorExit -eq 1) 'r6.doctor_reports_isolated_install_degraded'
-    Assert ($doctor.service.service_pid -eq (Get-CimInstance Win32_Service -Filter "Name='$name'").ProcessId -and $doctor.store.schemaVersion -eq 3) 'r6.doctor_authoritative_service_store'
+    Assert ($doctor.service.service_pid -eq (Get-CimInstance Win32_Service -Filter "Name='$name'").ProcessId -and $doctor.store.schemaVersion -eq 4) 'r6.doctor_authoritative_service_store'
     Assert ($doctor.store.total -gt 0 -and $doctor.store.waitingForReboot -eq 0 -and $doctor.store.needsReconciliation -ge 1) 'r6.doctor_total_state_counts'
     Assert (@($doctor.checks|Where-Object {$_.component -eq 'Remote' -and $_.status -eq 'NOT_TESTED'}).Count -eq 1) 'r6.doctor_no_false_remote_acceptance'
     $performance=& (Join-Path $PSScriptRoot 'Test-NativePerformance.ps1') -Exe $Exe -DurationSeconds 12 -ExerciseJobs|ConvertFrom-Json

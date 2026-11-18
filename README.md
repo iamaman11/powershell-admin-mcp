@@ -1,54 +1,96 @@
-# WindowsAdminMCP — one-command start
+# WindowsAdminMCP — native Windows administration
 
-**WindowsAdminMCP 0.7.0.** Canonical source: iamaman11/powershell-admin-mcp.
-One official OpenAI Secure MCP tunnel runtime v0.0.19; one Windows PowerShell MCP stdio server; three tools: `powershell_status`, `powershell_exec`, and `powershell_screenshot`. No extra daemon, database, service, scheduler, mode selector or per-command approval.
+Canonical source: [iamaman11/powershell-admin-mcp](https://github.com/iamaman11/powershell-admin-mcp).
+Candidate native MCP 0.8.1-dev; .NET 10; official OpenAI tunnel-client 0.0.21; SQLite schema 4. The installed commit and version must be read back from the actual service. CI success is not remote acceptance.
 
-## Everyday use
+## Architecture and execution context
 
-In an **elevated PowerShell 7** window:
+One Windows service (SYSTEM) owns the durable SQLite queue, state transitions, encrypted job data and concurrent system execution. One existing interactive elevated tunnel host runs the same native PowerShellRunner for USER jobs in its own Windows logon. The MCP frontend uses the existing authenticated local pipe. The service derives the SID, logon SID and session from Windows rather than accepting arbitrary user IDs. No password/token duplication, separate tunnel, new service, or automatic user impersonation for execution.
 
-```powershell
-& "$env:ProgramFiles\WindowsAdminMCP\WindowsAdminMCP.ps1" start
-```
+`powershell_exec` and `powershell_job submit` default to USER for non-SYSTEM clients; explicitly set execution_context=SYSTEM for service operations. USER uses the existing administrator profile, HKCU, environment and user network/application permissions. Unavailable matching runner returns USER_CONTEXT_UNAVAILABLE; never silently switch to SYSTEM. A persisted USER job stays bound to its original logon/sid/session; after logoff a different logon cannot claim/resume it. Old queued USER work can be cancelled; interrupted work needs reconciliation. Reboot checkpoints require explicit SYSTEM. Local admins are trusted administrators, not a security sandbox; physical multi-user fairness and session transitions still require acceptance.
 
-This starts **both tunnel and MCP** with full administrator PowerShell access. **No `ENABLE`, mode selection or runtime API key input on every launch.** Running twice while healthy is idempotent (`ALREADY_RUNNING`). Stop intentionally from an elevated local console via the same entrypoint with `stop`.
+INTERNET owns networking. Tunnel startup intentionally requires the current supported INTERNET deployment: adapter internet-tun Up and exactly one running C:\internet\sing-box.exe. The app reads these prerequisites and does not change routes or start INTERNET. RDP, locked or non-console desktops do not capture the physical desktop; typed failure explains the check. WSL, Docker, browser and mapped drive support depends on the actual caller's profile and privileges; the CLI's presence is not proof that a daemon or distribution is running.
 
-```powershell
-& "$env:ProgramFiles\WindowsAdminMCP\WindowsAdminMCP.ps1" status
-& "$env:ProgramFiles\WindowsAdminMCP\WindowsAdminMCP.ps1" test
-& "$env:ProgramFiles\WindowsAdminMCP\WindowsAdminMCP.ps1" stop
-```
+## One operator entry point
 
-## Initial credential setup — only once per Windows machine
-
-**The official OpenAI tunnel still requires its runtime API key** to authenticate; this project does not remove or bypass authentication. To stop asking on every run, configure it once in the interactive elevated Windows console:
+Run locally in elevated PowerShell 7 (Windows x64) from the authorized interactive logon:
 
 ```powershell
-& "$env:ProgramFiles\WindowsAdminMCP\WindowsAdminMCP.ps1" configure
+$admin = "$env:ProgramFiles\WindowsAdminMCP\native\WindowsAdminMCP.ps1"
+& $admin status
+& $admin start
+& $admin doctor
+& $admin stop
 ```
 
-Enter the runtime API key **once**. The tunnel ID is discovered automatically from the active tunnel, current environment, or a protected v0.4/v0.5 launcher backup on this Windows installation; it is never requested interactively. If it cannot be recovered, `configure` reports `TUNNEL_ID_AUTODISCOVERY_FAILED` without modifying credentials. After configuration, the identifier is stored with the encrypted runtime key and is never requested again. The complete credential is encrypted with **Windows DPAPI LocalMachine** in `%ProgramData%\WindowsAdminMCP\tunnel-credential.dpapi`, a directory restricted to Administrators and SYSTEM. It is never committed to GitHub or echoed. **If this encrypted configuration is absent, start fails explicitly and does not ask for a key.** Rotation: rerun `configure`.
+Stop disconnects the interactive tunnel but does not stop the durable system service. For deliberate offline maintenance use an independent local console and finish/cancel active work first. The old root PowerShell MCP and v0.7 installer/launch path are retired; do not run old copies left outside the native package. The source root installer forwards to installer/Install-Native.ps1. Credential configuration is local-only and one-time; existing protected DPAPI credentials are reused for updates.
 
-Use `install` on the same entrypoint from an authorized checkout to install or update. The installer checks fixed SHA-256 of the MCP server and the official OpenAI tunnel executable.
+## Install, update, trial and rollback
 
-## Safety and known limits
+Use the CI package ZIP and its published SHA-256 from the exact accepted commit, not source-script installation. From a trusted checkout:
 
-- `powershell_exec` provides **unrestricted elevated Windows PowerShell** after the locally configured tunnel is connected. Treat access to the tunnel and the host as administrator-level authorization.
-- Code and runtime are hash-pinned; commands are serialized, bounded, timed out, cancellable and audited. Timeout or cancel of a started command does not undo side effects.
-- No one-shot approval files, SAFE / APPROVAL / SUPERVISED modes, interactive ENABLE step, or persisted raw secrets.
-- DPAPI LocalMachine keeps credentials tied to Windows. Backup/restore onto a different computer requires configuring again.
-- Persisted resumable jobs, power-loss recovery, effective non-admin ACL denial and end-to-end tunnel concurrency remain unaccepted; see Issue #1. CI passing does not prove these.
+```powershell
+.\Install-WindowsAdminMCP.ps1 -Action Verify -PackagePath <zip> -ExpectedSha256 <sha256>
+.\Install-WindowsAdminMCP.ps1 -Action Install -PackagePath <zip> -ExpectedSha256 <sha256>
+.\Install-WindowsAdminMCP.ps1 -Action Prepare -ExpectedCommit <commit>
+```
 
-## Intermittent initialization conflict (409)
+For an existing install, use the independent local console to stop the tunnel and service intentionally and run `Maintenance -ExpectedCommit <installed-commit>` before file replacement. Prepare creates the one demand-start trial task. Start via the native operator; verify all four tools externally, refresh the existing connector catalog, check actual service and vendor, then run `Accept -ExpectedCommit <commit> -RemoteAcceptanceConfirmed` only after real client acceptance. This enables normal startup. The installer never performs live replacement. `Rollback` is offline only and refuses an older binary that cannot read the current store. Schema 2/3 is backed up before transactional migration to 4; **never restore stale database backups automatically**. Same-schema rollback must preserve jobs and idempotency keys.
 
-The official OpenAI tunnel-client **v0.0.19** rejects legacy `tools/call` when the stdio child has not completed both `initialize` and `notifications/initialized`, returning HTTP 409 `mcp_initialization_required` **before the PowerShell MCP server receives the call**. The standard `start` launcher enables the vendor-supported `MCP_STDIO_SEND_INITIALIZED_NOTIFICATION=true` shim: after a successful `initialize`, the runtime sends the initialized notification, suppressing a duplicate from the remote caller. This requires restarting the single tunnel-client process to take effect; updating files without restarting does not change the current runtime process.
+## Tools
 
-Check `http://127.0.0.1:8080/metrics` for `command_end_to_end_latency_milliseconds_count` with `request_method="tools/call"` and `tunnel_service_status="409"`. A 409 is a **tunnel/client lifecycle rejection**, not a Windows command failure. `/readyz` = 200 checks runtime readiness, not the readiness of every legacy MCP client session. If a 409 recurs after the shim is active, the caller must complete `initialize` before retrying; **never automatically re-run a side-effecting `powershell_exec` whose outcome is unknown**. No extra process, scheduler, or second tunnel is required.
+- powershell_status: service identity (SYSTEM), authenticated frontend identity, USER runner availability, actual assembly/MCP/.NET/store versions, pinned expected tunnel version and local timings.
+- powershell_exec: durable single step, execution timeout 1–120 s, synchronous wait capped at 90 s from entry. PENDING carries job_id; inspect it, don't resubmit with a different key.
+- powershell_job: submit (1–8 steps, each timeout 1–3600 s), status by job_id or operation_key, logs (step_index **1-based**, 1..total_steps), list with state_filter/page_size (1–100)/before_seq cursor, cancel, resume, reconcile, prune.
+- powershell_screenshot: PNG ImageContent; bounded region and image size. Requires authorized default physical console; never unlocks or switches sessions. Returns typed reason and local timing on failure.
 
-## MCP 2026-07-28 and direct screen capture
+All commands are trusted administrative PowerShell, not sandboxed. Timeout/cancel may leave side effects. A disconnected request does not grant permission to replay. USER worker loss records unknown effect; jobs are not automatically retried.
 
-This single stdio MCP server now supports **modern MCP 2026-07-28** and existing **legacy MCP 2025-06-18** clients. Modern requests include `params._meta["io.modelcontextprotocol/protocolVersion"] = "2026-07-28"` and `params._meta["io.modelcontextprotocol/clientCapabilities"] = {}`; a prior `initialize` is not required. `server/discover` advertises 2026-07-28; modern replies include `resultType: "complete"`, unsupported versions return `-32022`, missing capabilities return `-32602`. Legacy `initialize` still selects 2025-06-18, with the official tunnel's initialized notification shim retained.
+## Unknown effects and history
 
-**`powershell_screenshot`** takes an optional zero-based `monitor`, screen-relative `x, y, width, height`, and `max_width` (256..1920; default 1280). A screenshot is captured from the existing Windows interactive desktop and returned **directly as PNG ImageContent** with base64 image data. There is no persisted PNG, new service, background process, or second tunnel. Images may contain personal data or passwords visible on screen. Capture is bounded to 16 million pixels and a 2 MB PNG; oversized results are downscaled. If the interactive desktop is unavailable or locked, the result is a typed tool error with next action; CI/headless runs test failure paths without pretending to capture the screen.
+Use logs to inspect the interrupted step. Original source is encrypted for new interrupted jobs; `interrupted_source_available` discloses availability without exposing text. `include_interrupted_command=true` is an explicit operator-authorized read only for the unresolved step and may reveal sensitive script text; never request it automatically. Some legacy v3 commands were already erased and cannot be recovered from the store.
 
-**End-to-end acceptance** additionally requires this tool to be exposed by the ChatGPT connector and the image to arrive in the model's tool result. Offline and on-host PNG checks alone cannot prove the connector has refreshed its tool schema. When the connector exposes only the previous two tools, refresh/reconnect its tool discovery before claiming visual functionality.
+Use reconcile with decision EFFECT_CONFIRMED, NO_EFFECT_CONFIRMED or UNKNOWN and concise evidence. The service stores the immutable decision, time, correlation and authenticated local caller SID; the original execution status and key remain. RECONCILED never means successful execution. Repeating an identical decision is idempotent, contradictory changes conflict. Resume cannot replay interrupted work.
+
+Independent jobs start individual native PowerShell processes on demand, with no fixed worker count. A conservative Windows memory/commit reserve gates new launches; the store remains the queue. Memory observations/active reservations are diagnostic estimates and not per-script hard resource limits. A named resource_key serializes active steps using that same name; '*' is globally exclusive while active and a queued exclusive step drains existing work. Reboot plans use global exclusivity. Callers must declare conflicts: arbitrary scripts cannot be analysed reliably for shared effects. Locks cover execution of a step, not an entire paused plan or unknown external effects.
+
+The store keeps at most 10,000 detailed job histories and warns above 80%. Terminal output is compacted after 30 days in bounded batches (explicit prune, retain_days 0–30, default 30, up to 8 per call). NEEDS_RECONCILIATION and active jobs are excluded. Original command/result hashes, output digests and lengths, state, audit metadata, operator evidence and operation keys remain. Compacted logs return HISTORY_PRUNED, not a new execution. If capacity is exhausted by protected/recent records there is a typed STORE_FULL; use supported reconcile/prune, never edit SQLite manually. Indefinite idempotency metadata still requires disk capacity monitoring. audit_persisted means a stored step result or retained audit summary, never mere admission and never an independent external audit claim.
+
+## Diagnostics and evidence
+
+Timing fields include UTC start, frontend tool_ms, scm_ms, ipc_ms, service_ms, store_wait_ms, store_ms, capture_ms when relevant. Durably stored results include queue_wait_ms, step start/end and runner elapsed_ms when known. Timings overlap (IPC includes service); don't add them indiscriminately. Service warnings correlate slow local IPC. The official runtime owns cloud polling and response delivery; local timing boundaries do not identify cloud enqueue/delivery/client latency on their own. Match remote call IDs and UTC against supported tunnel evidence. Do not report unrelated latency samples as one trace.
+
+Doctor is read-only. Without external evidence Remote/Desktop remain NOT_TESTED. To incorporate a real external acceptance result, supply a bounded JSON receipt to `& $admin doctor -EvidencePath <receipt.json>`. Its scope is operator-attested external evidence, not a live cloud or desktop probe. It must match current commit, service and tunnel generation and age <=24h; doctor independently checks durable short/long/cancelled job records. Screenshot is an operator-attested PNG receipt; never save the actual image. Example fields (camelCase, replace with actual observed values):
+
+```json
+{
+  "schema": 1,
+  "commit": "<exact commit>",
+  "runId": "<unique run id>",
+  "observedUtc": "<UTC>",
+  "servicePid": 123,
+  "serviceStartedUtc": "<UTC from status>",
+  "tunnelPid": 456,
+  "tunnelStartedUtc": "<UTC from doctor>",
+  "statusCorrelationId": "<32 hex>",
+  "shortJobId": "<32 hex>",
+  "longJobId": "<32 hex>",
+  "cancelledJobId": "<32 hex>",
+  "screenshotCorrelationId": "<32 hex>",
+  "screenshotSessionId": 1,
+  "screenshotWidth": 16,
+  "screenshotHeight": 16,
+  "screenshotPngBytes": 148,
+  "screenshotMime": "image/png"
+}
+```
+
+Run short command Write-Output 'WADMIN-ACCEPT-<runId>-SHORT' with key <runId>-exec; long command Start-Sleep -Seconds 130; Write-Output 'WADMIN-ACCEPT-<runId>-LONG' with key <runId>-long; submit the long and queued steps with the same resource_key accept-<runId>; cancel the harmless queued step with key <runId>-queue before long completes. Independently submit a short command while the long job is active to confirm actual concurrent dispatch. Record actual UUIDs, client-side latencies and exact success/error status. Screenshot fields are optional if not tested.
+
+For physical smoke acceptance, use the trusted checkout's `tests/Test-InstalledCandidate.ps1 -Exe <installed-native-exe>` from the authorized elevated user session after trial startup. It checks actual USER profile/HKCU/elevation, two concurrent USER jobs with independent SYSTEM execution, and distinct audited output. Opt in to `-CheckUserResources` on the target workstation to verify existing GitHub CLI authorization and read-only WSL/Docker-context queries; no secret or screen image is saved. This is local SDK evidence, not external tunnel acceptance.
+
+## Acceptance boundaries
+
+Windows CI exercises isolated service crashes, durable jobs, SQLite migration, checkpoint/reboot guards, package upgrade and compatible rollback, SDK contracts, queue/timeout/cancel/idempotency, and local latency fixtures. Real Windows reboot is excluded by owner instruction; forced physical power loss, live tunnel interruption, actual 24h soak, RDP/locked/logoff scenarios, real administrators, actual installed upgrade and external PNG acceptance must be separately evidenced. No green CI or local readiness response alone proves these.
+
+Reference: [Issue #2](https://github.com/iamaman11/powershell-admin-mcp/issues/2).
