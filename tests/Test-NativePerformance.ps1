@@ -54,6 +54,17 @@ function Call($p,$id,$name,$arguments){
     Send $p $id $name $arguments
     Receive $p $id
 }
+function Require-Job($reply,[string]$phase){
+    if($reply -isnot [Collections.IDictionary] -or -not $reply.Contains('status')){
+        throw "PERF_INVALID_STRUCTURED_REPLY phase=$phase"
+    }
+    if($reply.status -ne 'OK' -or -not $reply.Contains('job') -or $null -eq $reply.job){
+        # Report only status and transport timings; never script or output.
+        $diagnostic=[ordered]@{phase=$phase;status=$reply.status;correlation_id=$reply['correlation_id'];native_error=$reply['native_error'];timing=$reply['timing']}
+        throw ('PERF_JOB_REPLY '+($diagnostic|ConvertTo-Json -Depth 6 -Compress))
+    }
+    return $reply.job
+}
 function Confirm-Status($s){
     if($s.status -ne 'OK' -or $s.service_pid -ne $servicePid -or $s.execution_sid -ne 'S-1-5-18'){throw 'PERF_SERVICE_CHANGED'}
 }
@@ -102,11 +113,11 @@ try{
         $prefix='perf-'+[guid]::NewGuid().ToString('N')
         $sequence++
         $hold=Call $clients[0] $sequence 'powershell_job' @{action='submit';operation_key=$prefix+'-hold';resource_key=$prefix;command="Start-Sleep -Seconds 35; Write-Output 'perf-fixture'";timeout_seconds=55}
-        if($hold.status -ne 'OK'){throw 'PERF_HOLD_ADMISSION'}
+        $null=Require-Job $hold 'hold-admission'
         $watch=[Diagnostics.Stopwatch]::StartNew()
         do{
             $sequence++;$s=Call $clients[1] $sequence 'powershell_job' @{action='status';job_id=$hold.job.job_id}
-            if($s.status -ne 'OK'){throw 'PERF_HOLD_STATUS'}
+            $null=Require-Job $s 'hold-status'
             if($s.job.state -eq 'RUNNING'){break}
             if($s.job.state -ne 'QUEUED'){throw 'PERF_HOLD_EARLY_END'}
             Start-Sleep -Milliseconds 50
@@ -118,30 +129,33 @@ try{
         $execQueued.Add($watch.Elapsed.TotalMilliseconds)
         if($pending.status -ne 'PENDING' -or -not $pending.job_id){throw 'PERF_PENDING_EXPECTED'}
         $sequence++;$cancelled=Call $clients[1] $sequence 'powershell_job' @{action='cancel';job_id=$pending.job_id}
+        $null=Require-Job $cancelled 'pending-cancel'
         if($cancelled.job.state -ne 'CANCELLED'){throw 'PERF_PENDING_CANCEL_FAILED'}
         for($i=0;$i -lt 12;$i++){
             $sequence++;Status-Round $sequence
             $sequence++;$watch=[Diagnostics.Stopwatch]::StartNew()
             $logged=Call $clients[2] $sequence 'powershell_job' @{action='logs';job_id=$hold.job.job_id;step_index=1}
             $logs.Add($watch.Elapsed.TotalMilliseconds)
-            if($logged.status -ne 'OK'){throw 'PERF_LOGS_FAILED'}
+            $null=Require-Job $logged 'hold-logs'
             $sequence++;$watch=[Diagnostics.Stopwatch]::StartNew()
             $j=Call $clients[$i%3] $sequence 'powershell_job' @{action='submit';operation_key=$prefix+'-'+$i;resource_key=$prefix;command="Write-Output 'must remain queued'";timeout_seconds=10}
             $admission.Add($watch.Elapsed.TotalMilliseconds)
-            if($j.status -ne 'OK' -or $j.job.state -ne 'QUEUED'){throw 'PERF_ADMISSION_FAILED'}
+            $null=Require-Job $j 'queued-admission'
+            if($j.job.state -ne 'QUEUED'){throw 'PERF_ADMISSION_FAILED'}
             $sequence++;$watch=[Diagnostics.Stopwatch]::StartNew()
             $clientIndex=($i+1)%3
             $c=Call $clients[$clientIndex] $sequence 'powershell_job' @{action='cancel';job_id=$j.job.job_id}
             $elapsed=$watch.Elapsed.TotalMilliseconds
             $cancel.Add($elapsed)
+            $null=Require-Job $c 'queued-cancel'
             $cancelPhases.Add([pscustomobject]@{index=$i;client=$clientIndex;correlation_id=$c.correlation_id;client_ms=[Math]::Round($elapsed,3);timing=$c.timing})
-            if($c.status -ne 'OK' -or $c.job.state -ne 'CANCELLED'){throw 'PERF_CANCEL_NOT_QUEUED'}
+            if($c.job.state -ne 'CANCELLED'){throw 'PERF_CANCEL_NOT_QUEUED'}
         }
         $watch=[Diagnostics.Stopwatch]::StartNew()
         do{
             $sequence++
             $s=Call $clients[2] $sequence 'powershell_job' @{action='logs';job_id=$hold.job.job_id}
-            if($s.status -ne 'OK'){throw 'PERF_HOLD_READBACK'}
+            $null=Require-Job $s 'hold-readback'
             if($s.job.state -eq 'COMPLETED'){break}
             if($s.job.state -notin @('RUNNING','QUEUED')){throw 'PERF_HOLD_FAILED'}
             Start-Sleep -Milliseconds 250

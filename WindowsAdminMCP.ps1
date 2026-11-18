@@ -1,10 +1,11 @@
 # Thin native operator. The old PowerShell MCP server and launcher are retired.
 [CmdletBinding()]
 param(
- [ValidateSet('start','status','stop','doctor','test','install','configure')][string]$Action='status',
+ [ValidateSet('start','status','stop','doctor','test','install','configure','update','rollback','accept')][string]$Action='status',
  [string]$PackagePath,
  [ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedSha256,
  [string]$EvidencePath,
+ [switch]$RemoteAcceptanceConfirmed,
  [ValidatePattern('^tunnel_[a-f0-9]{32}$')][string]$TunnelId
 )
 $ErrorActionPreference='Stop'
@@ -85,6 +86,12 @@ switch($Action){
  }
  {$_ -in 'doctor','test'} {
   if($EvidencePath){& $native doctor --evidence $EvidencePath}else{& $native doctor}
+  break
+ }
+ {$_ -in 'update','rollback','accept'} {
+  $update=Join-Path $PSScriptRoot 'installer\Update-Native.ps1'
+  if(-not(Test-Path -LiteralPath $update -PathType Leaf)){throw 'UPDATE_FROM_TRUSTED_MAIN_CHECKOUT'}
+  & $update -Action $Action -RemoteAcceptanceConfirmed:$RemoteAcceptanceConfirmed
   break
  }
  'install' {

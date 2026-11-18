@@ -1,8 +1,8 @@
 # A journal records the original presence of the three fixed installation paths.
 # Same-volume renames are the only mutations. The caller owns exclusive offline maintenance.
 function Get-NativeSwapJournal {
-    param([Parameter(Mandatory)][string]$Root)
-    $backup=Join-Path $Root '.rollback'
+    param([Parameter(Mandatory)][string]$Root,[string]$Backup)
+    $backup=if($Backup){$Backup}else{Join-Path $Root '.rollback'}
     $journal=Join-Path $backup 'journal.json'
     if(-not(Test-Path -LiteralPath $journal -PathType Leaf)){throw 'ROLLBACK_JOURNAL_MISSING'}
     $file=Get-Item -LiteralPath $journal

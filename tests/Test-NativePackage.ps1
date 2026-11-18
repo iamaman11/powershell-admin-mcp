@@ -332,6 +332,15 @@ try{
         Check ($repair.status -eq 'INSTALLED_OFFLINE' -and $repair.commit -eq $manifest.commit -and -not $repair.autostart -and (Test-Path (Join-Path $root ('.trial-backup-'+$candidateCommit+'\journal.json')))) 'r6.forward_trial_repair_retains_backup_without_acceptance'
         $read=Read-SavedJob
         Check ($read.job.job_id -eq $saved.job_id -and $read.job.execution.stdout.Trim() -ceq 'upgrade-preserved') 'r6.forward_trial_repair_preserves_jobs'
+        $rollback=& $installer -Action Rollback|ConvertFrom-Json
+        Check ($rollback.status -eq 'ROLLED_BACK_OFFLINE' -and
+            (Get-Content (Join-Path $root 'manifest.json') -Raw|ConvertFrom-Json).commit -ceq $candidateCommit) 'h5.rollback_restores_prior_unaccepted_candidate'
+        $prepared=& $installer -Action Prepare -ExpectedCommit $candidateCommit|ConvertFrom-Json
+        Check ($prepared.status -eq 'TRIAL_PREPARED' -and $prepared.rollback_retained -and -not $prepared.logon_enabled -and
+            (Test-Path -LiteralPath (Join-Path $root '.rollback\journal.json')) -and
+            -not(Test-Path -LiteralPath (Join-Path $root ('.trial-backup-'+$candidateCommit)))) 'h5.prior_trial_journal_reattached_without_acceptance'
+        $read=Read-SavedJob
+        Check ($read.job.job_id -eq $saved.job_id -and $read.job.execution.stdout.Trim() -ceq 'upgrade-preserved') 'h5.prior_trial_restart_preserves_jobs'
     }finally{
         if(Test-Path -LiteralPath $replacementZip){Remove-Item -LiteralPath $replacementZip -Force}
         if(Test-Path -LiteralPath $replacementRoot){Remove-Item -LiteralPath $replacementRoot -Recurse -Force}

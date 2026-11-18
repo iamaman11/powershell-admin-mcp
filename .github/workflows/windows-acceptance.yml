@@ -35,6 +35,7 @@ jobs:
             }
           }
           Write-Host 'POWERSHELL_PARSE=PASS'
+          ./tests/Test-OperatorUpdate.ps1
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
@@ -80,12 +81,15 @@ jobs:
           $receipt=./installer/New-NativePackage.ps1 -PublishDirectory "${{ runner.temp }}/WindowsAdminMcpCandidate" -Output $package -Commit $env:GITHUB_SHA | ConvertFrom-Json
           Write-Host ("NATIVE_PACKAGE_SHA256="+$receipt.sha256)
           ./tests/Test-NativePackage.ps1 -Package $package -Sha256 $receipt.sha256
+          $updateReceipt=[ordered]@{schema=1;commit=$env:GITHUB_SHA;run_id=$env:GITHUB_RUN_ID;sha256=$receipt.sha256}
+          [IO.File]::WriteAllText((Join-Path "${{ runner.temp }}" 'WindowsAdminMCP-update.json'),($updateReceipt|ConvertTo-Json -Compress))
       - uses: actions/upload-artifact@v4
         if: success()
         with:
           name: WindowsAdminMCP-offline-package
           path: |
             ${{ runner.temp }}/WindowsAdminMCP-win-x64.zip
+            ${{ runner.temp }}/WindowsAdminMCP-update.json
             installer/Install-Native.ps1
             installer/NativeFileSwap.ps1
           if-no-files-found: error

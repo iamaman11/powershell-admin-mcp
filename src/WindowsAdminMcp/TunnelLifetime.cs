@@ -7,6 +7,10 @@ internal enum TunnelEnd { EXITED, TUN_LOST, ACCESS_DENIED, USER_WORKER_STOPPED }
 // route management, external probe, or second restart policy.
 internal static class TunnelLifetime
 {
+    // An unrequested vendor exit, even exit 0, must reach the existing
+    // Task Scheduler failure policy. Explicit authorization denial is separate.
+    internal static int UnexpectedExitCode(int exitCode)=>exitCode==0?5:exitCode;
+
     internal static async Task<TunnelEnd> WatchAsync(Process child,Func<TunReadiness> observe,
         Func<Task<bool>> accessDenied,TimeSpan interval,Task? userWorker=null)
     {

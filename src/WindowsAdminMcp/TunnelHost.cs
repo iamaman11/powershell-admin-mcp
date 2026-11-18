@@ -54,11 +54,11 @@ internal static class TunnelHost
     {
         string correlation = Guid.NewGuid().ToString("N");
         Code stage = Code.INTERACTIVE_ADMIN_REQUIRED;
-        int Report(Code code,int exit,int? native=null,int? vendorPid=null,TunReadiness? dependency=null)
+        int Report(Code code,int exit,int? native=null,int? vendorPid=null,TunReadiness? dependency=null,int? vendorExitCode=null)
         {
             // Only allowlisted fields, no exception messages, arguments or credential data.
             string line = JsonSerializer.Serialize(new { status=code.ToString(),correlation_id=correlation,
-                exit_code=exit,native_error=native,vendor_pid=vendorPid,dependency_state=dependency?.ToString() });
+                exit_code=exit,native_error=native,vendor_pid=vendorPid,vendor_exit_code=vendorExitCode,dependency_state=dependency?.ToString() });
             Console.Error.WriteLine(line);
             try { EventLog.WriteEntry(Source,line, exit==0 ? EventLogEntryType.Information : EventLogEntryType.Error); }
             catch (Exception e) when (e is System.Security.SecurityException or Win32Exception or
@@ -104,7 +104,8 @@ internal static class TunnelHost
             if(!ready)return Report(stage,3);
 
             using var workerStop=new CancellationTokenSource();
-            Task? workerTask=null;
+            // USER jobs are local; an unavailable TUN does not own their lifetime.
+            Task workerTask=UserWorker.RunAsync(workerStop.Token);
             bool workerFailureReported=false;
             int WorkerEnded(Task worker)
             {
@@ -122,7 +123,7 @@ internal static class TunnelHost
             TunReadiness? previous = null;
             while (true)
             {
-                if(workerTask?.IsCompleted==true)return WorkerEnded(workerTask);
+                if(workerTask.IsCompleted)return WorkerEnded(workerTask);
                 var dependency = TunDependency.Observe();
                 if (dependency != previous)
                 {
@@ -184,7 +185,6 @@ internal static class TunnelHost
                 // Job Object closes the complete owned tree on task stop or launcher crash.
                 // The vendor owns its protocol and network recovery while the dependency is alive.
                 child.Input.Close();
-                workerTask??=UserWorker.RunAsync(workerStop.Token);
                 Report(Code.STARTED,0,vendorPid:child.Process.Id);
                 var stdout=Task.Run(()=>child.Output.CopyTo(Stream.Null));
                 var stderr=Task.Run(()=>child.Error.CopyTo(Stream.Null));
@@ -198,7 +198,7 @@ internal static class TunnelHost
                     // An explicit operator action is required after an access denial.
                     return Report(Code.CONTROL_PLANE_ACCESS_DENIED,0,vendorPid:child.Process.Id);
                 if(end==TunnelEnd.EXITED)
-                    return Report(Code.EXITED,child.Process.ExitCode,vendorPid:child.Process.Id);
+                    return Report(Code.EXITED,TunnelLifetime.UnexpectedExitCode(child.Process.ExitCode),vendorPid:child.Process.Id,vendorExitCode:child.Process.ExitCode);
                 Report(Code.TUN_LOST,0,vendorPid:child.Process.Id);
             }
             await Task.Delay(TimeSpan.FromSeconds(5));
@@ -207,12 +207,9 @@ internal static class TunnelHost
             finally
             {
                 await workerStop.CancelAsync();
-                if(workerTask is not null)
-                {
-                    try{await workerTask;}
-                    catch when(workerFailureReported && workerTask.IsFaulted)
-                    { /* already reported, return nonzero to Task Scheduler */ }
-                }
+                try{await workerTask;}
+                catch when(workerFailureReported && workerTask.IsFaulted)
+                { /* already reported, return nonzero to Task Scheduler */ }
             }
         }
         catch(Exception e) when(e is IOException or UnauthorizedAccessException or Win32Exception or
