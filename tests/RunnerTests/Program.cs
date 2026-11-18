@@ -37,6 +37,12 @@ Check(WindowCatalog.TryParseId(testWindowId, out var decodedWindowId) && decoded
 var invalidWindowLimit = await WindowTools.ListWindows(max_windows: 0);
 Check(invalidWindowLimit.Status == WindowListCode.INVALID_ARGUMENT && invalidWindowLimit.Windows.Length == 0,
     "windows.bounded_argument_validation");
+Check(!WindowCatalog.TryParseId(new string('x', 256), out _), "windows.reject_unbounded_ref");
+Check(WindowCatalog.ResolveId(testWindowId, 2, out _) == WindowResolveCode.WRONG_SESSION,
+    "windows.reject_cross_session_ref");
+var staleWindowId = WindowCatalog.FormatId(new WindowIdentity(long.MaxValue, 4242, 133700000000000000, 1));
+Check(WindowCatalog.ResolveId(staleWindowId, 1, out _) == WindowResolveCode.STALE_WINDOW,
+    "windows.reject_stale_hwnd");
 var simple = await Run("Write-Output 'hello'");
 Check(simple.Status == ExecutionState.COMPLETED && simple.ExitCode == 0 && simple.Stdout.Trim() == "hello", "r2.stdout_exit");
 string prefix = "Write-Output 'Проверка Unicode 🚀'\n#";
