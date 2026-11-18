@@ -52,12 +52,28 @@ Check(WindowInspector.InspectCore(IntPtr.Zero, 1, 20).Status == WindowInspectCod
     "windows.inspect_reject_null_hwnd");
 var invalidInspect = await WindowTools.InspectWindow("invalid");
 Check(invalidInspect.Status == WindowInspectCode.INVALID_ARGUMENT, "windows.inspect_reject_bad_ref_before_ipc");
+string freshElementId = "e1:" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString("x") +
+    ":0123456789abcdef0123456789abcdef";
+Check(WindowInspector.TryParseElementRef(freshElementId, out _) &&
+    !WindowInspector.TryParseElementRef("bad", out _) &&
+    !WindowInspector.TryParseElementRef("e1:1:0123456789abcdef0123456789abcdef", out _),
+    "windows.action_fresh_reference_and_stale_rejection");
+Check(WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.INVOKE, null)) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.INVOKE, "unexpected")) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.SET_VALUE, new string('x', 4097))),
+    "windows.action_bounded_arguments");
+var invalidAction = await WindowTools.InvokeElement("bad", "bad", WindowActionKind.INVOKE, confirm: true);
+Check(invalidAction.Status == WindowActionCode.INVALID_ARGUMENT, "windows.action_reject_bad_ref_before_ipc");
+var missingConfirmation = await WindowTools.InvokeElement(testWindowId, freshElementId, WindowActionKind.INVOKE);
+Check(missingConfirmation.Status == WindowActionCode.CONFIRMATION_REQUIRED,
+    "windows.action_requires_explicit_confirmation");
 // This is an owned throwaway fixture. No real user window or screen pixels are read.
 var uiaDesktop = DesktopCapture.ObserveDesktop(Process.GetCurrentProcess().SessionId);
 if (uiaDesktop.Code == CaptureCode.COMPLETED)
 {
-    var ready = new TaskCompletionSource<(IntPtr Handle, System.Windows.Forms.Form Form)>(
+    var ready = new TaskCompletionSource<(IntPtr Handle, System.Windows.Forms.Form Form, System.Windows.Forms.TextBox Input)>(
         TaskCreationOptions.RunContinuationsAsynchronously);
+    int clickCount = 0;
     var uiThread = new Thread(() =>
     {
         try
@@ -70,13 +86,14 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             using var cover = new System.Windows.Forms.Form
                 { Text = "CI_UIA_COVER", FormBorderStyle = System.Windows.Forms.FormBorderStyle.None,
                   TopMost = true, ShowInTaskbar = false };
+            button.Click += (_, _) => Interlocked.Increment(ref clickCount);
             form.Controls.Add(button);
             form.Controls.Add(input);
             form.Shown += (_, _) =>
             {
                 cover.Bounds = form.Bounds;
                 cover.Show();
-                ready.TrySetResult((form.Handle, form));
+                ready.TrySetResult((form.Handle, form, input));
             };
             System.Windows.Forms.Application.Run(form);
         }
@@ -89,7 +106,10 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
     {
         var created = await ready.Task.WaitAsync(TimeSpan.FromSeconds(5));
         ownedForm = created.Form;
-        var result = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 40))
+        using var current = Process.GetCurrentProcess();
+        var realWindowId = WindowCatalog.FormatId(new WindowIdentity(created.Handle.ToInt64(),
+            current.Id, current.StartTime.ToFileTimeUtc(), current.SessionId));
+        var result = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 40, realWindowId))
             .WaitAsync(TimeSpan.FromSeconds(5));
         Check(result.Status == WindowInspectCode.COMPLETED &&
             result.Elements.Any(e => e.Name == "CI_UIA_OWNED_BUTTON") &&
@@ -97,6 +117,22 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                                      e.Name == "[redacted]") &&
             result.Elements.All(e => !e.Name.Contains("CI_UIA_SECRET_FIXTURE", StringComparison.Ordinal)),
             "windows.inspect_owned_occluded_winforms_tree_and_redaction");
+        Check(result.ElementRefExpiresUtc > DateTimeOffset.UtcNow &&
+            result.Elements.All(e => WindowInspector.TryParseElementRef(e.ElementId, out _)),
+            "windows.action_inspection_returns_fresh_selectors");
+        var buttonTarget = result.Elements.Single(e => e.Name == "CI_UIA_OWNED_BUTTON");
+        var click = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, buttonTarget.ElementId, WindowActionKind.INVOKE, null)))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        Check(click.Status == WindowActionCode.COMPLETED &&
+            Volatile.Read(ref clickCount) == 1, "windows.action_invoke_occluded_button");
+        var inputTarget = result.Elements.Single(e => e.Role.Contains("Edit", StringComparison.Ordinal));
+        var edit = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, inputTarget.ElementId, WindowActionKind.SET_VALUE,
+                "CI_UIA_UPDATED_VALUE"))).WaitAsync(TimeSpan.FromSeconds(5));
+        var edited = (string)created.Form.Invoke(new Func<string>(() => created.Input.Text));
+        Check(edit.Status == WindowActionCode.COMPLETED && edited == "CI_UIA_UPDATED_VALUE",
+            "windows.action_set_value_occluded_edit");
     }
     finally
     {
