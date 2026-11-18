@@ -91,6 +91,7 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             form.Controls.Add(input);
             form.Shown += (_, _) =>
             {
+                cover.BackColor = System.Drawing.Color.Magenta;
                 cover.Bounds = form.Bounds;
                 cover.Show();
                 ready.TrySetResult((form.Handle, form, input));
@@ -120,6 +121,27 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         Check(result.ElementRefExpiresUtc > DateTimeOffset.UtcNow &&
             result.Elements.All(e => WindowInspector.TryParseElementRef(e.ElementId, out _)),
             "windows.action_inspection_returns_fresh_selectors");
+        if (Windows.Graphics.Capture.GraphicsCaptureSession.IsSupported())
+        {
+            var image = await WindowCapture.CaptureCoreAsync(created.Handle, realWindowId, 640)
+                .WaitAsync(TimeSpan.FromSeconds(10));
+            Check(image.Result.Status == WindowCaptureCode.COMPLETED &&
+                image.Png is { Length: > 100 } && image.Png.Length <= 2_000_000 &&
+                image.Png[0] == 137 && image.Png[1] == 80 &&
+                image.Result.Width is > 0 and <= 640,
+                "windows.capture_owned_occluded_winforms_png");
+            using var pngData = new MemoryStream(image.Png!);
+            using var capturedBitmap = new System.Drawing.Bitmap(pngData);
+            int magenta = 0;
+            for (int y = 0; y < capturedBitmap.Height; y += 10)
+                for (int x = 0; x < capturedBitmap.Width; x += 10)
+                {
+                    var pixel = capturedBitmap.GetPixel(x, y);
+                    if (pixel.R > 230 && pixel.G < 40 && pixel.B > 230) magenta++;
+                }
+            Check(magenta == 0, "windows.capture_target_not_magenta_cover");
+        }
+        else Console.WriteLine("NOT_TESTED windows.capture_owned_occluded_winforms_png wgc_unsupported");
         var buttonTarget = result.Elements.Single(e => e.Name == "CI_UIA_OWNED_BUTTON");
         var click = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, buttonTarget.ElementId, WindowActionKind.INVOKE, null)))
