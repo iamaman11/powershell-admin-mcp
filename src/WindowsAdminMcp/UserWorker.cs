@@ -1,5 +1,6 @@
 using System.Security.Principal;
 using System.Diagnostics;
+using System.Text.Json;
 
  // Runs within the already-authorized interactive tunnel host. No new process
  // identity, credential access, token duplication or additional network listener.
@@ -29,7 +30,7 @@ internal static class UserWorker
                 var reply=await Request(new(WorkerAction.poll),stop);
                 if(reply.Code==StatusCode.OK && reply.Worker?.Work is {} work)
                     running.Add(Task.Run(()=>RunIsolatedAsync(
-                        ()=>ExecuteAsync(work,sent,Request,PowerShellRunner.RunAsync,lifetime.Token,PulseInterval),
+                        ()=>ExecuteAsync(work,sent,Request,PowerShellRunner.RunAsync,lifetime.Token,PulseInterval,ReadCompletion),
                         e=>Report(work,"USER_JOB_FAULT",error:e))));
                 else
                     await Task.Delay(500,stop);
@@ -78,7 +79,8 @@ internal static class UserWorker
     internal static async Task ExecuteAsync(UserWork work,long claimSent,
         Func<WorkerRequest,CancellationToken,Task<AdminResponse>> request,
         Func<string,int,string?,CancellationToken,Task<ExecutionResult>> run,
-        CancellationToken stop,TimeSpan pulseInterval)
+        CancellationToken stop,TimeSpan pulseInterval,
+        Func<UserWork,CancellationToken,Task<ExecutionResult?>>? readback=null)
     {
         using var cancel=new CancellationTokenSource();
         using var watchdog=new CancellationTokenSource();
@@ -148,11 +150,8 @@ internal static class UserWorker
                 result=result with {WorkerEvidence=new(signal,transientFailures,lastFailure,failureCorrelation)};
             if(!stop.IsCancellationRequested)
             {
-                var ack=await request(new(WorkerAction.complete,work.LeaseId,result),stop);
-                if(ack.Code!=StatusCode.OK || ack.Worker is not {Status:StatusCode.OK})
-                    Report(work,"USER_COMPLETION_UNCONFIRMED",ack);
-                // Durable completion readback/idempotent retry is a separate follow-up.
-                // Never execute the script again after an unconfirmed acknowledgement.
+                var ack=await ConfirmCompletionAsync(work,result,request,readback,stop);
+                if(ack is not null)Report(work,"USER_COMPLETION_UNCONFIRMED",ack);
             }
         }
         finally
@@ -160,5 +159,48 @@ internal static class UserWorker
             cancel.Cancel();
             await running;
         }
+    }
+
+    // The coordinator has exactly one immutable result per step. Retry the same
+    // completion request, never the command. A lost ACK after commit is verified
+    // against that exact step and payload through the existing durable logs API.
+    internal static async Task<AdminResponse?> ConfirmCompletionAsync(UserWork work,ExecutionResult result,
+        Func<WorkerRequest,CancellationToken,Task<AdminResponse>> request,
+        Func<UserWork,CancellationToken,Task<ExecutionResult?>>? readback,CancellationToken stop)
+    {
+        var completion=new WorkerRequest(WorkerAction.complete,work.LeaseId,result);
+        var ack=await request(completion,stop);
+        for(int attempt=0;;attempt++)
+        {
+            if(ack.Code==StatusCode.OK && ack.Worker is {Status:StatusCode.OK})return null;
+            if(readback is not null && await readback(work,stop) is {} saved &&
+                CompletionMatches(result,saved))return null;
+            if(attempt>=1 || !IsTransient(ack.Code))return ack;
+            // One bounded retry; the coordinator rejects expired/unknown leases.
+            // The process has already stopped, even if confirmation is impossible.
+            ack=await request(completion,stop);
+        }
+    }
+
+    private static async Task<ExecutionResult?> ReadCompletion(UserWork work,CancellationToken stop)
+    {
+        var response=await AdminTools.Job(JobAction.logs,job_id:work.JobId,step_index:work.Step,cancellationToken:stop);
+        return response.Status==StatusCode.OK && response.Job is {} job &&
+            job.JobId==work.JobId && job.ResultStep==work.Step &&
+            job.Execution is {AuditPersisted:true,ExecutionContext:CommandContext.USER} saved?saved:null;
+    }
+
+    internal static bool CompletionMatches(ExecutionResult submitted,ExecutionResult saved)
+    {
+        if(!saved.AuditPersisted || saved.ExecutionContext!=CommandContext.USER)return false;
+        // Only remove metadata owned/added by the coordinator. Preserve state,
+        // hash, exit code, output, warnings, stage and worker evidence exactly.
+        static ExecutionResult Payload(ExecutionResult value)=>value with
+        {
+            AuditPersisted=false,ExecutionContext=null,ExecutionSid=null,ExecutionSessionId=null,
+            QueueWaitMs=null,StepStartedUtc=null,StepFinishedUtc=null,Timing=null
+        };
+        return string.Equals(JsonSerializer.Serialize(Payload(submitted),PipeWire.Json),
+            JsonSerializer.Serialize(Payload(saved),PipeWire.Json),StringComparison.Ordinal);
     }
 }

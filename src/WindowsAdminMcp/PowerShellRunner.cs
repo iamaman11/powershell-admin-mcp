@@ -47,7 +47,7 @@ public sealed record ExecutionResult(
     [property:JsonPropertyName("step_finished_utc")] string? StepFinishedUtc=null,
     [property:JsonPropertyName("timing")] ToolTiming? Timing=null,
     [property:JsonPropertyName("pruned_output")] PrunedOutput? PrunedOutput=null,
-    [property:JsonPropertyName("worker_evidence")] WorkerEvidence? WorkerEvidence=null);
+    [property:JsonPropertyName("worker_evidence"),JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] WorkerEvidence? WorkerEvidence=null);
 
 internal static class PowerShellRunner
 {

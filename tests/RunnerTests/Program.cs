@@ -470,3 +470,37 @@ using(var siblingLifetime=new CancellationTokenSource())
     sibling.SetResult();
     await siblingTask;
 }
+
+// Completion delivery: exact durable readback after lost ACK, bounded identical
+// retry when no commit is observed, and no false success for a different result.
+var receiptPayload=new ExecutionResult(ExecutionState.COMPLETED,"receipt-hash",33,0,"one");
+var persistedReceipt=receiptPayload with {AuditPersisted=true,ExecutionContext=CommandContext.USER,
+    ExecutionSid="fixture",ExecutionSessionId=1,QueueWaitMs=2,StepStartedUtc="start",StepFinishedUtc="finish"};
+int completionCalls=0,readbackCalls=0;
+Task<AdminResponse> LostAcknowledgement(WorkerRequest request,CancellationToken token)
+{
+    completionCalls++;
+    Check(request.Action==WorkerAction.complete && request.Result==receiptPayload,"user.completion_retry_same_payload");
+    return Task.FromResult(new AdminResponse(StatusCode.IPC_TIMEOUT,"lost-ack"));
+}
+Task<ExecutionResult?> CommittedReadback(UserWork work,CancellationToken token)
+{
+    readbackCalls++;
+    return Task.FromResult<ExecutionResult?>(persistedReceipt);
+}
+var unconfirmed=await UserWorker.ConfirmCompletionAsync(workerFixture,receiptPayload,LostAcknowledgement,
+    CommittedReadback,CancellationToken.None);
+Check(unconfirmed is null && completionCalls==1 && readbackCalls==1,"user.lost_ack_exact_durable_readback");
+completionCalls=0;
+readbackCalls=0;
+Task<ExecutionResult?> DifferentReadback(UserWork work,CancellationToken token)
+{
+    readbackCalls++;
+    return Task.FromResult<ExecutionResult?>(persistedReceipt with {Stdout="different"});
+}
+unconfirmed=await UserWorker.ConfirmCompletionAsync(workerFixture,receiptPayload,LostAcknowledgement,
+    DifferentReadback,CancellationToken.None);
+Check(unconfirmed?.Code==StatusCode.IPC_TIMEOUT && completionCalls==2 && readbackCalls==2,
+    "user.completion_mismatch_never_confirmed");
+Check(!UserWorker.CompletionMatches(receiptPayload,persistedReceipt with {AuditPersisted=false}),
+    "user.completion_not_durable_never_confirmed");
