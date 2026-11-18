@@ -64,7 +64,7 @@ try{
     foreach($p in @($a,$b,$c)){
         Send $p 1 'tools/list' @{_meta=$meta}
         $list=Receive $p 1
-        Assert (@($list.tools).Count -eq 7 -and @($list.tools.name|Where-Object {$_ -in @('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.invoke_element')}).Count -eq 7) 'r5.window_tools_including_inspect'
+        Assert (@($list.tools).Count -eq 8 -and @($list.tools.name|Where-Object {$_ -in @('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element')}).Count -eq 8) 'r5.window_tools_including_inspect'
         Assert (@($list.tools|Where-Object {$_.name -eq 'powershell_status' -and $_.Contains('outputSchema')}).Count -eq 1) 'r1.typed_status_schema'
         $v=Wait-Status $p 'OK'
         Assert ($v.service_pid -eq $svc.ProcessId -and $v.execution_sid -eq 'S-1-5-18' -and $v.elevated) 'r1.scm_pid_and_real_execution_identity'
@@ -85,6 +85,14 @@ try{
     Send $a 34 'tools/call' @{name='windows.inspect_window';arguments=@{window_id='w1:7fffffffffffffff:1092:1dbaf8d88b62800:1';max_depth=3};_meta=$meta}
     $restrictedInspect=(Receive $a 34).structuredContent
     Assert ($restrictedInspect.status -eq 'USER_CONTEXT_UNAVAILABLE' -and @($restrictedInspect.elements).Count -eq 0) 'windows.inspect_reject_unbound_ci_frontend'
+    Send $a 37 'tools/call' @{name='windows.capture_window';arguments=@{window_id='bad';max_width=1280};_meta=$meta}
+    $badCapture=(Receive $a 37).structuredContent
+    Assert ($badCapture.status -eq 'INVALID_ARGUMENT') 'windows.capture_reject_bad_window_id'
+    Send $a 38 'tools/call' @{name='windows.capture_window';arguments=@{window_id='w1:7fffffffffffffff:1092:1dbaf8d88b62800:1';max_width=1280};_meta=$meta}
+    $restrictedCapture=(Receive $a 38).structuredContent
+    Assert ($restrictedCapture.status -eq 'USER_CONTEXT_UNAVAILABLE') 'windows.capture_reject_unbound_ci_frontend'
+    $invalidCaptureWorker=(& $Exe window-capture-worker 'bad' 1280 | ConvertFrom-Json)
+    Assert ($invalidCaptureWorker.result.status -eq 'INVALID_ARGUMENT') 'windows.invalid_capture_worker_args'
     Send $a 35 'tools/call' @{name='windows.invoke_element';arguments=@{window_id='bad';element_id='bad';action='INVOKE';confirm=$true};_meta=$meta}
     $badAction=(Receive $a 35).structuredContent
     Assert ($badAction.status -eq 'INVALID_ARGUMENT' -and -not $badAction.effect_unknown) 'windows.mcp_invalid_action_ref'
