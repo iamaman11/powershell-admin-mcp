@@ -57,6 +57,32 @@ public sealed class WindowTools
         cancellationToken.ThrowIfCancellationRequested();
         return WindowCatalog.List(max_windows, self.SessionId);
     }
+
+    [McpServerTool(Name = "windows.inspect_window", UseStructuredContent = true),
+     Description("Read a bounded UI Automation control tree from a window_id in the same authorized USER desktop. Never activates controls or reads input values. A short-lived worker is killed after 5 seconds.")]
+    public static async Task<WindowInspectResult> InspectWindow(string window_id, int max_depth = 3,
+        int max_elements = 60, CancellationToken cancellationToken = default)
+    {
+        if (!WindowInspector.ValidArguments(window_id, max_depth, max_elements))
+            return new(WindowInspectCode.INVALID_ARGUMENT, []);
+        var status = await AdminTools.Status(cancellationToken);
+        if (status.Status != StatusCode.OK)
+            return new(WindowInspectCode.SERVICE_UNAVAILABLE, [], Detail: status.Status.ToString());
+        using var self = Process.GetCurrentProcess();
+        if (status.ExecutionContext != CommandContext.USER ||
+            status.UserContextAvailable != true || status.Frontend?.Elevated != true ||
+            status.Frontend?.SessionId != self.SessionId)
+            return new(WindowInspectCode.USER_CONTEXT_UNAVAILABLE, []);
+        var desktop = DesktopCapture.ObserveDesktop(self.SessionId);
+        if (desktop.Code != CaptureCode.COMPLETED)
+            return new(WindowInspectCode.DESKTOP_UNAVAILABLE, [], Detail: desktop.Code.ToString());
+        var resolved = WindowCatalog.ResolveId(window_id, self.SessionId, out _);
+        if (resolved != WindowResolveCode.OK)
+            return new(resolved == WindowResolveCode.ACCESS_DENIED ? WindowInspectCode.ACCESS_DENIED :
+                resolved == WindowResolveCode.WRONG_SESSION ? WindowInspectCode.USER_CONTEXT_UNAVAILABLE :
+                WindowInspectCode.STALE_WINDOW, [], Detail: resolved.ToString());
+        return await WindowInspector.RunIsolatedAsync(window_id, max_depth, max_elements, cancellationToken);
+    }
 }
 
 internal readonly record struct WindowIdentity(long Handle, int ProcessId, long StartFileTimeUtc, int SessionId);
