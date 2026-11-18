@@ -123,7 +123,7 @@ internal static class TunnelHost
             TunReadiness? previous = null;
             while (true)
             {
-                if(workerTask?.IsCompleted==true)return WorkerEnded(workerTask);
+                if(workerTask.IsCompleted)return WorkerEnded(workerTask);
                 var dependency = TunDependency.Observe();
                 if (dependency != previous)
                 {
@@ -207,12 +207,9 @@ internal static class TunnelHost
             finally
             {
                 await workerStop.CancelAsync();
-                if(workerTask is not null)
-                {
-                    try{await workerTask;}
-                    catch when(workerFailureReported && workerTask.IsFaulted)
-                    { /* already reported, return nonzero to Task Scheduler */ }
-                }
+                try{await workerTask;}
+                catch when(workerFailureReported && workerTask.IsFaulted)
+                { /* already reported, return nonzero to Task Scheduler */ }
             }
         }
         catch(Exception e) when(e is IOException or UnauthorizedAccessException or Win32Exception or
