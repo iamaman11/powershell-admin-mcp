@@ -62,6 +62,9 @@ try{
         Assert (@($list.tools|Where-Object {$_.name -eq 'powershell_status' -and $_.Contains('outputSchema')}).Count -eq 1) 'r1.typed_status_schema'
         $v=Wait-Status $p 'OK'
         Assert ($v.service_pid -eq $svc.ProcessId -and $v.execution_sid -eq 'S-1-5-18' -and $v.elevated) 'r1.scm_pid_and_real_execution_identity'
+        $caller=[Security.Principal.WindowsIdentity]::GetCurrent()
+        Assert ($v.frontend.pid -eq $p.Id -and $v.frontend.sid -eq $caller.User.Value -and
+            $v.frontend.session_id -eq $p.SessionId -and $v.command_context -eq 'SYSTEM') 'hardening.separate_frontend_and_runner_identity'
     }
     foreach($p in @($a,$b,$c)){Send $p 2 'tools/call' @{name='powershell_status';arguments=@{};_meta=$meta}}
     $results=@(foreach($p in @($a,$b,$c)){(Receive $p 2).structuredContent})
@@ -70,6 +73,7 @@ try{
     Stop-Service $name
     $offline=Wait-Status $a 'SERVICE_UNAVAILABLE'
     Assert ($offline.native_error -eq 1062) 'r1.typed_service_offline'
+    Assert ($offline.command_context -eq 'UNCONFIRMED' -and $offline.frontend.pid -eq $a.Id) 'hardening.offline_context_not_falsely_confirmed'
     Start-Service $name
     $now=Wait-Status $a 'OK'
     $newSvc=Get-CimInstance Win32_Service -Filter "Name='$name'"

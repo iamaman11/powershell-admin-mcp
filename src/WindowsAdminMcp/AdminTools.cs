@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using ModelContextProtocol.Server;
@@ -42,11 +43,19 @@ public sealed class AdminTools
     internal static Task<AdminResponse> Diagnostics(CancellationToken ct) => Call(new(AdminOperation.Diagnostics),ct);
 
     [McpServerTool(Name="powershell_status",UseStructuredContent=true),
-        Description("Read actual Windows service status and execution identity.")]
+        Description("Read actual Windows service status and command execution identity, separately from the local MCP frontend identity/session. A user-owned frontend does not imply commands run in that user context.")]
     public static async Task<AdminStatus> Status(CancellationToken cancellationToken)
     {
         var reply=await Call(new(AdminOperation.Status),cancellationToken);
-        return reply.Info??new(reply.Code,reply.Correlation);
+        var status=reply.Info??new(reply.Code,reply.Correlation);
+        using var identity=WindowsIdentity.GetCurrent();
+        using var process=Process.GetCurrentProcess();
+        var frontend=new FrontendContext(process.Id,identity.Name,identity.User?.Value,process.SessionId,
+            new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator));
+        // The current native runner is always service-owned; never infer its
+        // identity from the frontend account. No token duplication or impersonation.
+        return status with {Frontend=frontend,ExecutionContext=status.Status==StatusCode.OK &&
+            status.ExecutionSid=="S-1-5-18"?CommandContext.SYSTEM:CommandContext.UNCONFIRMED};
     }
 
     [McpServerTool(Name="powershell_job",UseStructuredContent=true),
