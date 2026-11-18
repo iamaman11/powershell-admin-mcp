@@ -57,6 +57,14 @@ else if (args is ["window-inspect-worker", var windowId, var depthText, var maxT
         : new(WindowInspectCode.INVALID_ARGUMENT, []);
     Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, PipeWire.Json));
 }
+else if (args is ["window-capture-worker", var captureId, var widthText])
+{
+    // Runs only on the authorized USER desktop; WGC never calls desktop CopyFromScreen.
+    var wire = int.TryParse(widthText, out int maxWidth)
+        ? await WindowCapture.CaptureInWorkerAsync(captureId, maxWidth)
+        : new WindowCaptureWire(new(WindowCaptureCode.INVALID_ARGUMENT));
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(wire, PipeWire.Json));
+}
 else if (args is ["window-action-worker"])
 {
     // No action values in process arguments. Parent sends bounded JSON via stdin.
