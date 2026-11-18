@@ -152,6 +152,27 @@ using(var fixture=NativeChildProcess.Start(InertChild()))
     Check(fixture.Process.WaitForExit(5000),"r6.auth_denied_child_terminated");
 }
 
+// Real child, local fault injection only, never touch the installed tunnel.
+using(var fixture=NativeChildProcess.Start(InertChild()))
+{
+    fixture.Input.Close();
+    var workerFailure=Task.FromException(new IOException("isolated USER worker fault"));
+    int checks=0;
+    // The pre-H3 watch path has no worker signal: it observes only vendor/TUN.
+    var priorEnd=await TunnelLifetime.WatchAsync(fixture.Process,
+        ()=>++checks==2?TunReadiness.ADAPTER_DOWN:TunReadiness.READY,
+        ()=>Task.FromResult(false),TimeSpan.FromMilliseconds(10));
+    Check(workerFailure.IsFaulted && priorEnd==TunnelEnd.TUN_LOST&&!fixture.Process.HasExited,
+        "h1.old_watch_without_worker_signal_misses_fault");
+    var candidateEnd=await TunnelLifetime.WatchAsync(fixture.Process,()=>TunReadiness.READY,
+        ()=>Task.FromResult(false),TimeSpan.FromMilliseconds(10),workerFailure);
+    Check(candidateEnd==TunnelEnd.USER_WORKER_STOPPED && !fixture.Process.HasExited,
+        "h1.worker_fault_observed_while_vendor_alive");
+    _=workerFailure.Exception;
+    fixture.StopTree();
+    Check(fixture.Process.WaitForExit(5000),"h1.worker_fault_owned_child_terminated");
+}
+
 var startUtc=new DateTimeOffset(2026,1,1,12,0,0,TimeSpan.Zero);
 var priorBoot=new BootStamp(1000,startUtc,1008,startUtc.AddMilliseconds(1),0);
 // A wall clock adjustment between boots must not defeat chronological event evidence.
@@ -563,3 +584,30 @@ using(var rollbackJson=System.Text.Json.JsonDocument.Parse(rollbackShape))
         .SetEquals(legacyFields) && rollbackJson.RootElement.GetProperty("stage").GetString()=="USER_OPERATOR_CANCELLED",
         "h1.schema4_durable_result_exact_legacy_shape");
 }
+
+// Actual elapsed watchdog budget: a late successful heartbeat may not revive
+// an execution after the last confirmed authority has expired.
+var expiredClaim=new UserWork("lease-expiry","job-expiry",1,"fixture",60,Environment.SystemDirectory);
+var stopped=new TaskCompletionSource<ExecutionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+ExecutionResult? lateResult=null;
+int lateHeartbeat=0;
+Task<ExecutionResult> AuthorityRunner(string command,int timeout,string? cwd,CancellationToken cancel)
+{
+    cancel.Register(()=>stopped.TrySetResult(new(ExecutionState.CANCELLED_UNKNOWN_EFFECT,"fixture-hash",1,Stage:"PROCESS_INTERRUPTED")));
+    return stopped.Task;
+}
+async Task<AdminResponse> LateHeartbeat(WorkerRequest request,CancellationToken cancel)
+{
+    if(request.Action==WorkerAction.complete)
+    {
+        lateResult=request.Result;
+        return new(StatusCode.OK,"complete",Worker:new(StatusCode.OK));
+    }
+    lateHeartbeat++;
+    await Task.Delay(3000,cancel);
+    return new(StatusCode.OK,"late-success",Worker:new(StatusCode.OK));
+}
+await UserWorker.ExecuteAsync(expiredClaim,Environment.TickCount64-10000,LateHeartbeat,AuthorityRunner,
+    CancellationToken.None,TimeSpan.FromMilliseconds(10)).WaitAsync(TimeSpan.FromSeconds(10));
+Check(lateHeartbeat==1 && lateResult is {Status:ExecutionState.CANCELLED_UNKNOWN_EFFECT,Stage:"USER_WATCHDOG_EXPIRED"},
+    "h1.late_heartbeat_cannot_revive_expired_authority");

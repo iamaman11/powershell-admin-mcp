@@ -15,7 +15,7 @@ internal static class TunnelHost
     {
         STARTED, EXITED, INTERACTIVE_ADMIN_REQUIRED, INSTALL_PATH_INVALID,
         VENDOR_INTEGRITY_FAILED, SERVICE_UNAVAILABLE, ALREADY_RUNNING,
-        CREDENTIAL_INVALID, START_FAILED, WAITING_FOR_TUN, TUN_READY, TUN_LOST, CONTROL_PLANE_ACCESS_DENIED
+        CREDENTIAL_INVALID, START_FAILED, WAITING_FOR_TUN, TUN_READY, TUN_LOST, CONTROL_PLANE_ACCESS_DENIED, USER_WORKER_STOPPED
     }
 
     internal sealed record Credential(
@@ -105,6 +105,14 @@ internal static class TunnelHost
 
             using var workerStop=new CancellationTokenSource();
             Task? workerTask=null;
+            bool workerFailureReported=false;
+            int WorkerEnded(Task worker)
+            {
+                // The existing Task Scheduler is the restart owner. A stopped
+                // USER worker must not leave a deceptively healthy tunnel host.
+                workerFailureReported=true;
+                return Report(Code.USER_WORKER_STOPPED,5,worker.Exception?.GetBaseException().HResult);
+            }
             try
             {
             // Local dependency only: read OS state, never execute or reconfigure INTERNET.
@@ -114,6 +122,7 @@ internal static class TunnelHost
             TunReadiness? previous = null;
             while (true)
             {
+                if(workerTask?.IsCompleted==true)return WorkerEnded(workerTask);
                 var dependency = TunDependency.Observe();
                 if (dependency != previous)
                 {
@@ -180,10 +189,11 @@ internal static class TunnelHost
                 var stdout=Task.Run(()=>child.Output.CopyTo(Stream.Null));
                 var stderr=Task.Run(()=>child.Error.CopyTo(Stream.Null));
                 var end=await TunnelLifetime.WatchAsync(child.Process,TunDependency.Observe,
-                    TunnelLifetime.AccessDeniedAsync,TimeSpan.FromSeconds(5));
+                    TunnelLifetime.AccessDeniedAsync,TimeSpan.FromSeconds(5),workerTask);
                 child.StopTree();
                 if(!child.Process.WaitForExit(5000))return Report(Code.START_FAILED,5,vendorPid:child.Process.Id);
                 await Task.WhenAll(stdout,stderr).WaitAsync(TimeSpan.FromSeconds(5));
+                if(end==TunnelEnd.USER_WORKER_STOPPED)return WorkerEnded(workerTask);
                 if(end==TunnelEnd.ACCESS_DENIED)
                     // An explicit operator action is required after an access denial.
                     return Report(Code.CONTROL_PLANE_ACCESS_DENIED,0,vendorPid:child.Process.Id);
@@ -197,7 +207,12 @@ internal static class TunnelHost
             finally
             {
                 await workerStop.CancelAsync();
-                if(workerTask is not null)await workerTask;
+                if(workerTask is not null)
+                {
+                    try{await workerTask;}
+                    catch when(workerFailureReported && workerTask.IsFaulted)
+                    { /* already reported, return nonzero to Task Scheduler */ }
+                }
             }
         }
         catch(Exception e) when(e is IOException or UnauthorizedAccessException or Win32Exception or

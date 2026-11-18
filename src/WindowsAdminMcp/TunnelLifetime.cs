@@ -1,24 +1,29 @@
 using System.Diagnostics;
 using System.Text.Json;
 
-internal enum TunnelEnd { EXITED, TUN_LOST, ACCESS_DENIED }
+internal enum TunnelEnd { EXITED, TUN_LOST, ACCESS_DENIED, USER_WORKER_STOPPED }
 
 // A single foreground wait owned by the existing launcher. No background service,
 // route management, external probe, or second restart policy.
 internal static class TunnelLifetime
 {
     internal static async Task<TunnelEnd> WatchAsync(Process child,Func<TunReadiness> observe,
-        Func<Task<bool>> accessDenied,TimeSpan interval)
+        Func<Task<bool>> accessDenied,TimeSpan interval,Task? userWorker=null)
     {
         var exit=child.WaitForExitAsync();
         while(!exit.IsCompleted)
         {
-            if(await Task.WhenAny(exit,Task.Delay(interval))==exit)break;
+            if(userWorker?.IsCompleted==true)return TunnelEnd.USER_WORKER_STOPPED;
+            var delay=Task.Delay(interval);
+            var next=userWorker is null?await Task.WhenAny(exit,delay):
+                await Task.WhenAny(exit,delay,userWorker);
+            if(userWorker?.IsCompleted==true)return TunnelEnd.USER_WORKER_STOPPED;
+            if(next==exit)break;
             if(observe()!=TunReadiness.READY)return TunnelEnd.TUN_LOST;
             if(await accessDenied())return TunnelEnd.ACCESS_DENIED;
         }
         await exit;
-        return TunnelEnd.EXITED;
+        return userWorker?.IsCompleted==true?TunnelEnd.USER_WORKER_STOPPED:TunnelEnd.EXITED;
     }
 
     // Official local component health only. Refuse to continue after explicit
