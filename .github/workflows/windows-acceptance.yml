@@ -8,49 +8,15 @@ permissions:
   contents: read
 jobs:
   windows:
+    needs: r0
     runs-on: windows-2025
-    timeout-minutes: 15
+    if: always()
     steps:
-      - uses: actions/checkout@v4
-      - name: Verify official runtime, protect installation and run acceptance
+      - name: Require canonical native acceptance
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          & ./Install-WindowsAdminMCP.ps1
-          if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { throw "INSTALL_FAILED" }
-          & 'C:\Program Files\WindowsAdminMCP\Test-WindowsAdminMCP.ps1'
-          if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { throw "ACCEPTANCE_FAILED" }
-          $raw = & 'C:\Program Files\WindowsAdminMCP\WindowsAdminMCP.ps1' status
-          $check = ($raw | Select-Object -Last 1 | ConvertFrom-Json)
-          if (-not $check.installed -or -not $check.integrity_ok) { throw "STATUS_INCOMPLETE" }
-          Write-Host "OPERATOR_STATUS=PASS"
-          # Confirm all three tools and modern protocol after clean installation.
-          $modern = [IO.File]::ReadAllText('C:\Program Files\WindowsAdminMCP\windows-admin-mcp.ps1')
-          if ($modern -notmatch '2026-07-28' -or $modern -notmatch 'powershell_screenshot') { throw 'MODERN_PROTOCOL_OR_IMAGE_MISSING' }
-          Write-Host "MCP_MODERN_AND_SCREENSHOT_SOURCE=PASS"
-          # Vendor v0.0.19 supports this flag; the single operator launcher must set it.
-          $launcher=[IO.File]::ReadAllText('C:\Program Files\WindowsAdminMCP\WindowsAdminMCP.ps1')
-          if($launcher -notmatch "MCP_STDIO_SEND_INITIALIZED_NOTIFICATION='true'"){
-             throw "STDIO_INITIALIZATION_SHIM_NOT_ENABLED"
-          }
-          $bin='C:\Program Files\WindowsAdminMCP\client\tunnel-client-runtime.exe'
-          $helpText=(& $bin run --help 2>&1|Out-String)
-          if($helpText -notmatch 'mcp.stdio-send-initialized-notification'){
-             throw "VENDOR_RUNTIME_LACKS_INITIALIZED_SHIM"
-          }
-          Write-Host "STDIO_INIT_SHIM_AND_VENDOR_SUPPORT=PASS"
-          # Verify tunnel ID auto-discovery without using or logging real identifiers.
-          . 'C:\Program Files\WindowsAdminMCP\WindowsAdminMCP.ps1' -Action status | Out-Null
-          $dummyId = 'tunnel_' + ('a' * 32)
-          $argEquals = '--control-plane.tunnel-id=' + $dummyId + ' --other-flag'
-          $argSpaced = '--control-plane.tunnel-id ' + $dummyId + ' --other-flag'
-          $oldLine = 'if ($env:CONTROL_PLANE_TUNNEL_ID) { $env:CONTROL_PLANE_TUNNEL_ID = "' + $dummyId + '" }'
-          if ((Get-TunnelIdFromText $argEquals) -cne $dummyId) { throw 'AUTO_ID_EQUALS_FAILED' }
-          if ((Get-TunnelIdFromText $argSpaced) -cne $dummyId) { throw 'AUTO_ID_SPACED_FAILED' }
-          if ((Get-TunnelIdFromText $oldLine) -cne $dummyId) { throw 'AUTO_ID_ROLLBACK_FAILED' }
-          if ($null -ne (Get-TunnelIdFromText 'invalid without any ID')) { throw 'AUTO_ID_INVALID_ACCEPTED' }
-          Write-Host "TUNNEL_ID_AUTODISCOVERY_TESTS=4/4_PASS"
-
+          if ('${{ needs.r0.result }}' -ne 'success') { throw 'NATIVE_ACCEPTANCE_FAILED' }
+          Write-Host 'NATIVE_ACCEPTANCE=PASS'
   r0:
     runs-on: windows-2025
     timeout-minutes: 15
@@ -60,7 +26,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          foreach($file in @(Get-ChildItem installer,tests -Filter '*.ps1' -File -Recurse)){
+          foreach($file in @(Get-ChildItem . -Filter '*.ps1' -File -Recurse)){
             $tokens=$null;$errors=$null
             $null=[System.Management.Automation.Language.Parser]::ParseFile($file.FullName,[ref]$tokens,[ref]$errors)
             if($errors.Count -gt 0){

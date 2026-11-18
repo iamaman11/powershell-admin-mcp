@@ -34,15 +34,7 @@ try{
     }
     $product=[Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $native 'WindowsAdminMCP.exe')).ProductVersion
     $mcpVersion=($product -split '\+')[0]
-    if($mcpVersion -notmatch '^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?
-    [IO.File]::WriteAllText((Join-Path $stage 'manifest.json'),($metadata|ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
-    [IO.Compression.ZipFile]::CreateFromDirectory($stage,$Output,[IO.Compression.CompressionLevel]::Optimal,$false)
-    [pscustomobject]@{package=$Output;sha256=(Get-FileHash -LiteralPath $Output).Hash;files=$files.Count;commit=$Commit}|ConvertTo-Json -Compress
-}finally{
-    if(Test-Path -LiteralPath $zip){Remove-Item -LiteralPath $zip -Force}
-    if(Test-Path -LiteralPath $stage){Remove-Item -LiteralPath $stage -Recurse -Force}
-}
-){throw 'MCP_VERSION_METADATA_INVALID'}
+    if($mcpVersion -notmatch '^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$'){throw 'MCP_VERSION_METADATA_INVALID'}
     $metadata=[ordered]@{schema=1;commit=$Commit;mcp_version=$mcpVersion;vendor_version='0.0.21';store_schema=4;files=$files}
     [IO.File]::WriteAllText((Join-Path $stage 'manifest.json'),($metadata|ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
     [IO.Compression.ZipFile]::CreateFromDirectory($stage,$Output,[IO.Compression.CompressionLevel]::Optimal,$false)
