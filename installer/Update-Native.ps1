@@ -105,7 +105,94 @@ try{
         if($verified.status -ne 'VERIFIED' -or $verified.commit -cne $main){throw 'UPDATE_PACKAGE_IDENTITY'}
         # A moving main is not a license to install an unintended revision.
         if((Invoke-GhJson "repos/$repo/commits/main").sha -cne $main){throw 'UPDATE_MAIN_MOVED'}
-    }elseif(-not $pending){throw 'UPDATE_PENDING_ROLLBACK_REQUIRED'}
+    }else{
+        if(-not $pending){throw 'UPDATE_PENDING_ROLLBACK_REQUIRED'}
+        $priorPath=Join-Path $root '.rollback\manifest.json'
+        if(-not(Test-Path -LiteralPath $priorPath -PathType Leaf)){throw 'UPDATE_ROLLBACK_TARGET_UNPROVEN'}
+        $prior=Get-Content -LiteralPath $priorPath -Raw|ConvertFrom-Json -AsHashtable
+        if($prior['store_schema'] -ne 4 -or $prior['commit'] -cnotmatch '^[a-f0-9]{40}
+    $stage='drain'
+    $d=Read-InstalledDoctor
+    Assert-IdleStore $d
+    Assert-ClosedClients @($d.tunnelPid|Where-Object {$null -ne $_})
+    # The operator must suspend other clients during maintenance. Refuse busy
+    # queues, then close the remote ingress and check the store again.
+    $stopping=$true
+    $null=& $startup -Action Stop -ExpectedNativeSha256 $installed.files.'native/WindowsAdminMCP.exe'
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    while(@(Get-Process -Name 'tunnel-client-runtime' -ErrorAction SilentlyContinue).Count -and $clock.Elapsed.TotalSeconds -lt 15){Start-Sleep -Milliseconds 200}
+    if(@(Get-Process -Name 'tunnel-client-runtime' -ErrorAction SilentlyContinue).Count){throw 'UPDATE_TUNNEL_NOT_QUIESCENT'}
+    Assert-ClosedClients @()
+    Assert-IdleStore (Read-InstalledDoctor)
+    $stage='maintenance'
+    Stop-Service WindowsAdminMCP -ErrorAction Stop
+    $receipt=& $installer -Action Maintenance -ExpectedCommit $installed.commit|ConvertFrom-Json
+    if($receipt.status -ne 'MAINTENANCE_READY'){throw 'UPDATE_MAINTENANCE_UNCONFIRMED'}
+    $maintenance=$true
+    $stage='swap'
+    if($Action -eq 'update'){
+        $swapped=& $installer -Action Install -PackagePath $packages[0].FullName -ExpectedSha256 $digest -ReplaceUnaccepted:$pending|ConvertFrom-Json
+        if($swapped.status -ne 'INSTALLED_OFFLINE' -or $swapped.commit -cne $main){throw 'UPDATE_INSTALL_UNCONFIRMED'}
+    }else{
+        $rolled=& $installer -Action Rollback|ConvertFrom-Json
+        if($rolled.status -ne 'ROLLED_BACK_OFFLINE'){throw 'UPDATE_ROLLBACK_UNCONFIRMED'}
+    }
+    $stage='prepare'
+    $current=Read-Manifest
+    $prepared=& $installer -Action Prepare -ExpectedCommit $current.commit|ConvertFrom-Json
+    if($prepared.status -ne 'TRIAL_PREPARED'){throw 'UPDATE_PREPARE_UNCONFIRMED'}
+    $stage='start'
+    $null=& $startup -Action Start -ExpectedNativeSha256 $current.files.'native/WindowsAdminMCP.exe'
+    $stage='readiness'
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    do{
+        $after=Read-InstalledDoctor
+        if($null -ne $after.service -and $after.service.status -eq 'OK' -and
+            $after.service.versions.informational_version.EndsWith('+'+$current.commit)){break}
+        Start-Sleep -Milliseconds 500
+    }while($clock.Elapsed.TotalSeconds -lt 20)
+    if($null -eq $after.service -or $after.service.status -ne 'OK' -or
+        -not $after.service.versions.informational_version.EndsWith('+'+$current.commit)){throw 'UPDATE_SERVICE_READBACK_FAILED'}
+    $ready=$false
+    if($after.tun -eq 'READY'){
+        $clock=[Diagnostics.Stopwatch]::StartNew()
+        do{
+            try{
+                $state=& $startup -Action Status|ConvertFrom-Json
+                $v=@($state.tunnel_instances)
+                if($state.task -eq 'Running' -and $v.Count -eq 1 -and
+                    $v[0].ExecutablePath -ieq (Join-Path $root 'client\tunnel-client-runtime.exe')){
+                    $listener=@(Get-NetTCPConnection -LocalAddress '127.0.0.1' -LocalPort 8080 -State Listen -ErrorAction SilentlyContinue)
+                    if($listener.Count -eq 1 -and $listener[0].OwningProcess -eq $v[0].ProcessId){
+                        $health=Invoke-WebRequest -Uri 'http://127.0.0.1:8080/readyz' -NoProxy -TimeoutSec 3
+                        if($health.StatusCode -eq 200 -and $health.Content.Trim() -ceq 'ready'){$ready=$true;break}
+                    }
+                }
+            }catch{ # A readiness failure is never acceptance.
+            }
+            Start-Sleep -Milliseconds 500
+        }while($clock.Elapsed.TotalSeconds -lt 30)
+        if(-not $ready){$after=Read-InstalledDoctor}
+    }
+    $trialStatus=if($ready){'TRIAL_LOCAL_READY'}elseif($after.tun -ne 'READY'){'TRIAL_WAITING_FOR_TUN'}else{'TRIAL_NOT_READY'}
+    [pscustomobject]@{status=$trialStatus;commit=$current.commit;tun=$after.tun;local_ready=$ready;remote_accepted=$false;
+        next_action='verify four MCP tools externally, then use -Action accept -RemoteAcceptanceConfirmed'}|ConvertTo-Json -Compress
+}catch{
+    # Restore transport only when no maintenance/swap was attempted. Once
+    # offline maintenance begins the installer journals are the source of truth;
+    # do not auto-accept, erase history or guess a rollback after interruption.
+    if($stopping -and -not $maintenance -and $stage -eq 'drain' -and $before.task -eq 'Running'){
+        try{$null=& $startup -Action Start -ExpectedNativeSha256 $installed.files.'native/WindowsAdminMCP.exe'}catch{Write-Warning 'UPDATE_PRE_SWAP_RESTART_FAILED'}
+    }
+    Write-Error ("UPDATE_FAILED stage="+$stage+" reason="+$_.Exception.Message) -ErrorAction Continue
+    throw
+}finally{
+    if($download -and (Test-Path -LiteralPath $download)){Remove-Item -LiteralPath $download -Recurse -Force}
+}
+){
+            throw 'UPDATE_ROLLBACK_TARGET_UNPROVEN'
+        }
+    }
     $stage='drain'
     $d=Read-InstalledDoctor
     Assert-IdleStore $d

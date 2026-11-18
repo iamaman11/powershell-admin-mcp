@@ -54,11 +54,11 @@ internal static class TunnelHost
     {
         string correlation = Guid.NewGuid().ToString("N");
         Code stage = Code.INTERACTIVE_ADMIN_REQUIRED;
-        int Report(Code code,int exit,int? native=null,int? vendorPid=null,TunReadiness? dependency=null)
+        int Report(Code code,int exit,int? native=null,int? vendorPid=null,TunReadiness? dependency=null,int? vendorExitCode=null)
         {
             // Only allowlisted fields, no exception messages, arguments or credential data.
             string line = JsonSerializer.Serialize(new { status=code.ToString(),correlation_id=correlation,
-                exit_code=exit,native_error=native,vendor_pid=vendorPid,dependency_state=dependency?.ToString() });
+                exit_code=exit,native_error=native,vendor_pid=vendorPid,vendor_exit_code=vendorExitCode,dependency_state=dependency?.ToString() });
             Console.Error.WriteLine(line);
             try { EventLog.WriteEntry(Source,line, exit==0 ? EventLogEntryType.Information : EventLogEntryType.Error); }
             catch (Exception e) when (e is System.Security.SecurityException or Win32Exception or
@@ -198,7 +198,7 @@ internal static class TunnelHost
                     // An explicit operator action is required after an access denial.
                     return Report(Code.CONTROL_PLANE_ACCESS_DENIED,0,vendorPid:child.Process.Id);
                 if(end==TunnelEnd.EXITED)
-                    return Report(Code.EXITED,TunnelLifetime.UnexpectedExitCode(child.Process.ExitCode),vendorPid:child.Process.Id);
+                    return Report(Code.EXITED,TunnelLifetime.UnexpectedExitCode(child.Process.ExitCode),vendorPid:child.Process.Id,vendorExitCode:child.Process.ExitCode);
                 Report(Code.TUN_LOST,0,vendorPid:child.Process.Id);
             }
             await Task.Delay(TimeSpan.FromSeconds(5));
