@@ -95,18 +95,6 @@ try{
     $native=Join-Path $root 'native\WindowsAdminMCP.exe'
     $recovery=& $native maintenance recovery|ConvertFrom-Json
     Check ($LASTEXITCODE -eq 0 -and $recovery.ready -and $recovery.nonCrashFailures -and $recovery.resetSeconds -eq 86400 -and @($recovery.actions).Count -eq 4 -and $recovery.actions[3].type -eq 0) 'r6.scm_recovery_native_readback'
-    # Forced crash is confined to this isolated Windows CI fixture, with no jobs.
-    Start-Service WindowsAdminMCP
-    $crashedPid=(Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'").ProcessId
-    Stop-Process -Id $crashedPid -Force
-    $watch=[Diagnostics.Stopwatch]::StartNew()
-    do{
-        $restarted=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
-        if($restarted.State -eq 'Running' -and $restarted.ProcessId -ne 0 -and $restarted.ProcessId -ne $crashedPid){break}
-        Start-Sleep -Milliseconds 200
-    }while($watch.Elapsed.TotalSeconds -lt 20)
-    Check ($restarted.State -eq 'Running' -and $restarted.ProcessId -ne $crashedPid -and $restarted.ProcessId -ne 0) 'r6.scm_restarts_after_isolated_crash'
-    Stop-Service WindowsAdminMCP
     $blocked=$false
     try{& $installer -Action Accept -ExpectedCommit $result.commit -RemoteAcceptanceConfirmed|Out-Null}catch{if($_.Exception.Message -eq 'TRIAL_TASK_NOT_RUNNING'){$blocked=$true}else{throw}}
     Check ($blocked -and (Test-Path (Join-Path $root '.rollback')) -and -not (Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel').Triggers[0].Enabled) 'r6.operator_attestation_alone_cannot_accept'
@@ -186,6 +174,19 @@ try{
         Call-Tool $p 2 'powershell_exec' @{command="Write-Output 'upgrade-preserved'";operation_key='package-upgrade-durable';timeout_seconds=10}
     }
     Check ($saved.status -eq 'COMPLETED' -and $saved.stdout.Trim() -ceq 'upgrade-preserved') 'r6.update_durable_job_created'
+    # Forced crash stays in isolated CI, after the deliberate clean-install
+    # rollback test: starting SCM creates a database that must never be erased.
+    $crashedPid=(Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'").ProcessId
+    Stop-Process -Id $crashedPid -Force
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    do{
+        $restarted=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
+        if($restarted.State -eq 'Running' -and $restarted.ProcessId -ne 0 -and $restarted.ProcessId -ne $crashedPid){break}
+        Start-Sleep -Milliseconds 200
+    }while($watch.Elapsed.TotalSeconds -lt 20)
+    Check ($restarted.State -eq 'Running' -and $restarted.ProcessId -ne $crashedPid -and $restarted.ProcessId -ne 0) 'r6.scm_restarts_after_isolated_crash'
+    $afterCrash=With-Client {param($p) Call-Tool $p 1 'powershell_job' @{action='logs';job_id=$saved.job_id}}
+    Check ($afterCrash.status -eq 'OK' -and $afterCrash.job.execution.stdout.Trim() -ceq 'upgrade-preserved') 'r6.scm_recovery_preserves_durable_result'
     $blocked=$false
     try{& $installer -Action Maintenance -ExpectedCommit $baseline.commit|Out-Null}catch{if($_.Exception.Message -eq 'SCM_MAINTENANCE_REQUIRED'){$blocked=$true}else{throw}}
     Check $blocked 'r6.maintenance_refuses_running_service'
