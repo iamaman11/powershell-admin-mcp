@@ -64,7 +64,7 @@ try{
     foreach($p in @($a,$b,$c)){
         Send $p 1 'tools/list' @{_meta=$meta}
         $list=Receive $p 1
-        Assert (@($list.tools).Count -eq 6 -and @($list.tools.name|Where-Object {$_ -in @('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window')}).Count -eq 6) 'r5.window_tools_including_inspect'
+        Assert (@($list.tools).Count -eq 7 -and @($list.tools.name|Where-Object {$_ -in @('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.invoke_element')}).Count -eq 7) 'r5.window_tools_including_inspect'
         Assert (@($list.tools|Where-Object {$_.name -eq 'powershell_status' -and $_.Contains('outputSchema')}).Count -eq 1) 'r1.typed_status_schema'
         $v=Wait-Status $p 'OK'
         Assert ($v.service_pid -eq $svc.ProcessId -and $v.execution_sid -eq 'S-1-5-18' -and $v.elevated) 'r1.scm_pid_and_real_execution_identity'
@@ -85,6 +85,14 @@ try{
     Send $a 34 'tools/call' @{name='windows.inspect_window';arguments=@{window_id='w1:7fffffffffffffff:1092:1dbaf8d88b62800:1';max_depth=3};_meta=$meta}
     $restrictedInspect=(Receive $a 34).structuredContent
     Assert ($restrictedInspect.status -eq 'USER_CONTEXT_UNAVAILABLE' -and @($restrictedInspect.elements).Count -eq 0) 'windows.inspect_reject_unbound_ci_frontend'
+    Send $a 35 'tools/call' @{name='windows.invoke_element';arguments=@{window_id='bad';element_id='bad';action='INVOKE';confirm=$true};_meta=$meta}
+    $badAction=(Receive $a 35).structuredContent
+    Assert ($badAction.status -eq 'INVALID_ARGUMENT' -and -not $badAction.effect_unknown) 'windows.mcp_invalid_action_ref'
+    Send $a 36 'tools/call' @{name='windows.invoke_element';arguments=@{window_id='w1:7fffffffffffffff:1092:1dbaf8d88b62800:1';element_id='e1:1:00000000000000000000000000000000';action='INVOKE';confirm=$false};_meta=$meta}
+    $unconfirmedAction=(Receive $a 36).structuredContent
+    Assert ($unconfirmedAction.status -in @('INVALID_ARGUMENT','CONFIRMATION_REQUIRED')) 'windows.action_requires_confirmation'
+    $invalidActionWorker=('{}' | & $Exe window-action-worker | ConvertFrom-Json)
+    Assert ($invalidActionWorker.status -eq 'INVALID_ARGUMENT') 'windows.invalid_worker_payload'
     $inspectorWorker=(& $Exe window-inspect-worker 'bad' 3 60 | ConvertFrom-Json)
     Assert ($inspectorWorker.status -eq 'INVALID_ARGUMENT' -and @($inspectorWorker.elements).Count -eq 0) 'windows.inspect_worker_wire'
     foreach($p in @($a,$b,$c)){Send $p 2 'tools/call' @{name='powershell_status';arguments=@{};_meta=$meta}}
