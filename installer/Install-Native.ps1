@@ -156,6 +156,19 @@ if($Action -in @('Prepare','Accept','Maintenance')){
             [pscustomobject]@{status='MAINTENANCE_READY';commit=$m.commit;service_start=$result.service_start;autostart=$false;rollback_retained=$pending}|ConvertTo-Json -Compress
             return
         }
+        # A rollback from forward repair can restore an unaccepted candidate.
+        # Reattach its retained journal only for that exact restored commit.
+        if($Action -eq 'Prepare' -and -not $pending -and -not(Test-Path -LiteralPath $previous)){
+            $archived=Join-Path $root ('.trial-backup-'+$m.commit)
+            if(Test-Path -LiteralPath $archived -PathType Container){
+                Assert-Protected $archived
+                Assert-NativeSwapTree $archived
+                foreach($item in Get-ChildItem -LiteralPath $archived -Recurse -Force){Assert-Protected $item.FullName}
+                $null=Get-NativeSwapJournal -Root $root -Backup $archived
+                Move-NativePath $archived $backup
+                $pending=$true
+            }
+        }
         if($pending){
             Assert-Protected $backup
             Assert-NativeSwapTree $backup

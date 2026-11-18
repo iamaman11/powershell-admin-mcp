@@ -100,6 +100,8 @@ using(var bitmap=new System.Drawing.Bitmap(2400,1800))
 }
 Check(!DesktopCapture.ValidArguments(0,0,0,10,null,1280),"r5.invalid_region_pair");
 
+Check(TunnelLifetime.UnexpectedExitCode(0)!=0 && TunnelLifetime.UnexpectedExitCode(17)==17,
+    "h5.unexpected_vendor_exit_zero_is_restartable");
 var fixtureCredential=new TunnelHost.Credential(1,"tunnel_"+new string('a',32),"inert-test-key");
 Check(TunnelHost.Valid(fixtureCredential)&&!TunnelHost.Valid(fixtureCredential with {Version=2})&&
     !TunnelHost.Valid(fixtureCredential with {RuntimeKey="bad\nkey"}),"r6.typed_tunnel_credential");

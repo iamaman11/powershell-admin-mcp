@@ -104,7 +104,8 @@ internal static class TunnelHost
             if(!ready)return Report(stage,3);
 
             using var workerStop=new CancellationTokenSource();
-            Task? workerTask=null;
+            // USER jobs are local; an unavailable TUN does not own their lifetime.
+            Task workerTask=UserWorker.RunAsync(workerStop.Token);
             bool workerFailureReported=false;
             int WorkerEnded(Task worker)
             {
@@ -184,7 +185,6 @@ internal static class TunnelHost
                 // Job Object closes the complete owned tree on task stop or launcher crash.
                 // The vendor owns its protocol and network recovery while the dependency is alive.
                 child.Input.Close();
-                workerTask??=UserWorker.RunAsync(workerStop.Token);
                 Report(Code.STARTED,0,vendorPid:child.Process.Id);
                 var stdout=Task.Run(()=>child.Output.CopyTo(Stream.Null));
                 var stderr=Task.Run(()=>child.Error.CopyTo(Stream.Null));
@@ -198,7 +198,7 @@ internal static class TunnelHost
                     // An explicit operator action is required after an access denial.
                     return Report(Code.CONTROL_PLANE_ACCESS_DENIED,0,vendorPid:child.Process.Id);
                 if(end==TunnelEnd.EXITED)
-                    return Report(Code.EXITED,child.Process.ExitCode,vendorPid:child.Process.Id);
+                    return Report(Code.EXITED,TunnelLifetime.UnexpectedExitCode(child.Process.ExitCode),vendorPid:child.Process.Id);
                 Report(Code.TUN_LOST,0,vendorPid:child.Process.Id);
             }
             await Task.Delay(TimeSpan.FromSeconds(5));
