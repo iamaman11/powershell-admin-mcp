@@ -84,8 +84,16 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                     {
                         callerSid=token.User?.Value;
                         // Use only identity metadata, not impersonation for execution.
-                        logonSid=token.Groups?.OfType<SecurityIdentifier>()
-                            .FirstOrDefault(s=>s.Value.StartsWith("S-1-5-5-",StringComparison.Ordinal))?.Value;
+                        if (!token.IsSystem)
+                        {
+                            try { logonSid=TokenLogon.Read(token); }
+                            catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException)
+                            {
+                                logonSid=null; // unavailable USER identity remains fail closed
+                                logger.LogWarning("User logon identity unavailable {Correlation} native_error {NativeError}",
+                                    correlation,e is System.ComponentModel.Win32Exception native?native.NativeErrorCode:null);
+                            }
+                        }
                     }
                 });
                 UserSession? user=null;

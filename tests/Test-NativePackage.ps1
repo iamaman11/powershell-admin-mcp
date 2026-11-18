@@ -68,6 +68,18 @@ try{
     Check (-not(Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel' -ErrorAction SilentlyContinue)) 'r6.no_unaccepted_autostart'
     $repeat=& $installer -Action Install -PackagePath $Package -ExpectedSha256 $Sha256|ConvertFrom-Json
     Check ($repeat.status -eq 'NOOP' -and $repeat.rollback_retained) 'r6.repeat_install_keeps_rollback'
+    # An idle connected stdio frontend holds native DLLs on Windows. Refuse
+    # before the first file rename; never kill a client's process in the installer.
+    $frontendInfo=[Diagnostics.ProcessStartInfo]::new((Join-Path $root 'native\WindowsAdminMCP.exe'))
+    $frontendInfo.ArgumentList.Add('stdio');$frontendInfo.UseShellExecute=$false
+    $frontendInfo.RedirectStandardInput=$true;$frontendInfo.RedirectStandardOutput=$true;$frontendInfo.RedirectStandardError=$true
+    $frontend=[Diagnostics.Process]::Start($frontendInfo)
+    $null=$frontend.StandardError.ReadToEndAsync()
+    try{
+        $blocked=$false
+        try{& $installer -Action Install -PackagePath $Package -ExpectedSha256 $Sha256|Out-Null}catch{if($_.Exception.Message -eq 'ACTIVE_FRONTEND_MAINTENANCE_REQUIRED'){$blocked=$true}else{throw}}
+        Check ($blocked -and (Test-Path (Join-Path $root 'native\WindowsAdminMCP.exe')) -and (Get-Content (Join-Path $root 'manifest.json') -Raw|ConvertFrom-Json).commit -eq $result.commit) 'r6.idle_frontend_blocks_before_swap'
+    }finally{$frontend.StandardInput.Close();if(-not $frontend.WaitForExit(3000)){$frontend.Kill($true);$frontend.WaitForExit()};$frontend.Dispose()}
     $before=@(Get-ChildItem -LiteralPath $env:ProgramFiles -Directory -Filter 'WindowsAdminMCP.incoming-*').Count
     $null=& $installer -PackagePath $Package -ExpectedSha256 $Sha256
     $after=@(Get-ChildItem -LiteralPath $env:ProgramFiles -Directory -Filter 'WindowsAdminMCP.incoming-*').Count
@@ -80,6 +92,21 @@ try{
     Check ($prepare.status -eq 'TRIAL_PREPARED' -and -not $prepare.logon_enabled -and -not $task.Triggers[0].Enabled -and $task.State.ToString() -ne 'Running' -and $prepare.service_start -eq 'Manual') 'r6.actual_task_demand_only'
     $repeatPrepare=& $installer -Action Prepare -ExpectedCommit $result.commit|ConvertFrom-Json
     Check ($repeatPrepare.status -eq 'TRIAL_PREPARED' -and -not $repeatPrepare.logon_enabled) 'r6.prepare_idempotent'
+    $native=Join-Path $root 'native\WindowsAdminMCP.exe'
+    $recovery=& $native maintenance recovery|ConvertFrom-Json
+    Check ($LASTEXITCODE -eq 0 -and $recovery.ready -and $recovery.nonCrashFailures -and $recovery.resetSeconds -eq 86400 -and @($recovery.actions).Count -eq 4 -and $recovery.actions[3].type -eq 0) 'r6.scm_recovery_native_readback'
+    # Forced crash is confined to this isolated Windows CI fixture, with no jobs.
+    Start-Service WindowsAdminMCP
+    $crashedPid=(Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'").ProcessId
+    Stop-Process -Id $crashedPid -Force
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    do{
+        $restarted=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
+        if($restarted.State -eq 'Running' -and $restarted.ProcessId -ne 0 -and $restarted.ProcessId -ne $crashedPid){break}
+        Start-Sleep -Milliseconds 200
+    }while($watch.Elapsed.TotalSeconds -lt 20)
+    Check ($restarted.State -eq 'Running' -and $restarted.ProcessId -ne $crashedPid -and $restarted.ProcessId -ne 0) 'r6.scm_restarts_after_isolated_crash'
+    Stop-Service WindowsAdminMCP
     $blocked=$false
     try{& $installer -Action Accept -ExpectedCommit $result.commit -RemoteAcceptanceConfirmed|Out-Null}catch{if($_.Exception.Message -eq 'TRIAL_TASK_NOT_RUNNING'){$blocked=$true}else{throw}}
     Check ($blocked -and (Test-Path (Join-Path $root '.rollback')) -and -not (Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel').Triggers[0].Enabled) 'r6.operator_attestation_alone_cannot_accept'

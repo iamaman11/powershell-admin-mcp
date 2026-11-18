@@ -77,7 +77,12 @@ $exe=Join-Path $root 'native\WindowsAdminMCP.exe'
 $binding='"'+$exe+'" service'
 function Assert-Quiescent {
     # Do not ever stop an active connection or replace a running service here.
+    $exe=Join-Path $root 'native\WindowsAdminMCP.exe'
     if(@(Get-Process -Name 'tunnel-client-runtime' -ErrorAction SilentlyContinue).Count){throw 'ACTIVE_TUNNEL_MAINTENANCE_REQUIRED'}
+    $frontends=@(Get-CimInstance Win32_Process -Filter "Name='WindowsAdminMCP.exe'" | Where-Object {
+        $_.ExecutablePath -ieq $exe -and $_.CommandLine -match '\sstdio\s*$'
+    })
+    if($frontends.Count){throw 'ACTIVE_FRONTEND_MAINTENANCE_REQUIRED'}
     if(Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel' -ErrorAction SilentlyContinue){throw 'AUTOSTART_MAINTENANCE_REQUIRED'}
     if(@(Get-ScheduledTask|Where-Object {$_.TaskName -like 'WindowsAdminMCP-R6-*' -and $_.State.ToString() -eq 'Running'}).Count){throw 'ACTIVE_TRIAL_TASK'}
     $service=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
