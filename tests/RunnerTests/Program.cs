@@ -397,3 +397,76 @@ Check(ExecutionBudget.Evaluate(5,32*gib,20*gib,20*gib).CanStart,"parallel.capaci
 Check(!ExecutionBudget.Evaluate(5,32*gib,1*gib,20*gib).CanStart,"parallel.physical_pressure");
 Check(!ExecutionBudget.Evaluate(5,32*gib,20*gib,1*gib).CanStart,"parallel.commit_pressure");
 Check(ExecutionBudget.Evaluate(40,128*gib,100*gib,100*gib).CanStart,"parallel.no_fixed_slot_count");
+
+
+// USER fault injection through the production execution loop (no live service or real commands).
+Check(UserWorker.RemainingAuthorityMs(1000,13000)==0 &&
+    UserWorker.RemainingAuthorityMs(1000,12000)==1000,"user.authority_from_request_dispatch");
+Check(UserWorker.IsTransient(StatusCode.IPC_TIMEOUT) &&
+    !UserWorker.IsTransient(StatusCode.LEASE_LOST) &&
+    !UserWorker.IsTransient(StatusCode.ACCESS_DENIED),"user.authoritative_denial_not_retryable");
+var workerFixture=new UserWork("lease","job",1,"fixture",30,Environment.SystemDirectory);
+var finished=new TaskCompletionSource<ExecutionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+int pulseCount=0,launches=0;
+ExecutionResult? delivered=null;
+Task<ExecutionResult> FakeRunner(string cmd,int timeout,string? cwd,CancellationToken token)
+{
+    launches++;
+    token.Register(()=>finished.TrySetResult(new(ExecutionState.CANCELLED_UNKNOWN_EFFECT,"fixture-hash",1)));
+    return finished.Task;
+}
+Task<AdminResponse> TransientThenSuccess(WorkerRequest request,CancellationToken token)
+{
+    if(request.Action==WorkerAction.complete)
+    {
+        delivered=request.Result;
+        return Task.FromResult(new AdminResponse(StatusCode.OK,"complete",Worker:new(StatusCode.OK)));
+    }
+    pulseCount++;
+    if(pulseCount==1)return Task.FromResult(new AdminResponse(StatusCode.IPC_TIMEOUT,"injected-timeout"));
+    finished.TrySetResult(new(ExecutionState.COMPLETED,"fixture-hash",10,0));
+    return Task.FromResult(new AdminResponse(StatusCode.OK,"pulse",Worker:new(StatusCode.OK)));
+}
+await UserWorker.ExecuteAsync(workerFixture,Environment.TickCount64,TransientThenSuccess,FakeRunner,
+    CancellationToken.None,TimeSpan.FromMilliseconds(1)).WaitAsync(TimeSpan.FromSeconds(5));
+Check(launches==1 && pulseCount==2 &&
+    delivered is {Status:ExecutionState.COMPLETED,WorkerEvidence:{ObservedStopSignal:WorkerStopSignal.NONE,TransientIpcFailures:1,LastFailureStatus:StatusCode.IPC_TIMEOUT,LastFailureCorrelationId:"injected-timeout"}},
+    "user.transient_ipc_does_not_cancel_or_replay");
+
+finished=new(TaskCreationOptions.RunContinuationsAsynchronously);
+delivered=null;
+launches=0;
+Task<AdminResponse> LeaseLost(WorkerRequest request,CancellationToken token)
+{
+    if(request.Action==WorkerAction.complete)delivered=request.Result;
+    return Task.FromResult(new AdminResponse(StatusCode.LEASE_LOST,"lease-lost",Worker:new(StatusCode.LEASE_LOST)));
+}
+await UserWorker.ExecuteAsync(workerFixture,Environment.TickCount64,LeaseLost,FakeRunner,
+    CancellationToken.None,TimeSpan.FromMilliseconds(1)).WaitAsync(TimeSpan.FromSeconds(5));
+Check(launches==1 && delivered is {Status:ExecutionState.CANCELLED_UNKNOWN_EFFECT,
+    WorkerEvidence:{ObservedStopSignal:WorkerStopSignal.LEASE_LOST}},"user.authoritative_lease_loss_stops");
+
+finished=new(TaskCreationOptions.RunContinuationsAsynchronously);
+delivered=null;
+launches=0;
+Task<AdminResponse> ExplicitCancel(WorkerRequest request,CancellationToken token)
+{
+    if(request.Action==WorkerAction.complete)delivered=request.Result;
+    return Task.FromResult(new AdminResponse(StatusCode.OK,"cancel",Worker:new(StatusCode.OK,CancelRequested:true)));
+}
+await UserWorker.ExecuteAsync(workerFixture,Environment.TickCount64,ExplicitCancel,FakeRunner,
+    CancellationToken.None,TimeSpan.FromMilliseconds(1)).WaitAsync(TimeSpan.FromSeconds(5));
+Check(launches==1 && delivered is {Status:ExecutionState.CANCELLED_UNKNOWN_EFFECT,
+    WorkerEvidence:{ObservedStopSignal:WorkerStopSignal.OPERATOR_CANCELLED}},"user.explicit_cancel_distinguished");
+
+using(var siblingLifetime=new CancellationTokenSource())
+{
+    var sibling=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var siblingTask=UserWorker.RunIsolatedAsync(()=>sibling.Task,_=>siblingLifetime.Cancel());
+    Exception? observedFault=null;
+    await UserWorker.RunIsolatedAsync(()=>Task.FromException(new IOException("injected")),e=>observedFault=e);
+    Check(observedFault is IOException && !siblingTask.IsCompleted && !siblingLifetime.IsCancellationRequested,
+        "user.faulted_job_does_not_cancel_sibling");
+    sibling.SetResult();
+    await siblingTask;
+}
