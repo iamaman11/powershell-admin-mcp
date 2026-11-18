@@ -52,6 +52,63 @@ Check(WindowInspector.InspectCore(IntPtr.Zero, 1, 20).Status == WindowInspectCod
     "windows.inspect_reject_null_hwnd");
 var invalidInspect = await WindowTools.InspectWindow("invalid");
 Check(invalidInspect.Status == WindowInspectCode.INVALID_ARGUMENT, "windows.inspect_reject_bad_ref_before_ipc");
+// This is an owned throwaway fixture. No real user window or screen pixels are read.
+var uiaDesktop = DesktopCapture.ObserveDesktop(Process.GetCurrentProcess().SessionId);
+if (uiaDesktop.Code == CaptureCode.COMPLETED)
+{
+    var ready = new TaskCompletionSource<(IntPtr Handle, System.Windows.Forms.Form Form)>(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    var uiThread = new Thread(() =>
+    {
+        try
+        {
+            using var form = new System.Windows.Forms.Form { Text = "CI_UIA_OWNED_WINDOW", Width = 330, Height = 180 };
+            using var button = new System.Windows.Forms.Button
+                { Text = "CI_UIA_OWNED_BUTTON", AccessibleName = "CI_UIA_OWNED_BUTTON", Width = 250 };
+            using var input = new System.Windows.Forms.TextBox
+                { Text = "CI_UIA_SECRET_FIXTURE", AccessibleName = "CI_UIA_INPUT_NAME", Top = 40, Width = 250 };
+            using var cover = new System.Windows.Forms.Form
+                { Text = "CI_UIA_COVER", FormBorderStyle = System.Windows.Forms.FormBorderStyle.None,
+                  TopMost = true, ShowInTaskbar = false };
+            form.Controls.Add(button);
+            form.Controls.Add(input);
+            form.Shown += (_, _) =>
+            {
+                cover.Bounds = form.Bounds;
+                cover.Show();
+                ready.TrySetResult((form.Handle, form));
+            };
+            System.Windows.Forms.Application.Run(form);
+        }
+        catch (Exception error) { ready.TrySetException(error); }
+    }) { IsBackground = true };
+    uiThread.SetApartmentState(ApartmentState.STA);
+    uiThread.Start();
+    System.Windows.Forms.Form? ownedForm = null;
+    try
+    {
+        var created = await ready.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        ownedForm = created.Form;
+        var result = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 40))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        Check(result.Status == WindowInspectCode.COMPLETED &&
+            result.Elements.Any(e => e.Name == "CI_UIA_OWNED_BUTTON") &&
+            result.Elements.Any(e => e.Role.Contains("Edit", StringComparison.Ordinal) &&
+                                     e.Name == "[redacted]") &&
+            result.Elements.All(e => !e.Name.Contains("CI_UIA_SECRET_FIXTURE", StringComparison.Ordinal)),
+            "windows.inspect_owned_occluded_winforms_tree_and_redaction");
+    }
+    finally
+    {
+        if (ownedForm is { IsDisposed: false, IsHandleCreated: true })
+        {
+            try { ownedForm.BeginInvoke(new Action(ownedForm.Close)); }
+            catch (InvalidOperationException) { }
+        }
+        uiThread.Join(2000);
+    }
+}
+else Console.WriteLine($"NOT_TESTED windows.inspect_owned_occluded_winforms_tree desktop={uiaDesktop.Code}");
 var simple = await Run("Write-Output 'hello'");
 Check(simple.Status == ExecutionState.COMPLETED && simple.ExitCode == 0 && simple.Stdout.Trim() == "hello", "r2.stdout_exit");
 string prefix = "Write-Output 'Проверка Unicode 🚀'\n#";
