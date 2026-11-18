@@ -5,8 +5,10 @@ param([ValidateSet('Verify','Install','Rollback','Prepare','Accept','Maintenance
       [string]$PackagePath,
       [ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedSha256,
       [ValidatePattern('^[a-f0-9]{40}$')][string]$ExpectedCommit,
-      [switch]$RemoteAcceptanceConfirmed)
+      [switch]$RemoteAcceptanceConfirmed,
+      [switch]$ReplaceUnaccepted)
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+if($ReplaceUnaccepted -and $Action -ne 'Install'){throw 'REPLACE_UNACCEPTED_INSTALL_ONLY'}
 . (Join-Path $PSScriptRoot 'NativeFileSwap.ps1')
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
 if(-not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'ADMIN_REQUIRED'}
@@ -263,6 +265,7 @@ try{
         $p=Join-Path $root $name
         if(Test-Path -LiteralPath $p){Assert-Protected $p}
     }
+    $old=$null
     if(Test-Path -LiteralPath (Join-Path $root 'manifest.json')){
         $old=Read-Manifest $root
         if($old.commit -eq $m.commit -and $old.files.Count -eq $m.files.Count -and $service){
@@ -271,17 +274,37 @@ try{
             if($same){[pscustomobject]@{status='NOOP';commit=$m.commit;rollback_retained=(Test-Path -LiteralPath (Join-Path $root '.rollback'));autostart=$false}|ConvertTo-Json -Compress;return}
         }
     }
-    if(Test-Path -LiteralPath (Join-Path $root '.rollback')){throw 'UNACCEPTED_PREVIOUS_INSTALLATION'}
+    $pendingBackup=Join-Path $root '.rollback'
+    if((Test-Path -LiteralPath $pendingBackup) -and -not $ReplaceUnaccepted){throw 'UNACCEPTED_PREVIOUS_INSTALLATION'}
     if(-not $m.Contains('store_schema') -or $m.store_schema -ne 4){throw 'PACKAGE_STORE_SCHEMA_REQUIRED'}
     Assert-StoreCompatible (Join-Path $incoming 'native\WindowsAdminMCP.exe') ([int]$m.store_schema)
+    # Forward repair of a failed trial must not require false acceptance or a
+    # schema downgrade. Retain its older file backup; never touch the database.
+    $archivedPending=$null
+    if(Test-Path -LiteralPath $pendingBackup){
+        if(-not $old -or -not $old.Contains('store_schema') -or $old.store_schema -ne 4){throw 'TRIAL_REPAIR_REQUIRES_SCHEMA4_CANDIDATE'}
+        Assert-Protected $pendingBackup
+        Assert-NativeSwapTree $pendingBackup
+        $null=Get-NativeSwapJournal $root
+        $archivedPending=Join-Path $root ('.trial-backup-'+$old.commit)
+        if(Test-Path -LiteralPath $archivedPending){throw 'TRIAL_BACKUP_ALREADY_EXISTS'}
+        Move-NativePath $pendingBackup $archivedPending
+    }
     $swapAttempted=$true
-    Invoke-NativeFileSwap -Root $root -Incoming $incoming -ServiceExisted ([bool]$service) -BeforeRestore {param($j) Restore-ServiceRegistration $j} -Validate {
+    try{
+      Invoke-NativeFileSwap -Root $root -Incoming $incoming -ServiceExisted ([bool]$service) -BeforeRestore {param($j) Restore-ServiceRegistration $j} -Validate {
         $null=Read-Manifest $root
         if(-not $service){
             New-Service -Name WindowsAdminMCP -BinaryPathName $binding -StartupType Manual|Out-Null
             $actual=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
             if($actual.PathName -ine $binding -or $actual.StartName -ne 'LocalSystem' -or $actual.StartMode -ne 'Manual'){throw 'SCM_READBACK_FAILED'}
         }
+      }
+    }catch{
+        # If the normal swap rollback succeeded, restore the prior trial journal.
+        # If it failed, keep both backups untouched for explicit offline recovery.
+        if($archivedPending -and -not(Test-Path -LiteralPath $pendingBackup)){Move-NativePath $archivedPending $pendingBackup}
+        throw
     }
     [pscustomobject]@{status='INSTALLED_OFFLINE';commit=$m.commit;rollback_retained=$true;autostart=$false;remote_accepted=$false}|ConvertTo-Json -Compress
 }finally{

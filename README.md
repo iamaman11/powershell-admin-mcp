@@ -39,6 +39,8 @@ For an existing install, use the independent local console to stop the tunnel an
 
 ## Tools
 
+If physical acceptance rejects an unaccepted schema-4 candidate, use offline `Install -ReplaceUnaccepted -PackagePath <verified-zip> -ExpectedSha256 <digest>` from a trusted checkout to repair it forward. This retains its prior file backup under `.trial-backup-<candidate-commit>` and creates the normal `.rollback` journal for the superseded candidate. It does not Accept, enable startup, restore a database or permit a schema downgrade. A failed swap restores the prior trial journal when rollback succeeds; interrupted repairs stay offline and retain backups for explicit recovery. Finish jobs, stop the existing tunnel/service and close stdio clients first.
+
 - powershell_status: service identity (SYSTEM), authenticated frontend identity, USER runner availability, actual assembly/MCP/.NET/store versions, pinned expected tunnel version and local timings.
 - powershell_exec: durable single step, execution timeout 1–120 s, synchronous wait capped at 90 s from entry. PENDING carries job_id; inspect it, don't resubmit with a different key.
 - powershell_job: submit (1–8 steps, each timeout 1–3600 s), status by job_id or operation_key, logs (step_index **1-based**, 1..total_steps), list with state_filter/page_size (1–100)/before_seq cursor, cancel, resume, reconcile, prune.

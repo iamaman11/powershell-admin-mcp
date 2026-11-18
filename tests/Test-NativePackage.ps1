@@ -245,6 +245,27 @@ try{
         Check ($read.status -eq 'OK' -and $read.job.job_id -eq $saved.job_id -and $read.job.execution.stdout.Trim() -ceq 'upgrade-preserved') 'r6.job_preserved_after_rollback'
         $prepared=& $installer -Action Prepare -ExpectedCommit $baseline.commit|ConvertFrom-Json
         Check ($prepared.status -eq 'TRIAL_PREPARED' -and -not $prepared.logon_enabled -and -not $prepared.rollback_retained) 'r6.restored_baseline_reprepare'
+        $null=& $installer -Action Maintenance -ExpectedCommit $baseline.commit
+        $null=& $installer -Action Install -PackagePath $replacementZip -ExpectedSha256 $newDigest
+        # A failed schema-4 trial can be repaired forward without falsely Accepting it.
+        $manifest.commit='2222222222222222222222222222222222222222'
+        [IO.File]::WriteAllText($manifestFile,($manifest|ConvertTo-Json -Depth 5))
+        Remove-Item -LiteralPath $replacementZip
+        [IO.Compression.ZipFile]::CreateFromDirectory($replacementRoot,$replacementZip)
+        $repairDigest=(Get-FileHash -LiteralPath $replacementZip).Hash
+        $blocked=$false
+        try{& $installer -Action Install -PackagePath $replacementZip -ExpectedSha256 $repairDigest|Out-Null}catch{if($_.Exception.Message -eq 'UNACCEPTED_PREVIOUS_INSTALLATION'){$blocked=$true}else{throw}}
+        Check $blocked 'r6.forward_trial_repair_requires_explicit_switch'
+        $held=[IO.File]::Open((Join-Path $root 'native\WindowsAdminMCP.dll'),[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+        try{
+            $failed=$false
+            try{& $installer -Action Install -PackagePath $replacementZip -ExpectedSha256 $repairDigest -ReplaceUnaccepted|Out-Null}catch{$failed=$true}
+            Check ($failed -and (Test-Path (Join-Path $root '.rollback\journal.json')) -and -not(Test-Path (Join-Path $root '.trial-backup-1111111111111111111111111111111111111111')) -and (Get-Content (Join-Path $root 'manifest.json') -Raw|ConvertFrom-Json).commit -eq '1111111111111111111111111111111111111111') 'r6.failed_forward_repair_restores_prior_trial_journal'
+        }finally{$held.Dispose()}
+        $repair=& $installer -Action Install -PackagePath $replacementZip -ExpectedSha256 $repairDigest -ReplaceUnaccepted|ConvertFrom-Json
+        Check ($repair.status -eq 'INSTALLED_OFFLINE' -and $repair.commit -eq $manifest.commit -and -not $repair.autostart -and (Test-Path (Join-Path $root '.trial-backup-1111111111111111111111111111111111111111\journal.json'))) 'r6.forward_trial_repair_retains_backup_without_acceptance'
+        $read=Read-SavedJob
+        Check ($read.job.job_id -eq $saved.job_id -and $read.job.execution.stdout.Trim() -ceq 'upgrade-preserved') 'r6.forward_trial_repair_preserves_jobs'
     }finally{
         if(Test-Path -LiteralPath $replacementZip){Remove-Item -LiteralPath $replacementZip -Force}
         if(Test-Path -LiteralPath $replacementRoot){Remove-Item -LiteralPath $replacementRoot -Recurse -Force}
