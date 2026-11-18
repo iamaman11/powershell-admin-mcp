@@ -25,6 +25,39 @@ function Assert-IdleStore($report){
         throw 'UPDATE_ACTIVE_JOBS: finish or cancel active and queued jobs first'
     }
 }
+function Assert-InstalledUpdateSource([string]$scriptDirectory,[string]$installRoot,$manifest){
+    $expected=[IO.Path]::GetFullPath((Join-Path $installRoot 'native\installer')).TrimEnd([char]'\')
+    $actual=[IO.Path]::GetFullPath($scriptDirectory).TrimEnd([char]'\')
+    if($actual -ine $expected){return $false}
+    # The script is already in the protected installation. Confirm it is part
+    # of the verified package before relaxing the source-checkout requirement.
+    foreach($relative in @('native/installer/Install-Native.ps1',
+                           'native/installer/Update-Native.ps1',
+                           'native/installer/NativeFileSwap.ps1')){
+        $entry=$manifest.files.PSObject.Properties[$relative]
+        if($null -eq $entry -or [string]$entry.Value -cnotmatch '^[A-Fa-f0-9]{64}$'){
+            throw 'UPDATE_INSTALLED_HELPER_NOT_IN_MANIFEST'
+        }
+        $file=Join-Path $installRoot ($relative.Replace('/','\'))
+        if(-not(Test-Path -LiteralPath $file -PathType Leaf) -or
+           (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ine [string]$entry.Value){
+            throw 'UPDATE_INSTALLED_HELPER_HASH_MISMATCH'
+        }
+    }
+    return $true
+}
+function Assert-InstalledRollbackTarget([string]$scriptDirectory,[string]$installRoot,$current,$previous){
+    # An in-place updater must remain callable after the native directory has
+    # been replaced. Legacy backups without helpers need a stable checkout.
+    if(-not(Assert-InstalledUpdateSource $scriptDirectory $installRoot $current)){return}
+    foreach($relative in @('native/installer/Install-Native.ps1',
+                           'native/installer/NativeFileSwap.ps1')){
+        if($previous['files'] -isnot [Collections.IDictionary] -or
+           -not $previous['files'].Contains($relative)){
+            throw 'UPDATE_LEGACY_ROLLBACK_REQUIRES_CHECKOUT'
+        }
+    }
+}
 # Dot-sourcing exposes only the pure checks for isolated CI, not a way around
 # the public local-console guard.
 if($MyInvocation.InvocationName -eq '.'){return}
@@ -87,10 +120,14 @@ try{
             [pscustomobject]@{status='NO_UPDATE';commit=$main;startup_ready=$before.startup_ready}|ConvertTo-Json -Compress
             return
         }
-        $source=(& git -C $checkout rev-parse HEAD).Trim()
-        if($LASTEXITCODE -ne 0 -or $source -cne $main){throw 'UPDATE_CHECKOUT_NOT_CURRENT_MAIN'}
-        $dirty=@(& git -C $checkout status --porcelain --untracked-files=no)
-        if($LASTEXITCODE -ne 0 -or $dirty.Count){throw 'UPDATE_CHECKOUT_NOT_CLEAN'}
+        if(-not(Assert-InstalledUpdateSource $PSScriptRoot $root $installed)){
+            # Backward-compatible route for older installations whose package
+            # does not contain the updater. Kept only for their first upgrade.
+            $source=(& git -C $checkout rev-parse HEAD).Trim()
+            if($LASTEXITCODE -ne 0 -or $source -cne $main){throw 'UPDATE_CHECKOUT_NOT_CURRENT_MAIN'}
+            $dirty=@(& git -C $checkout status --porcelain --untracked-files=no)
+            if($LASTEXITCODE -ne 0 -or $dirty.Count){throw 'UPDATE_CHECKOUT_NOT_CLEAN'}
+        }
         $runs=(Invoke-GhJson "repos/$repo/actions/workflows/windows-acceptance.yml/runs?branch=main&event=push&head_sha=$main&per_page=20").workflow_runs
         $runId=[string](Select-UpdateRun $runs $main)
         $download=Join-Path $root ('update-'+[guid]::NewGuid().ToString('N'))
@@ -113,6 +150,7 @@ try{
         if($prior['store_schema'] -ne 4 -or $prior['commit'] -cnotmatch '^[a-f0-9]{40}$'){
             throw 'UPDATE_ROLLBACK_TARGET_UNPROVEN'
         }
+        Assert-InstalledRollbackTarget $PSScriptRoot $root $installed $prior
     }
     $stage='drain'
     $d=Read-InstalledDoctor

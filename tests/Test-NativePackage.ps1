@@ -65,6 +65,16 @@ try{
     $svc=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
     Check ($result.status -eq 'INSTALLED_OFFLINE' -and $svc.StartMode -eq 'Manual' -and $svc.State -eq 'Stopped' -and $svc.StartName -eq 'LocalSystem') 'r6.actual_offline_install'
     Check ((Test-Path (Join-Path $root 'client\tunnel-client-runtime.exe')) -and (Test-Path (Join-Path $root 'native\WindowsAdminMCP.exe')) -and (Test-Path (Join-Path $root '.rollback'))) 'r6.stable_install_paths_and_backup'
+    $installedManifest=Get-Content -LiteralPath (Join-Path $root 'manifest.json') -Raw|ConvertFrom-Json
+    $installedHelpers=@('native/installer/Install-Native.ps1','native/installer/Update-Native.ps1',
+                        'native/installer/NativeFileSwap.ps1')
+    foreach($relative in $installedHelpers){
+        $file=Join-Path $root ($relative.Replace('/','\'))
+        $expectedHash=$installedManifest.files.PSObject.Properties[$relative].Value
+        Check ((Test-Path -LiteralPath $file -PathType Leaf) -and
+            (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ceq $expectedHash) "r6.packaged_update_helper_$([IO.Path]::GetFileName($file))"
+    }
+    Check (Test-Path -LiteralPath (Join-Path $root 'native\WindowsAdminMCP.ps1') -PathType Leaf) 'r6.installed_operator_entrypoint'
     Check (-not(Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel' -ErrorAction SilentlyContinue)) 'r6.no_unaccepted_autostart'
     $repeat=& $installer -Action Install -PackagePath $Package -ExpectedSha256 $Sha256|ConvertFrom-Json
     Check ($repeat.status -eq 'NOOP' -and $repeat.rollback_retained) 'r6.repeat_install_keeps_rollback'

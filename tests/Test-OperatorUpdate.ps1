@@ -25,3 +25,28 @@ foreach($field in @('running','queued','cancelRequested')){
     $report.store.$field=0
 }
 Check (Reject {Assert-IdleStore ([pscustomobject]@{service=$null;store=$null})} 'UPDATE_STORE_UNCONFIRMED') 'h5.fail_closed_store_unconfirmed'
+$fixtureRoot=Join-Path ([IO.Path]::GetTempPath()) ('wmcp-updater-'+[guid]::NewGuid().ToString('N'))
+$helperDir=Join-Path $fixtureRoot 'native\installer'
+try{
+    [void][IO.Directory]::CreateDirectory($helperDir)
+    $hashes=[ordered]@{}
+    foreach($name in @('Install-Native.ps1','Update-Native.ps1','NativeFileSwap.ps1')){
+        $file=Join-Path $helperDir $name
+        [IO.File]::WriteAllText($file,"ci-fixture-$name")
+        $hashes["native/installer/$name"]=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+    }
+    $installed=[pscustomobject]@{files=[pscustomobject]$hashes}
+    Check (Assert-InstalledUpdateSource $helperDir $fixtureRoot $installed) 'h5.installed_updater_verified_without_checkout'
+    Check (-not(Assert-InstalledUpdateSource $fixtureRoot $fixtureRoot $installed)) 'h5.unrelated_directory_requires_checkout'
+    $old=[ordered]@{files=[ordered]@{'native/WindowsAdminMCP.exe'='A'*64}}
+    Check (Reject {Assert-InstalledRollbackTarget $helperDir $fixtureRoot $installed $old} 'UPDATE_LEGACY_ROLLBACK_REQUIRES_CHECKOUT') 'h5.legacy_rollback_denied_before_stopping_service'
+    Assert-InstalledRollbackTarget $fixtureRoot $fixtureRoot $installed $old
+    $old.files['native/installer/Install-Native.ps1']='B'*64
+    $old.files['native/installer/NativeFileSwap.ps1']='C'*64
+    Assert-InstalledRollbackTarget $helperDir $fixtureRoot $installed $old
+    Write-Host 'PASS h5.bundled_rollback_helpers_allowed'
+    $installed.files.PSObject.Properties['native/installer/Update-Native.ps1'].Value='0'*64
+    Check (Reject {Assert-InstalledUpdateSource $helperDir $fixtureRoot $installed} 'UPDATE_INSTALLED_HELPER_HASH_MISMATCH') 'h5.tampered_installed_updater_denied'
+    $installed.files.PSObject.Properties.Remove('native/installer/Update-Native.ps1')
+    Check (Reject {Assert-InstalledUpdateSource $helperDir $fixtureRoot $installed} 'UPDATE_INSTALLED_HELPER_NOT_IN_MANIFEST') 'h5.unlisted_installed_updater_denied'
+}finally{Remove-Item -LiteralPath $fixtureRoot -Recurse -Force}
