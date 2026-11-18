@@ -67,7 +67,8 @@ try{
         Assert ($v.service_pid -eq $svc.ProcessId -and $v.execution_sid -eq 'S-1-5-18' -and $v.elevated) 'r1.scm_pid_and_real_execution_identity'
         $caller=[Security.Principal.WindowsIdentity]::GetCurrent()
         Assert ($v.frontend.pid -eq $p.Id -and $v.frontend.sid -eq $caller.User.Value -and
-            $v.frontend.session_id -eq $p.SessionId -and $v.command_context -in @('SYSTEM','UNCONFIRMED')) 'hardening.separate_frontend_and_runner_identity'
+            $v.frontend.session_id -eq $p.SessionId -and $v.command_context -in @('SYSTEM','UNCONFIRMED') -and
+            $v.versions.mcpVersion -eq '0.8.1-dev' -and $v.versions.storeSchema -eq 4 -and $v.timing.ipc_ms -ge 0) 'hardening.separate_frontend_and_runner_identity'
     }
     foreach($p in @($a,$b,$c)){Send $p 2 'tools/call' @{name='powershell_status';arguments=@{};_meta=$meta}}
     $results=@(foreach($p in @($a,$b,$c)){(Receive $p 2).structuredContent})
@@ -100,7 +101,8 @@ try{
     $prefix="Write-Output 'Проверка 🚀'"+[char]10+'#'
     $long=$prefix+('x'*(11982-$prefix.Length))
     $shortLog=Job $b 101 @{action='logs';operation_key='short';step_index=1}
-    Assert ($shortLog.job.execution.audit_persisted -and $shortLog.job.execution.stdout.Contains('real-exec')) 'hardening.exec_and_logs_same_persisted_audit'
+    Assert ($shortLog.job.execution.audit_persisted -and $shortLog.job.execution.stdout.Contains('real-exec') -and
+        $shortLog.timing.store_ms -ge 0 -and $shortLog.job.execution.queue_wait_ms -ge 0) 'hardening.exec_and_logs_same_persisted_audit'
     $badIndex=Job $b 102 @{action='logs';operation_key='short';step_index=0}
     Assert ($badIndex.status -eq 'INVALID_ARGUMENT') 'hardening.zero_step_index_rejected'
     $x=ToolCall $b 11 'powershell_exec' @{command=$long;timeout_seconds=10;operation_key='long'}
@@ -140,8 +142,8 @@ try{
     Stop-Service $name
     Start-Service $name
     $null=Wait-Status $b 'OK'
-    $unknownSource=Job $c 114 @{action='logs';job_id=$kill.job.job_id;step_index=1}
-    Assert ($unknownSource.job.interrupted_source_available) 'hardening.interrupted_source_retained'
+    $unknownSource=Job $c 114 @{action='logs';job_id=$kill.job.job_id;step_index=1;include_interrupted_command=$true}
+    Assert ($unknownSource.job.interrupted_source_available -and $unknownSource.job.interrupted_command -ceq 'Start-Sleep -Seconds 30') 'hardening.interrupted_source_retained'
     $decision=Job $c 115 @{action='reconcile';job_id=$kill.job.job_id;decision='UNKNOWN';evidence='Isolated cancellation fixture: effect deliberately unknown.'}
     Assert ($decision.status -eq 'OK' -and $decision.job.state -eq 'RECONCILED' -and $decision.job.reconciliation.decision -eq 'UNKNOWN') 'hardening.reconcile_unknown'
     $repeat=Job $b 116 @{action='reconcile';job_id=$kill.job.job_id;decision='UNKNOWN';evidence='Isolated cancellation fixture: effect deliberately unknown.'}

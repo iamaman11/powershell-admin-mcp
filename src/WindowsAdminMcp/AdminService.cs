@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 using System.Security.AccessControl;
@@ -68,6 +69,7 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                 await pipe.WaitForConnectionAsync(stop);
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stop);
                 deadline.CancelAfter(TimeSpan.FromSeconds(3));
+                var clock=Stopwatch.StartNew();
                 string input = await PipeWire.ReadFrameAsync(pipe, deadline.Token);
                 bool allowed = false;
                 string? callerSid=null, logonSid=null;
@@ -93,6 +95,7 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                 else
                 {
                     var request = JsonSerializer.Deserialize<AdminRequest>(input, PipeWire.Json);
+                    if(request?.TraceId is {} trace && Guid.TryParseExact(trace,"N",out _))correlation=trace;
                     if (request?.Operation == AdminOperation.Job && request.Worker is null)
                     {
                         try
@@ -112,28 +115,47 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                         request.Command is null && request.Steps is null && request.WorkingDirectory is null &&
                         request.StepIndex is null && request.ExpectedCompletedSteps is null && request.StateFilter is null &&
                         request.PageSize is null && request.BeforeSeq is null && request.Decision is null &&
-                        request.Evidence is null && request.RetainDays is null && user is not null)
+                        request.Evidence is null && request.RetainDays is null && !request.IncludeInterruptedCommand && user is not null)
                     {
-                        var result=jobs.DispatchWorker(worker,user);
-                        response=new(result.Status,correlation,Worker:result);
+                        try
+                        {
+                            var result=jobs.DispatchWorker(worker,user);
+                            response=new(result.Status,correlation,Worker:result);
+                        }
+                        catch(Microsoft.Data.Sqlite.SqliteException e)
+                        {
+                            logger.LogWarning("Worker store request failed {Correlation} code {Code}",correlation,e.SqliteErrorCode);
+                            response=new(StatusCode.STORE_UNAVAILABLE,correlation,Worker:new(StatusCode.STORE_UNAVAILABLE));
+                        }
                     }
                     else if (request?.Operation is (AdminOperation.Status or AdminOperation.Diagnostics) && request.Action is null &&
                         request.Command is null && request.Key is null && request.JobId is null &&
                         request.Steps is null && request.StepIndex is null && request.ExpectedCompletedSteps is null &&
                         request.StateFilter is null && request.PageSize is null && request.BeforeSeq is null &&
                         request.Decision is null && request.Evidence is null && request.RetainDays is null &&
-                        request.ExecutionContext is null && request.Worker is null)
+                        request.ExecutionContext is null && request.Worker is null && !request.IncludeInterruptedCommand)
                     {
                         using var actual = WindowsIdentity.GetCurrent();
                         var status = new AdminStatus(StatusCode.OK, correlation, Environment.ProcessId, Environment.MachineName,
                             actual.Name, actual.User?.Value, actual.IsSystem, started,
-                            UserContextAvailable:jobs.UserAvailable(user));
-                        response = new(StatusCode.OK, correlation, Info: status,
-                            Store:request.Operation==AdminOperation.Diagnostics?jobs.Summary():null);
+                            UserContextAvailable:jobs.UserAvailable(user),Versions:BuildIdentity.Observe());
+                        try
+                        {
+                            response = new(StatusCode.OK, correlation, Info: status,
+                                Store:request.Operation==AdminOperation.Diagnostics?jobs.Summary():null);
+                        }
+                        catch(Microsoft.Data.Sqlite.SqliteException e)
+                        {
+                            logger.LogWarning("Diagnostic store request failed {Correlation} code {Code}",correlation,e.SqliteErrorCode);
+                            response=new(StatusCode.STORE_UNAVAILABLE,correlation,Info:status);
+                        }
                     }
                     else response = new(StatusCode.IPC_PROTOCOL_ERROR, correlation);
                 }
+                response=response with {ServiceElapsedMs=clock.ElapsedMilliseconds};
                 await PipeWire.WriteFrameAsync(pipe, JsonSerializer.Serialize(response, PipeWire.Json), deadline.Token);
+                if(clock.ElapsedMilliseconds>250)
+                    logger.LogWarning("Slow IPC {Correlation} status {Status} elapsed_ms {Elapsed}",correlation,response.Code,clock.ElapsedMilliseconds);
             }
             catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
             catch (Exception e) when (e is IOException or OperationCanceledException or JsonException

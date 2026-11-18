@@ -104,7 +104,7 @@ internal static class TunnelHost
             if(!ready)return Report(stage,3);
 
             using var workerStop=new CancellationTokenSource();
-            var workerTask=UserWorker.RunAsync(workerStop.Token);
+            Task? workerTask=null;
             try
             {
             // Local dependency only: read OS state, never execute or reconfigure INTERNET.
@@ -175,6 +175,7 @@ internal static class TunnelHost
                 // Job Object closes the complete owned tree on task stop or launcher crash.
                 // The vendor owns its protocol and network recovery while the dependency is alive.
                 child.Input.Close();
+                workerTask??=UserWorker.RunAsync(workerStop.Token);
                 Report(Code.STARTED,0,vendorPid:child.Process.Id);
                 var stdout=Task.Run(()=>child.Output.CopyTo(Stream.Null));
                 var stderr=Task.Run(()=>child.Error.CopyTo(Stream.Null));
@@ -196,7 +197,7 @@ internal static class TunnelHost
             finally
             {
                 await workerStop.CancelAsync();
-                await workerTask;
+                if(workerTask is not null)await workerTask;
             }
         }
         catch(Exception e) when(e is IOException or UnauthorizedAccessException or Win32Exception or

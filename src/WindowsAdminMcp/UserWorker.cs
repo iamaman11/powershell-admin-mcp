@@ -31,6 +31,8 @@ internal static class UserWorker
     private static async Task Execute(UserWork work,CancellationToken stop)
     {
         using var cancel=CancellationTokenSource.CreateLinkedTokenSource(stop);
+        // A wedged or disconnected frontend cannot keep executing past its local lease watchdog.
+        cancel.CancelAfter(TimeSpan.FromSeconds(12));
         string cwd=work.Cwd.Length==0?Environment.GetFolderPath(Environment.SpecialFolder.UserProfile):work.Cwd;
         var running=PowerShellRunner.RunAsync(work.Command,work.TimeoutSeconds,cwd,cancel.Token);
         try
@@ -43,6 +45,7 @@ internal static class UserWorker
                 var pulse=await Request(new(WorkerAction.heartbeat,work.LeaseId),stop);
                 if(pulse.Code!=StatusCode.OK || pulse.Worker is null || pulse.Worker.CancelRequested)
                     cancel.Cancel();
+                else if(!cancel.IsCancellationRequested)cancel.CancelAfter(TimeSpan.FromSeconds(12));
             }
             var result=await running;
             // An unconfirmed response must never execute this work again. The

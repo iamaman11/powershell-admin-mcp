@@ -25,7 +25,7 @@ internal sealed record DoctorReport(int SchemaVersion,DoctorState Status,string 
     long ElapsedMs,DoctorCheck[] Checks,string RuntimeVersion,string? Executable,string PowerShellPath,
     AdminStatus? Service,StoreSummary? Store,BootObservation Boot,TunReadiness Tun,
     int? TunnelPid,string? VendorSha256,int SessionId,bool UserInteractive,
-    PackageObservation Package,StartupObservation? Startup);
+    PackageObservation Package,StartupObservation? Startup,VersionIdentity Versions,string RequiredTunAdapter,string RequiredDataplanePath);
 
 internal static class Doctor
 {
@@ -121,7 +121,8 @@ internal static class Doctor
         return new(1,checks.Any(c=>c.Status==DoctorState.DEGRADED)?DoctorState.DEGRADED:DoctorState.NOT_TESTED,
             Guid.NewGuid().ToString("N"),DateTimeOffset.UtcNow,clock.ElapsedMilliseconds,checks.ToArray(),
             RuntimeInformation.FrameworkDescription,Environment.ProcessPath,PowerShellRunner.Executable,
-            response.Info,store,boot,tun,tunnelPid,vendorHash,self.SessionId,Environment.UserInteractive,package,startup);
+            response.Info,store,boot,tun,tunnelPid,vendorHash,self.SessionId,Environment.UserInteractive,package,startup,
+            BuildIdentity.Observe(),TunDependency.AdapterName,TunDependency.DataplanePath);
     }
 
     private static async Task<StartupObservation?> ReadStartupAsync(string root)

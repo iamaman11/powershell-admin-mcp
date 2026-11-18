@@ -53,7 +53,7 @@ else if (args is ["stdio"])
     builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
     builder.Services.AddMcpServer(options =>
     {
-        options.ServerInfo = new() { Name = "windows-admin-mcp", Version = "0.8.0-dev" };
+        options.ServerInfo = new() { Name = "windows-admin-mcp", Version = BuildIdentity.McpVersion };
     }).WithStdioServerTransport().WithTools<AdminTools>();
     await builder.Build().RunAsync();
 }

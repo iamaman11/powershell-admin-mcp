@@ -28,7 +28,9 @@ internal sealed record CaptureDescriptor(
     [property:JsonPropertyName("bytes")] int? Bytes=null,
     [property:JsonPropertyName("session_id")] int? SessionId=null,
     [property:JsonPropertyName("service_status")] StatusCode? ServiceStatus=null,
-    [property:JsonPropertyName("native_error")] int? NativeError=null);
+    [property:JsonPropertyName("native_error")] int? NativeError=null,
+    [property:JsonPropertyName("timing")] ToolTiming? Timing=null,
+    [property:JsonPropertyName("service_check_correlation_id")] string? ServiceCheckCorrelationId=null);
 
 internal static class DesktopCapture
 {
@@ -36,8 +38,8 @@ internal static class DesktopCapture
         => monitor>=0 && x>=0 && y>=0 && maxWidth is >=256 and <=1920 &&
            width.HasValue==height.HasValue && (width is null or >0) && (height is null or >0);
 
-    internal static CallToolResult Error(CaptureCode code,string correlation,StatusCode? service=null,int? native=null)
-        => Result(new(code,correlation,ServiceStatus:service,NativeError:native));
+    internal static CallToolResult Error(CaptureCode code,string correlation,StatusCode? service=null,int? native=null,ToolTiming? timing=null,string? serviceCorrelation=null)
+        => Result(new(code,correlation,ServiceStatus:service,NativeError:native,Timing:timing,ServiceCheckCorrelationId:serviceCorrelation));
 
     private static CallToolResult Result(CaptureDescriptor status,byte[]? png=null)
         => new()
@@ -49,34 +51,37 @@ internal static class DesktopCapture
                 : [new ImageContentBlock { MimeType="image/png",Data=Encoding.ASCII.GetBytes(Convert.ToBase64String(png)) }]
         };
 
-    internal static CallToolResult Capture(int monitor,int x,int y,int? width,int? height,int maxWidth,string correlation)
+    internal static CallToolResult Capture(int monitor,int x,int y,int? width,int? height,int maxWidth,string correlation,ToolTiming? previous=null,string? serviceCorrelation=null)
     {
+        var clock=Stopwatch.StartNew();
+        ToolTiming Timing()=>(previous??new()) with {CaptureMs=clock.ElapsedMilliseconds,ToolMs=(previous?.ToolMs??0)+clock.ElapsedMilliseconds};
+        CallToolResult Fail(CaptureCode code,int? native=null)=>Error(code,correlation,native:native,timing:Timing(),serviceCorrelation:serviceCorrelation);
         using var process=Process.GetCurrentProcess();
         int session=process.SessionId;
-        if(!IsDefaultConsoleDesktop(session))return Error(CaptureCode.INTERACTIVE_DESKTOP_UNAVAILABLE,correlation);
+        if(!IsDefaultConsoleDesktop(session))return Fail(CaptureCode.INTERACTIVE_DESKTOP_UNAVAILABLE);
         IntPtr oldDpi=SetThreadDpiAwarenessContext(new IntPtr(-4)); // per-monitor v2
-        if(oldDpi==IntPtr.Zero)return Error(CaptureCode.SCREEN_CAPTURE_FAILED,correlation,native:Marshal.GetLastWin32Error());
+        if(oldDpi==IntPtr.Zero)return Fail(CaptureCode.SCREEN_CAPTURE_FAILED,native:Marshal.GetLastWin32Error());
         try
         {
             var screens=Screen.AllScreens;
-            if(monitor>=screens.Length)return Error(CaptureCode.MONITOR_NOT_FOUND,correlation);
+            if(monitor>=screens.Length)return Fail(CaptureCode.MONITOR_NOT_FOUND);
             var bounds=screens[monitor].Bounds;
             int w=width??(bounds.Width-x),h=height??(bounds.Height-y);
             if(w<1 || h<1 || x>bounds.Width-w || y>bounds.Height-h)
-                return Error(CaptureCode.REGION_OUTSIDE_MONITOR,correlation);
-            if((long)w*h>16000000)return Error(CaptureCode.REGION_PIXEL_LIMIT_EXCEEDED,correlation);
+                return Fail(CaptureCode.REGION_OUTSIDE_MONITOR);
+            if((long)w*h>16000000)return Fail(CaptureCode.REGION_PIXEL_LIMIT_EXCEEDED);
             using var source=new Bitmap(w,h,PixelFormat.Format24bppRgb);
             using(var drawing=Graphics.FromImage(source))
                 drawing.CopyFromScreen(bounds.Left+x,bounds.Top+y,0,0,new Size(w,h));
             // Reject if the ordinary input desktop disappeared during capture.
-            if(!IsDefaultConsoleDesktop(session))return Error(CaptureCode.INTERACTIVE_DESKTOP_UNAVAILABLE,correlation);
+            if(!IsDefaultConsoleDesktop(session))return Fail(CaptureCode.INTERACTIVE_DESKTOP_UNAVAILABLE);
             var encoded=Encode(source,maxWidth);
             if(encoded is null)return Error(CaptureCode.SCREENSHOT_EXCEEDS_2MB,correlation);
             return Result(new(CaptureCode.COMPLETED,correlation,monitor,encoded.Width,encoded.Height,
-                "image/png",encoded.Png.Length,session),encoded.Png);
+                "image/png",encoded.Png.Length,session,Timing:Timing(),ServiceCheckCorrelationId:serviceCorrelation),encoded.Png);
         }
         catch(Exception e) when(e is Win32Exception or ExternalException or ArgumentException or InvalidOperationException)
-        {return Error(CaptureCode.SCREEN_CAPTURE_FAILED,correlation,native:e.HResult);}
+        {return Fail(CaptureCode.SCREEN_CAPTURE_FAILED,native:e.HResult);}
         finally{_ = SetThreadDpiAwarenessContext(oldDpi);}
     }
 

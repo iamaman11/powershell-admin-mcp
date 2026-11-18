@@ -15,7 +15,8 @@ internal sealed record AdminRequest([property: JsonRequired] AdminOperation Oper
     int? StepIndex = null, int? ExpectedCompletedSteps = null,
     JobState? StateFilter = null, int? PageSize = null, long? BeforeSeq = null,
     ReconciliationDecision? Decision = null, string? Evidence = null, int? RetainDays = null,
-    CommandContext? ExecutionContext = null, WorkerRequest? Worker = null);
+    CommandContext? ExecutionContext = null, WorkerRequest? Worker = null,
+    string? TraceId = null, bool IncludeInterruptedCommand = false);
 
 [JsonConverter(typeof(JsonStringEnumConverter<CommandContext>))]
 public enum CommandContext { SYSTEM, USER, UNCONFIRMED }
@@ -39,7 +40,9 @@ public sealed record AdminStatus(
     [property: JsonPropertyName("native_error")] int? NativeError = null,
     [property: JsonPropertyName("frontend")] FrontendContext? Frontend = null,
     [property: JsonPropertyName("command_context")] CommandContext? ExecutionContext = null,
-    [property: JsonPropertyName("user_context_available")] bool? UserContextAvailable = null);
+    [property: JsonPropertyName("user_context_available")] bool? UserContextAvailable = null,
+    [property:JsonPropertyName("versions")] VersionIdentity? Versions = null,
+    [property:JsonPropertyName("timing")] ToolTiming? Timing = null);
 
 
 // Service derives these fields from the authenticated local pipe client, not MCP input.
@@ -49,3 +52,15 @@ internal enum WorkerAction { poll, heartbeat, complete }
 internal sealed record WorkerRequest(WorkerAction Action,string? LeaseId=null,ExecutionResult? Result=null);
 internal sealed record UserWork(string LeaseId,string JobId,int Step,string Command,int TimeoutSeconds,string Cwd);
 internal sealed record WorkerReply(StatusCode Status,UserWork? Work=null,bool CancelRequested=false);
+
+
+public sealed record ToolTiming(
+    [property:JsonPropertyName("started_utc")] DateTimeOffset? StartedUtc=null,
+    [property:JsonPropertyName("tool_ms")] long? ToolMs=null,
+    [property:JsonPropertyName("scm_ms")] long? ScmMs=null,
+    [property:JsonPropertyName("ipc_ms")] long? IpcMs=null,
+    [property:JsonPropertyName("service_ms")] long? ServiceMs=null,
+    [property:JsonPropertyName("store_wait_ms")] long? StoreWaitMs=null,
+    [property:JsonPropertyName("store_ms")] long? StoreMs=null,
+    [property:JsonPropertyName("capture_ms")] long? CaptureMs=null,
+    [property:JsonPropertyName("ipc_calls")] int? IpcCalls=null);

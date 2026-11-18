@@ -40,7 +40,8 @@ public sealed record JobInfo(
     [property:JsonPropertyName("execution_context")] CommandContext ExecutionContext = CommandContext.SYSTEM,
     [property:JsonPropertyName("execution_sid")] string? ExecutionSid = null,
     [property:JsonPropertyName("execution_session_id")] int? ExecutionSessionId = null,
-    [property:JsonPropertyName("waiting_for_user")] bool? WaitingForUser = null);
+    [property:JsonPropertyName("waiting_for_user")] bool? WaitingForUser = null,
+    [property:JsonPropertyName("interrupted_command")] string? InterruptedCommand = null);
 
 public sealed record JobReply(
     [property:JsonPropertyName("status")] StatusCode Status,
@@ -51,7 +52,8 @@ public sealed record JobReply(
     [property:JsonPropertyName("native_error")] int? NativeError = null,
     [property:JsonPropertyName("next_before_seq")] long? NextBeforeSeq = null,
     [property:JsonPropertyName("store")] StoreSummary? Store = null,
-    [property:JsonPropertyName("pruned_count")] int? PrunedCount = null);
+    [property:JsonPropertyName("pruned_count")] int? PrunedCount = null,
+    [property:JsonPropertyName("timing")] ToolTiming? Timing = null);
 
 public sealed record StoreSummary(long Total,long Queued,long Running,long CancelRequested,long WaitingForResume,
     long WaitingForReboot,long NeedsReconciliation,long Completed,long Failed,long Cancelled,int SchemaVersion,int ActiveLimit,int TotalLimit,
@@ -61,4 +63,4 @@ public sealed record StoreSummary(long Total,long Queued,long Running,long Cance
 }
 internal sealed record AdminResponse(StatusCode Code, string Correlation, AdminStatus? Info = null, JobReply? Job = null,
     [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] StoreSummary? Store = null,
-    [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] WorkerReply? Worker = null);
+    [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] WorkerReply? Worker = null,long? ServiceElapsedMs=null);

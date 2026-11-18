@@ -32,7 +32,12 @@ public sealed record ExecutionResult(
     [property:JsonPropertyName("audit_persisted")] bool AuditPersisted = false,
     [property:JsonPropertyName("execution_context")] CommandContext? ExecutionContext = null,
     [property:JsonPropertyName("execution_sid")] string? ExecutionSid = null,
-    [property:JsonPropertyName("execution_session_id")] int? ExecutionSessionId = null);
+    [property:JsonPropertyName("execution_session_id")] int? ExecutionSessionId = null,
+    [property:JsonPropertyName("queue_wait_ms")] long? QueueWaitMs=null,
+    [property:JsonPropertyName("step_started_utc")] string? StepStartedUtc=null,
+    [property:JsonPropertyName("step_finished_utc")] string? StepFinishedUtc=null,
+    [property:JsonPropertyName("timing")] ToolTiming? Timing=null,
+    [property:JsonPropertyName("pruned_output")] PrunedOutput? PrunedOutput=null);
 
 internal static class PowerShellRunner
 {
@@ -162,3 +167,5 @@ internal static class PowerShellRunner
         return new(retained.ToString(), truncated);
     }
 }
+
+public sealed record PrunedOutput(int StdoutBytes,string StdoutSha256,int StderrBytes,string StderrSha256,int WarningCount);

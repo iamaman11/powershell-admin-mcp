@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
@@ -14,6 +15,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
     private readonly Dictionary<UserSession,long> workers=new();
     private UserLease? userLease;
     private const long PresenceMs=6000, LeaseMs=20000;
+    private long recoveryHoldUntil;
     private SqliteConnection Db => connection ?? throw new InvalidOperationException("Store unavailable");
     private const string Columns = "job_id,op_key,state,command_hash,created_utc,updated_utc,completed_steps,step_count,reboot_evidence,reconciliation,history_pruned_utc,user_sid,user_session,user_logon_sid";
     internal const int DetailedLimit=10000, RetentionDays=30, PruneBatch=8;
@@ -95,6 +97,8 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
             using(var rows=check.ExecuteReader())
                 if(rows.Read())throw new InvalidOperationException("Job store foreign key check failed.");
             using(var setVersion=Command($"PRAGMA user_version={StoreSchema.Current}",tx))setVersion.ExecuteNonQuery();
+            using(var interruptedUsers=Command("SELECT count(*) FROM jobs WHERE user_sid IS NOT NULL AND state IN ('RUNNING','CANCEL_REQUESTED')",tx))
+                if((long)interruptedUsers.ExecuteScalar()!>0)recoveryHoldUntil=Environment.TickCount64+LeaseMs;
             using var recovery = Command("""
                 UPDATE job_steps SET command=NULL WHERE job_id IN (SELECT job_id FROM jobs WHERE state IN ('RUNNING','CANCEL_REQUESTED'))
                   AND step_index<>(SELECT completed_steps+1 FROM jobs WHERE jobs.job_id=job_steps.job_id);
@@ -149,8 +153,11 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
 
     internal JobReply Dispatch(AdminRequest request, string correlation,string? callerSid=null,UserSession? callerUser=null)
     {
+        var dispatchClock=Stopwatch.StartNew();
+        long gateMs=0;
         JobReply Reply(StatusCode code, JobInfo? job = null, JobInfo[]? jobs = null, long? nextBeforeSeq = null,StoreSummary? store=null,int? prunedCount=null)
-            => new(code, correlation, job, jobs, request.Key, NextBeforeSeq:nextBeforeSeq,Store:store,PrunedCount:prunedCount);
+            => new(code, correlation, job, jobs, request.Key, NextBeforeSeq:nextBeforeSeq,Store:store,PrunedCount:prunedCount,
+                Timing:new(StoreWaitMs:gateMs,StoreMs:Math.Max(0,dispatchClock.ElapsedMilliseconds-gateMs)));
         if (request.Action is not {} action || !Enum.IsDefined(action) ||
             request.Key is {Length:0 or >100} || request.JobId is {Length:0 or >64} ||
             (request.StepIndex is not null && action != JobAction.logs) ||
@@ -159,11 +166,13 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
             (request.StateFilter is {} filter && !Enum.IsDefined(filter)) || request.PageSize is <1 or >100 || request.BeforeSeq is <1 ||
             ((request.Decision is not null || request.Evidence is not null) && action!=JobAction.reconcile) ||
             (request.RetainDays is not null && action!=JobAction.prune) || request.RetainDays is <0 or >RetentionDays ||
-            (request.ExecutionContext is not null && action!=JobAction.submit))
+            (request.ExecutionContext is not null && action!=JobAction.submit) ||
+            (request.IncludeInterruptedCommand && action!=JobAction.logs))
             return Reply(StatusCode.INVALID_ARGUMENT);
 
         lock (gate)
         {
+            gateMs=dispatchClock.ElapsedMilliseconds;
             if (action == JobAction.submit)
             {
                 if (request.Key is not {Length:>0} key || string.IsNullOrWhiteSpace(key) || request.JobId is not null ||
@@ -188,6 +197,8 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 var prior = Find(key, null, tx);
                 if (prior is not null)
                 {
+                    if(prior.ExecutionContext==CommandContext.USER && callerSid is not null && callerSid!="S-1-5-18" && callerSid!=prior.ExecutionSid)
+                        return Reply(StatusCode.ACCESS_DENIED);
                     using var check = Command("SELECT payload_hash FROM jobs WHERE job_id=$id", tx, ("$id",prior.JobId));
                     return Reply((string?)check.ExecuteScalar() == payload ? StatusCode.OK : StatusCode.CONFLICT, prior);
                 }
@@ -240,8 +251,9 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
             {
                 if (request.Key is not null || request.JobId is not null) return Reply(StatusCode.INVALID_ARGUMENT);
                 int size=request.PageSize??20;
-                using var cmd = Command("SELECT "+Columns+",seq FROM jobs WHERE ($state IS NULL OR state=$state) AND ($before IS NULL OR seq<$before) ORDER BY seq DESC LIMIT $take",
-                    null,("$state",(object?)request.StateFilter?.ToString()??DBNull.Value),("$before",(object?)request.BeforeSeq??DBNull.Value),("$take",size+1));
+                using var cmd = Command("SELECT "+Columns+",seq FROM jobs WHERE ($state IS NULL OR state=$state) AND ($before IS NULL OR seq<$before) AND ($caller IS NULL OR user_sid IS NULL OR user_sid=$caller) ORDER BY seq DESC LIMIT $take",
+                    null,("$state",(object?)request.StateFilter?.ToString()??DBNull.Value),("$before",(object?)request.BeforeSeq??DBNull.Value),("$take",size+1),
+                    ("$caller",callerSid is null or "S-1-5-18"?DBNull.Value:callerSid));
                 using var reader = cmd.ExecuteReader();
                 var jobs = new List<JobInfo>();
                 long? last=null,next=null;
@@ -280,17 +292,20 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                     ? job.CompletedSteps : job.CompletedSteps + 1);
                 if (index < 1 || index > job.TotalSteps) return Reply(StatusCode.INVALID_ARGUMENT);
                 bool unresolved=job.State==JobState.NEEDS_RECONCILIATION && index==job.CompletedSteps+1;
-                using var cmd = Command("SELECT result,command IS NOT NULL FROM job_steps WHERE job_id=$id AND step_index=$step",change,("$id",job.JobId),("$step",index));
+                using var cmd = Command("SELECT result,command FROM job_steps WHERE job_id=$id AND step_index=$step",change,("$id",job.JobId),("$step",index));
                 using var row=cmd.ExecuteReader();
                 if(!row.Read())throw new InvalidOperationException("Missing job step.");
                 var execution = row.IsDBNull(0)?null:(JsonSerializer.Deserialize<ExecutionResult>(
                     JobDataProtection.Open((byte[])row.GetValue(0),job.JobId,Field(index,"result")),PipeWire.Json)
                     ??throw new InvalidOperationException("Missing execution result."));
-                bool? sourceAvailable=unresolved?row.GetInt32(1)!=0:null;
+                if(request.IncludeInterruptedCommand && !unresolved)return Reply(StatusCode.INVALID_ARGUMENT,job);
+                bool? sourceAvailable=unresolved?!row.IsDBNull(1):null;
+                string? source=request.IncludeInterruptedCommand && sourceAvailable==true?
+                    JobDataProtection.Open((byte[])row.GetValue(1),job.JobId,Field(index,"command")):null;
                 return Reply(job.HistoryPrunedUtc is null?StatusCode.OK:StatusCode.HISTORY_PRUNED,job with
                 {
                     Execution=execution is null?null:execution with {AuditPersisted=true},ResultStep=index,
-                    InterruptedSourceAvailable=sourceAvailable
+                    InterruptedSourceAvailable=sourceAvailable,InterruptedCommand=source
                 });
             }
             if(action==JobAction.reconcile)
@@ -418,7 +433,9 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 string field=Field(item.Index,"result");
                 var saved=JsonSerializer.Deserialize<ExecutionResult>(JobDataProtection.Open(item.Blob,id,field),PipeWire.Json)
                     ??throw new InvalidOperationException("Missing result for compaction.");
-                var compact=saved with {Stdout="",Stderr="",Warnings=[],AuditPersisted=true};
+                var receipt=new PrunedOutput(Encoding.UTF8.GetByteCount(saved.Stdout),Hash(saved.Stdout),
+                    Encoding.UTF8.GetByteCount(saved.Stderr),Hash(saved.Stderr),saved.Warnings?.Length??0);
+                var compact=saved with {Stdout="",Stderr="",Warnings=[],AuditPersisted=true,PrunedOutput=receipt};
                 using var write=Command("UPDATE job_steps SET result=$result,command=NULL WHERE job_id=$id AND step_index=$step",
                     tx,("$id",id),("$step",item.Index),
                     ("$result",JobDataProtection.Protect(JsonSerializer.Serialize(compact,PipeWire.Json),id,field)));
@@ -442,7 +459,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
         }
     }
 
-    private sealed record Work(string Id,int Index,int Count,string Script,int Timeout,string Cwd,bool PauseAfter,bool RebootAfter,CancellationTokenSource Cancel,UserSession? Owner);
+    private sealed record Work(string Id,int Index,int Count,string Script,int Timeout,string Cwd,bool PauseAfter,bool RebootAfter,CancellationTokenSource Cancel,UserSession? Owner,long QueueWaitMs,string StartedUtc);
     private sealed record UserLease(string Id,Work Work,long Expires);
     private UserSession? ReadOwner(string id,SqliteTransaction tx)
     {
@@ -459,14 +476,14 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
 
     // All execution contexts compete for the same FIFO among runnable jobs.
     // A missing user's old logon never blocks unrelated SYSTEM jobs.
-    private (long Seq,UserSession? Owner)? NextRunnable(SqliteTransaction tx)
+    private (long Seq,UserSession? Owner,string QueuedUtc)? NextRunnable(SqliteTransaction tx)
     {
-        using var cmd=Command("SELECT seq,user_sid,user_session,user_logon_sid FROM jobs WHERE state='QUEUED' ORDER BY seq",tx);
+        using var cmd=Command("SELECT seq,user_sid,user_session,user_logon_sid,updated_utc FROM jobs WHERE state='QUEUED' ORDER BY seq",tx);
         using var row=cmd.ExecuteReader();
         while(row.Read())
         {
             UserSession? owner=row.IsDBNull(1)?null:new(row.GetString(1),row.GetInt32(2),row.GetString(3));
-            if(owner is null||UserAvailable(owner))return (row.GetInt64(0),owner);
+            if(owner is null||UserAvailable(owner))return (row.GetInt64(0),owner,row.GetString(4));
         }
         return null;
     }
@@ -475,15 +492,17 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
     {
         lock(gate)
         {
-            if(stop.IsCancellationRequested || active is not null)return null;
+            if(stop.IsCancellationRequested || active is not null || Environment.TickCount64<recoveryHoldUntil)return null;
             using var tx=Db.BeginTransaction();
             var next=NextRunnable(tx);
             if(next is null || next.Value.Owner!=user)return null;
+            string started=Now();
+            long queueWait=Math.Max(0,(long)(DateTimeOffset.Parse(started)-DateTimeOffset.Parse(next.Value.QueuedUtc)).TotalMilliseconds);
             using var cmd=Command("""
                 UPDATE jobs SET state='RUNNING',updated_utc=$now
                 WHERE seq=$seq AND state='QUEUED'
                 RETURNING job_id,completed_steps,step_count,cwd
-                """,tx,("$now",Now()),("$seq",next.Value.Seq));
+                """,tx,("$now",started),("$seq",next.Value.Seq));
             string id,cwd;int index,count;
             using(var row=cmd.ExecuteReader())
             {
@@ -501,7 +520,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
             }
             tx.Commit(); // durable start intent
             active=CancellationTokenSource.CreateLinkedTokenSource(stop);activeId=id;
-            return new(id,index,count,script,timeout,cwd,pause,reboot,active,user);
+            return new(id,index,count,script,timeout,cwd,pause,reboot,active,user,queueWait,started);
         }
     }
 
@@ -533,7 +552,8 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
             }
             if(request.Action!=WorkerAction.complete || request.Result is not {} result ||
                 result.CommandSha256!=Hash(current.Work.Script) || result.ElapsedMs<0 ||
-                result.Stdout.Length>16000 || result.Stderr.Length>16000 ||
+                result.Stdout is null || result.Stderr is null || result.Stdout.Length>16000 || result.Stderr.Length>16000 ||
+                (result.Status==ExecutionState.COMPLETED && result.ExitCode!=0) ||
                 result.Status is not (ExecutionState.COMPLETED or ExecutionState.COMMAND_ERROR or ExecutionState.INVALID_ARGUMENT
                     or ExecutionState.POWERSHELL_NOT_FOUND or ExecutionState.EXECUTION_FAILED or ExecutionState.TIMEOUT_BEFORE_EXECUTION
                     or ExecutionState.CANCELLED_BEFORE_EXECUTION or ExecutionState.TIMEOUT_UNKNOWN_EFFECT
@@ -656,7 +676,8 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 WHERE job_id=$id AND step_index=$step AND result IS NULL
                 """,tx,("$id",work.Id),("$step",work.Index),("$keep",end==JobState.NEEDS_RECONCILIATION?1:0),
                 ("$result",JobDataProtection.Protect(JsonSerializer.Serialize(result with {AuditPersisted=true,ExecutionContext=work.Owner is null?CommandContext.SYSTEM:CommandContext.USER,
-                    ExecutionSid=work.Owner?.Sid??"S-1-5-18",ExecutionSessionId=work.Owner?.SessionId??0},PipeWire.Json),work.Id,Field(work.Index,"result"))));
+                    ExecutionSid=work.Owner?.Sid??"S-1-5-18",ExecutionSessionId=work.Owner?.SessionId??0,
+                    QueueWaitMs=work.QueueWaitMs,StepStartedUtc=work.StartedUtc,StepFinishedUtc=Now(),Timing=null},PipeWire.Json),work.Id,Field(work.Index,"result"))));
             if(step.ExecuteNonQuery()!=1)throw new InvalidOperationException("Lost step transition");
             using var update=Command("""
                 UPDATE jobs SET state=$state,completed_steps=$completed,updated_utc=$now,
