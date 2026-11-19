@@ -34,8 +34,8 @@ public sealed record WindowActionResult(
     [property: JsonPropertyName("detail")] string? Detail = null,
     [property: JsonPropertyName("elapsed_ms")] long? ElapsedMs = null);
 
-// All operations are UIA patterns. No mouse, keyboard, activation or focus API.
-// The untrusted provider runs in a disposable child; timeout is UNKNOWN EFFECT.
+// The disposable child uses native UIA2 with AutoSetFocus disabled. An untrusted
+// provider can still change focus on its own; report the observed result.
 internal static class WindowAction
 {
     internal static bool Valid(WindowActionRequest request) =>
@@ -71,13 +71,13 @@ internal static class WindowAction
             var root = AutomationElement.FromHandle(hwnd);
             if (root is null) return new(WindowActionCode.UIA_UNAVAILABLE);
             var walker = TreeWalker.ControlViewWalker;
-            var stack = new Stack<(AutomationElement Element, int Depth)>();
-            stack.Push((root, 0));
+            var stack = new Stack<(AutomationElement Element, int Depth, int[] Path)>();
+            stack.Push((root, 0, []));
             WindowInspector.TryParseElementRef(request.ElementId, out long snapshotMs);
             int inspected = 0;
             while (stack.Count > 0 && inspected < 100)
             {
-                var (element, depth) = stack.Pop();
+                var (element, depth, path) = stack.Pop();
                 inspected++;
                 AutomationElement.AutomationElementInformation current;
                 try { current = element.Current; }
@@ -89,27 +89,11 @@ internal static class WindowAction
                 {
                     if (current.IsPassword) return new(WindowActionCode.PASSWORD_DENIED);
                     if (!current.IsEnabled) return new(WindowActionCode.DISABLED);
-                    var pattern = Pattern(element, current.ControlType, request.Action);
-                    if (pattern is null) return new(WindowActionCode.UNSUPPORTED_ACTION);
-                    IntPtr before = GetForegroundWindow();
-                    try
-                    {
-                        switch (pattern)
-                        {
-                            case InvokePattern invoke: invoke.Invoke(); break;
-                            case ValuePattern value: value.SetValue(request.Value!); break;
-                            case SelectionItemPattern select: select.Select(); break;
-                            case TogglePattern toggle: toggle.Toggle(); break;
-                        }
-                        return new(WindowActionCode.COMPLETED, ForegroundChanged: before != GetForegroundWindow(),
-                            ElapsedMs: clock.ElapsedMilliseconds);
-                    }
-                    catch (Exception e) when (e is COMException or InvalidOperationException or
-                                             ElementNotAvailableException or ElementNotEnabledException)
-                    {
-                        return new(WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
-                            Detail: e.HResult.ToString("X8"), ElapsedMs: clock.ElapsedMilliseconds);
-                    }
+                    if (Pattern(element, current.ControlType, request.Action) is null)
+                        return new(WindowActionCode.UNSUPPORTED_ACTION);
+                    // Match the exact runtime ID again in the native UIA2 view before acting.
+                    // Never fall back to managed Invoke/SetValue: those default to setting focus.
+                    return WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(), request, clock);
                 }
                 if (depth >= 5) continue;
                 var children = new List<AutomationElement>();
@@ -125,7 +109,7 @@ internal static class WindowAction
                 }
                 catch (ElementNotAvailableException) { continue; }
                 for (int i = children.Count - 1; i >= 0; i--)
-                    stack.Push((children[i], depth + 1));
+                    stack.Push((children[i], depth + 1, [.. path, i]));
             }
             return new(WindowActionCode.STALE_ELEMENT, ElapsedMs: clock.ElapsedMilliseconds);
         }
@@ -237,6 +221,4 @@ internal static class WindowAction
         { return false; }
     }
 
-    [DllImport("user32.dll")]
-    private static extern IntPtr GetForegroundWindow();
 }

@@ -109,7 +109,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.invoke_element", UseStructuredContent = true),
-     Description("Act on a fresh element_id (expires after 30 seconds) from windows.inspect_window. Requires confirm=true and authorized USER desktop; only UIA INVOKE, SET_VALUE, SELECT or TOGGLE patterns, no focus/mouse/keyboard. Value is never put in child arguments or action audit. Timeout means UNKNOWN EFFECT: do not retry automatically.")]
+     Description("Act on a fresh element_id (expires after 30 seconds) from windows.inspect_window. Requires confirm=true and authorized USER desktop; only UIA INVOKE, SET_VALUE, SELECT or TOGGLE. Native UIA2 disables automatic focus, but a provider may still change it (foreground_changed). No synthetic input. Value is never put in child arguments or action audit. Timeout means UNKNOWN EFFECT: do not retry automatically.")]
     public static async Task<WindowActionResult> InvokeElement(string window_id, string element_id,
         WindowActionKind action, string? value = null, bool confirm = false,
         CancellationToken cancellationToken = default)

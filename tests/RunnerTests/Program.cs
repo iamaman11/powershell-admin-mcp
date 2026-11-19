@@ -78,17 +78,23 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
     {
         try
         {
-            using var form = new System.Windows.Forms.Form { Text = "CI_UIA_OWNED_WINDOW", Width = 330, Height = 180 };
+            using var form = new System.Windows.Forms.Form { Text = "CI_UIA_OWNED_WINDOW", Width = 330, Height = 230 };
             using var button = new System.Windows.Forms.Button
                 { Text = "CI_UIA_OWNED_BUTTON", AccessibleName = "CI_UIA_OWNED_BUTTON", Width = 250 };
             using var input = new System.Windows.Forms.TextBox
                 { Text = "CI_UIA_SECRET_FIXTURE", AccessibleName = "CI_UIA_INPUT_NAME", Top = 40, Width = 250 };
+            using var checkbox = new System.Windows.Forms.CheckBox
+                { Text = "CI_UIA_OWNED_CHECKBOX", AccessibleName = "CI_UIA_OWNED_CHECKBOX", Top = 76 };
+            using var radio = new System.Windows.Forms.RadioButton
+                { Text = "CI_UIA_OWNED_RADIO", AccessibleName = "CI_UIA_OWNED_RADIO", Top = 108 };
             using var cover = new System.Windows.Forms.Form
                 { Text = "CI_UIA_COVER", FormBorderStyle = System.Windows.Forms.FormBorderStyle.None,
                   TopMost = true, ShowInTaskbar = false };
             button.Click += (_, _) => Interlocked.Increment(ref clickCount);
             form.Controls.Add(button);
             form.Controls.Add(input);
+            form.Controls.Add(checkbox);
+            form.Controls.Add(radio);
             form.Shown += (_, _) =>
             {
                 cover.BackColor = System.Drawing.Color.Magenta;
@@ -148,6 +154,7 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             .WaitAsync(TimeSpan.FromSeconds(5));
         Check(click.Status == WindowActionCode.COMPLETED &&
             Volatile.Read(ref clickCount) == 1, "windows.action_invoke_occluded_button");
+        Check(click.ForegroundChanged == false, "windows.action_invoke_preserves_foreground");
         var inputTarget = result.Elements.Single(e => e.Role.Contains("Edit", StringComparison.Ordinal));
         var edit = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, inputTarget.ElementId, WindowActionKind.SET_VALUE,
@@ -155,6 +162,23 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         var edited = (string)created.Form.Invoke(new Func<string>(() => created.Input.Text));
         Check(edit.Status == WindowActionCode.COMPLETED && edited == "CI_UIA_UPDATED_VALUE",
             "windows.action_set_value_occluded_edit");
+        Check(edit.ForegroundChanged == false, "windows.action_set_value_preserves_foreground");
+        var checkboxTarget = result.Elements.Single(e => e.Role.Contains("CheckBox", StringComparison.Ordinal));
+        var toggle = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, checkboxTarget.ElementId, WindowActionKind.TOGGLE, null)))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        bool checkedAfter = (bool)created.Form.Invoke(new Func<bool>(() =>
+            created.Form.Controls.OfType<System.Windows.Forms.CheckBox>().Single().Checked));
+        Check(toggle.Status == WindowActionCode.COMPLETED && toggle.ForegroundChanged == false &&
+            checkedAfter, "windows.action_toggle_occluded_checkbox_without_focus");
+        var radioTarget = result.Elements.Single(e => e.Role.Contains("RadioButton", StringComparison.Ordinal));
+        var select = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, radioTarget.ElementId, WindowActionKind.SELECT, null)))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        bool selectedAfter = (bool)created.Form.Invoke(new Func<bool>(() =>
+            created.Form.Controls.OfType<System.Windows.Forms.RadioButton>().Single().Checked));
+        Check(select.Status == WindowActionCode.COMPLETED && select.ForegroundChanged == false &&
+            selectedAfter, "windows.action_select_occluded_radio_without_focus");
     }
     finally
     {
