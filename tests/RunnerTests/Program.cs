@@ -568,6 +568,47 @@ try
 }
 finally{Directory.Delete(pagingRoot,true);}
 
+// Native updater quiesces admission atomically, cancels queued work and
+// requests active-worker cancellation without discarding unknown-effect audit.
+string legacyJobWire=System.Text.Json.JsonSerializer.Serialize(
+    new AdminRequest(AdminOperation.Job,JobAction.list,StateFilter:JobState.RUNNING),PipeWire.Json);
+Check(!legacyJobWire.Contains("\"maintenance\"",StringComparison.Ordinal) &&
+    System.Text.Json.JsonSerializer.Serialize(new AdminRequest(AdminOperation.Maintenance,Maintenance:MaintenanceAction.Drain),PipeWire.Json)
+        .Contains("\"maintenance\":\"Drain\"",StringComparison.Ordinal),
+    "maintenance.legacy_job_wire_compatible");
+string drainRoot=Path.Combine(Path.GetTempPath(),"WindowsAdminMCP-drain-"+Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(drainRoot);
+try
+{
+    using var coordinator=new JobCoordinator(Microsoft.Extensions.Logging.Abstractions.NullLogger<JobCoordinator>.Instance);
+    coordinator.Initialize(Path.Combine(drainRoot,"jobs.db"));
+    var owner=new UserSession("S-1-5-21-9-8-7-1001",1,"S-1-5-5-9-8");
+    coordinator.DispatchWorker(new(WorkerAction.poll),owner);
+    var one=coordinator.Dispatch(new(AdminOperation.Job,JobAction.submit,Key:"drain-active",Command:"Start-Sleep -Seconds 20",
+        ExecutionContext:CommandContext.USER),"fixture",owner.Sid,owner);
+    var lease=coordinator.DispatchWorker(new(WorkerAction.poll),owner).Work;
+    Check(one.Status==StatusCode.OK && lease is not null,"maintenance.owned_worker_running");
+    if(lease is null)throw new InvalidOperationException("Missing maintenance fixture lease");
+    var queued=coordinator.Dispatch(new(AdminOperation.Job,JobAction.submit,Key:"drain-queued",Command:"Write-Output never"),"fixture");
+    Check(queued.Status==StatusCode.OK,"maintenance.queued_fixture");
+    var drained=coordinator.Maintain(MaintenanceAction.Drain);
+    Check(drained is {Status:StatusCode.OK,Draining:true,CancelledQueued:1,CancelRequested:1} &&
+        coordinator.Summary() is {Queued:0,Running:0,CancelRequested:1},"maintenance.atomic_cancel_and_gate");
+    Check(coordinator.Dispatch(new(AdminOperation.Job,JobAction.submit,Key:"late",Command:"Write-Output late"),"fixture").Status==StatusCode.BUSY &&
+        coordinator.DispatchWorker(new(WorkerAction.poll),owner).Work is null &&
+        coordinator.DispatchWorker(new(WorkerAction.heartbeat,lease.LeaseId),owner).CancelRequested,
+        "maintenance.no_new_admission_or_take");
+    string hash=Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(lease.Command))).ToLowerInvariant();
+    Check(coordinator.DispatchWorker(new(WorkerAction.complete,lease.LeaseId,
+        new(ExecutionState.CANCELLED_UNKNOWN_EFFECT,hash,100)),owner).Status==StatusCode.OK &&
+        coordinator.Summary() is {Queued:0,Running:0,CancelRequested:0,NeedsReconciliation:1},
+        "maintenance.unknown_effect_retained");
+    Check(coordinator.Maintain(MaintenanceAction.Resume) is {Status:StatusCode.OK,Draining:false} &&
+        coordinator.Dispatch(new(AdminOperation.Job,JobAction.submit,Key:"post-drain",Command:"Write-Output ok"),"fixture").Status==StatusCode.OK,
+        "maintenance.release_restores_admission");
+}
+finally{Directory.Delete(drainRoot,true);}
+
 
 // Schema 3 fixture: migrate encrypted legacy results and retain permanent job keys.
 string retentionRoot=Path.Combine(Path.GetTempPath(),"WindowsAdminMCP-retention-"+Guid.NewGuid().ToString("N"));

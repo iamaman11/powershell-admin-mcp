@@ -19,11 +19,58 @@ function Read-UpdateReceipt([string]$path,[string]$commit,[string]$runId){
     return [string]$r.sha256
 }
 function Assert-IdleStore($report){
+    Assert-ValidStore $report
+    if($report.store.running -ne 0 -or $report.store.queued -ne 0 -or $report.store.cancelRequested -ne 0){
+        throw 'UPDATE_DRAIN_INCOMPLETE'
+    }
+}
+function Assert-ValidStore($report){
     if($null -eq $report.service -or $report.service.status -ne 'OK' -or
         $null -eq $report.store -or $report.store.schemaVersion -ne 4){throw 'UPDATE_STORE_UNCONFIRMED'}
-    if($report.store.running -ne 0 -or $report.store.queued -ne 0 -or $report.store.cancelRequested -ne 0){
-        throw 'UPDATE_ACTIVE_JOBS: finish or cancel active and queued jobs first'
-    }
+}
+function Extract-VerifiedDrainTool([string]$package,[string]$destination){
+    # Extract only the native publish directory from an already verified CI
+    # package; a self-contained .NET publish can still have companion files.
+    # The updater can drain a legacy installed service using a new verified
+    # operator CLI, without modifying the protected installed helper first.
+    $archive=[IO.Compression.ZipFile]::OpenRead($package)
+    try{
+        $files=@($archive.Entries|Where-Object {$_.FullName.StartsWith('native/',[StringComparison]::Ordinal) -and $_.Name})
+        $metadata=@($archive.Entries|Where-Object FullName -ceq 'manifest.json')
+        if(@($files|Where-Object FullName -ceq 'native/WindowsAdminMCP.exe').Count -ne 1 -or
+            $metadata.Count -ne 1){throw 'UPDATE_DRAIN_TOOL_PACKAGE_SHAPE'}
+        $stream=$metadata[0].Open()
+        try{
+            $reader=[IO.StreamReader]::new($stream)
+            try{$manifest=$reader.ReadToEnd()|ConvertFrom-Json}finally{$reader.Dispose()}
+        }finally{$stream.Dispose()}
+        [void][IO.Directory]::CreateDirectory($destination)
+        $prefix=[IO.Path]::GetFullPath($destination).TrimEnd([char]'\')+'\'
+        foreach($file in $files){
+            $relative=$file.FullName.Substring(7)
+            if($relative -match '(^|/)\.\.?(/|$)' -or $relative.Contains('\')){throw 'UPDATE_DRAIN_TOOL_PATH'}
+            $target=[IO.Path]::GetFullPath((Join-Path $destination ($relative.Replace('/','\'))))
+            if(-not $target.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)){throw 'UPDATE_DRAIN_TOOL_PATH'}
+            $entry=$manifest.files.PSObject.Properties[$file.FullName]
+            if($null -eq $entry -or [string]$entry.Value -cnotmatch '^[A-Fa-f0-9]{64}$'){
+                throw 'UPDATE_DRAIN_TOOL_MANIFEST'
+            }
+            [void][IO.Directory]::CreateDirectory((Split-Path -Parent $target))
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($file,$target)
+            if((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ine [string]$entry.Value){
+                throw 'UPDATE_DRAIN_TOOL_HASH_MISMATCH'
+            }
+        }
+        return (Join-Path $destination 'WindowsAdminMCP.exe')
+    }finally{$archive.Dispose()}
+}
+function Invoke-UpdateDrain([string]$tool,[ValidateSet('drain','resume')][string]$operation){
+    $PSNativeCommandUseErrorActionPreference=$false
+    $raw=& $tool maintenance $operation
+    if($LASTEXITCODE -ne 0 -or -not $raw){throw 'UPDATE_NATIVE_DRAIN_FAILED'}
+    $result=$raw|ConvertFrom-Json
+    if($result.status -ne 'OK'){throw 'UPDATE_NATIVE_DRAIN_UNCONFIRMED'}
+    return $result
 }
 function Select-UpdateClients($processes,[string]$executable,[int[]]$allowedParents){
     @($processes|Where-Object {$_ -and $_.ExecutablePath -ieq $executable -and
@@ -99,6 +146,11 @@ $stopping=$false
 $maintenance=$false
 $closedClients=0
 $closedLaunchers=0
+$candidateNative=$null
+$drainTool=$null
+$drainRequested=$false
+$cancelledQueued=0
+$cancelRequested=0
 function Read-InstalledDoctor {
     # doctor deliberately returns nonzero for NOT_TESTED remote evidence.
     $PSNativeCommandUseErrorActionPreference=$false
@@ -178,7 +230,6 @@ function Stop-LocalStdioClients {
             if($owner.ReturnValue -ne 0){throw 'UPDATE_CLIENT_OWNER_READBACK_FAILED'}
             Assert-UpdateClientScope $client $session $sid ([string]$owner.Sid)
         }
-        Assert-IdleStore (Read-InstalledDoctor)
         if($pass -eq 2){$launchers+=Stop-BlockingLaunchers $clients $session $sid}
         foreach($client in $clients){
             $current=Get-CimInstance Win32_Process -Filter ("ProcessId="+$client.ProcessId) -ErrorAction Stop
@@ -210,7 +261,7 @@ try{
         return
     }
     $d=Read-InstalledDoctor
-    Assert-IdleStore $d
+    Assert-ValidStore $d
     if($d.package.commit -cne $installed.commit -or -not $d.service.versions.informational_version.EndsWith('+'+$installed.commit)){throw 'UPDATE_INSTALLED_IDENTITY_MISMATCH'}
     $before=& $startup -Action Status|ConvertFrom-Json
     if(-not $before.definition_valid -or -not $before.service_binding_valid){throw 'UPDATE_STARTUP_UNCONFIRMED'}
@@ -243,6 +294,7 @@ try{
         $digest=Read-UpdateReceipt $receipts[0].FullName $main $runId
         $verified=& $installer -Action Verify -PackagePath $packages[0].FullName -ExpectedSha256 $digest|ConvertFrom-Json
         if($verified.status -ne 'VERIFIED' -or $verified.commit -cne $main){throw 'UPDATE_PACKAGE_IDENTITY'}
+        $candidateNative=Extract-VerifiedDrainTool $packages[0].FullName (Join-Path $download 'candidate')
         # A moving main is not a license to install an unintended revision.
         if((Invoke-GhJson "repos/$repo/commits/main").sha -cne $main){throw 'UPDATE_MAIN_MOVED'}
     }else{
@@ -256,10 +308,9 @@ try{
         Assert-InstalledRollbackTarget $PSScriptRoot $root $installed $prior
     }
     $stage='drain'
-    $d=Read-InstalledDoctor
-    Assert-IdleStore $d
-    # Refuse busy queues; stop the tunnel ingress, close only same-session
-    # disposable MCP frontends, then confirm durable work is still idle.
+    # Stop new ingress and disposable local clients first. The verified native
+    # operator then atomically gates admission in a new service, or cancels
+    # through the legacy typed queue API during the first upgrade.
     $stopping=$true
     $null=& $startup -Action Stop -ExpectedNativeSha256 $installed.files.'native/WindowsAdminMCP.exe'
     $clock=[Diagnostics.Stopwatch]::StartNew()
@@ -269,7 +320,21 @@ try{
     $closedClients=$drained.clients
     $closedLaunchers=$drained.launchers
     Assert-ClosedClients @()
-    Assert-IdleStore (Read-InstalledDoctor)
+    $drainTool=if($candidateNative){$candidateNative}else{$native}
+    $drain=Invoke-UpdateDrain $drainTool 'drain'
+    $drainRequested=$true
+    $cancelledQueued=[int]$drain.cancelled_queued
+    $cancelRequested=[int]$drain.cancel_requested
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    do{
+        $d=Read-InstalledDoctor
+        Assert-ValidStore $d
+        if($d.store.running -eq 0 -and $d.store.queued -eq 0 -and $d.store.cancelRequested -eq 0){break}
+        Start-Sleep -Milliseconds 500
+    }while($clock.Elapsed.TotalSeconds -lt 60)
+    if($d.store.running -ne 0 -or $d.store.queued -ne 0 -or $d.store.cancelRequested -ne 0){
+        throw 'UPDATE_DRAIN_TIMEOUT'
+    }
     $stage='maintenance'
     Stop-Service WindowsAdminMCP -ErrorAction Stop
     $receipt=& $installer -Action Maintenance -ExpectedCommit $installed.commit|ConvertFrom-Json
@@ -322,13 +387,19 @@ try{
     }
     $trialStatus=if($ready){'TRIAL_LOCAL_READY'}elseif($after.tun -ne 'READY'){'TRIAL_WAITING_FOR_TUN'}else{'TRIAL_NOT_READY'}
     [pscustomobject]@{status=$trialStatus;commit=$current.commit;tun=$after.tun;local_ready=$ready;
-        closed_local_clients=$closedClients;closed_blocking_launchers=$closedLaunchers;remote_accepted=$false;
+        closed_local_clients=$closedClients;closed_blocking_launchers=$closedLaunchers;
+        cancelled_queued=$cancelledQueued;cancel_requested=$cancelRequested;
+        needs_reconciliation=$after.store.needsReconciliation;remote_accepted=$false;
         next_action='verify eight MCP tools externally, then use -Action accept -RemoteAcceptanceConfirmed'}|ConvertTo-Json -Compress
 }catch{
     # Restore transport only when no maintenance/swap was attempted. Once
     # offline maintenance begins the installer journals are the source of truth;
     # do not auto-accept, erase history or guess a rollback after interruption.
-    if($stopping -and -not $maintenance -and $stage -eq 'drain' -and $before.task -eq 'Running'){
+    if($drainTool -and -not $maintenance){
+        try{$null=Invoke-UpdateDrain $drainTool 'resume'}
+        catch{Write-Warning 'UPDATE_PRE_SWAP_DRAIN_RELEASE_FAILED'}
+    }
+    if($stopping -and -not $maintenance -and $stage -in @('drain','maintenance') -and $before.task -eq 'Running'){
         try{$null=& $startup -Action Start -ExpectedNativeSha256 $installed.files.'native/WindowsAdminMCP.exe'}catch{Write-Warning 'UPDATE_PRE_SWAP_RESTART_FAILED'}
     }
     Write-Error ("UPDATE_FAILED stage="+$stage+" reason="+$_.Exception.Message) -ErrorAction Continue

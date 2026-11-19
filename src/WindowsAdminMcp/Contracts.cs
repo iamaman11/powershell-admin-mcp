@@ -1,7 +1,16 @@
 using System.Text.Json.Serialization;
 
 [JsonConverter(typeof(JsonStringEnumConverter<AdminOperation>))]
-internal enum AdminOperation { Status, Job, Diagnostics, UserWorker }
+internal enum AdminOperation { Status, Job, Diagnostics, UserWorker, Maintenance }
+
+[JsonConverter(typeof(JsonStringEnumConverter<MaintenanceAction>))]
+internal enum MaintenanceAction { Drain, Resume }
+
+internal sealed record MaintenanceReply(
+    [property: JsonPropertyName("status")] StatusCode Status,
+    [property: JsonPropertyName("draining")] bool Draining,
+    [property: JsonPropertyName("cancelled_queued")] int CancelledQueued = 0,
+    [property: JsonPropertyName("cancel_requested")] int CancelRequested = 0);
 
 [JsonConverter(typeof(JsonStringEnumConverter<StatusCode>))]
 public enum StatusCode
@@ -16,7 +25,8 @@ internal sealed record AdminRequest([property: JsonRequired] AdminOperation Oper
     JobState? StateFilter = null, int? PageSize = null, long? BeforeSeq = null,
     ReconciliationDecision? Decision = null, string? Evidence = null, int? RetainDays = null,
     CommandContext? ExecutionContext = null, WorkerRequest? Worker = null,
-    string? TraceId = null, bool IncludeInterruptedCommand = false, string? ResourceKey = null);
+    string? TraceId = null, bool IncludeInterruptedCommand = false, string? ResourceKey = null,
+    [property: JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] MaintenanceAction? Maintenance = null);
 
 [JsonConverter(typeof(JsonStringEnumConverter<CommandContext>))]
 public enum CommandContext { SYSTEM, USER, UNCONFIRMED }

@@ -15,6 +15,10 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
     private readonly Dictionary<string,UserLease> leases=new(StringComparer.Ordinal);
     private const long PresenceMs=6000, LeaseMs=20000;
     private long recoveryHoldUntil;
+    // Local updater admission gate. It expires if its controlling console dies
+    // before stopping SCM; a service restart also clears it.
+    private long maintenanceUntil;
+    private bool Draining => maintenanceUntil!=0 && Environment.TickCount64<maintenanceUntil;
     private SqliteConnection Db => connection ?? throw new InvalidOperationException("Store unavailable");
     private const string Columns = "job_id,op_key,state,command_hash,created_utc,updated_utc,completed_steps,step_count,reboot_evidence,reconciliation,history_pruned_utc,user_sid,user_session,user_logon_sid,resource_key";
     internal const int DetailedLimit=10000, RetentionDays=30, PruneBatch=8;
@@ -152,6 +156,36 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
 
     private void Signal() { if (wake.CurrentCount == 0) wake.Release(); }
 
+    internal MaintenanceReply Maintain(MaintenanceAction action)
+    {
+        lock(gate)
+        {
+            if(action==MaintenanceAction.Resume)
+            {
+                maintenanceUntil=0;
+                Signal();
+                return new(StatusCode.OK,false);
+            }
+            if(action!=MaintenanceAction.Drain)return new(StatusCode.INVALID_ARGUMENT,Draining);
+            // The same gate serializes admission, take, completion and drain.
+            // All interrupted work retains its durable audit and is never replayed.
+            using var tx=Db.BeginTransaction();
+            using(var clear=Command("UPDATE job_steps SET command=NULL WHERE job_id IN (SELECT job_id FROM jobs WHERE state='QUEUED')",tx))
+                clear.ExecuteNonQuery();
+            int queued,running;
+            using(var cancel=Command("UPDATE jobs SET state='CANCELLED',updated_utc=$now WHERE state='QUEUED'",tx,("$now",Now())))
+                queued=cancel.ExecuteNonQuery();
+            using(var cancel=Command("UPDATE jobs SET state='CANCEL_REQUESTED',updated_utc=$now WHERE state='RUNNING'",tx,("$now",Now())))
+                running=cancel.ExecuteNonQuery();
+            if(running>active.Count)throw new InvalidOperationException("Running job without owned execution");
+            tx.Commit();
+            maintenanceUntil=Environment.TickCount64+120000;
+            foreach(var work in active.Values)work.Cancel.Cancel();
+            logger.LogWarning("Local maintenance drain cancelled {Queued} queued and requested {Running} running jobs",queued,running);
+            return new(StatusCode.OK,true,queued,running);
+        }
+    }
+
     internal JobReply Dispatch(AdminRequest request, string correlation,string? callerSid=null,UserSession? callerUser=null)
     {
         var dispatchClock=Stopwatch.StartNew();
@@ -175,6 +209,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
         lock (gate)
         {
             gateMs=dispatchClock.ElapsedMilliseconds;
+            if(Draining && action is JobAction.submit or JobAction.resume)return Reply(StatusCode.BUSY);
             if (action == JobAction.submit)
             {
                 if (request.Key is not {Length:>0} key || string.IsNullOrWhiteSpace(key) || request.JobId is not null ||
@@ -518,7 +553,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
     {
         lock(gate)
         {
-            if(stop.IsCancellationRequested || Environment.TickCount64<recoveryHoldUntil ||
+            if(stop.IsCancellationRequested || Draining || Environment.TickCount64<recoveryHoldUntil ||
                 !ExecutionBudget.Observe(active.Count).CanStart)return null;
             using var tx=Db.BeginTransaction();
             var next=NextRunnable(tx);
@@ -631,6 +666,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
             }
             lock(gate)
             {
+                if(Draining)continue;
                 using var tx=Db.BeginTransaction();
                 using var update=Command("""
                     UPDATE jobs SET state=CASE WHEN $new=1 THEN 'QUEUED' ELSE state END,
