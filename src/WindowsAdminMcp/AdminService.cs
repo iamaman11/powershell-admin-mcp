@@ -104,7 +104,31 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                 if (!allowed) response = new(StatusCode.ACCESS_DENIED, correlation);
                 else
                 {
-                    if (request?.Operation == AdminOperation.Job && request.Worker is null)
+                    if (request?.Operation==AdminOperation.Maintenance && request.Maintenance is {} maintenance &&
+                        request.Action is null && request.Key is null && request.JobId is null && request.Command is null &&
+                        request.Steps is null && request.WorkingDirectory is null && request.ExecutionContext is null &&
+                        request.Worker is null && request.StepIndex is null && request.ExpectedCompletedSteps is null &&
+                        request.StateFilter is null && request.PageSize is null && request.BeforeSeq is null &&
+                        request.Decision is null && request.Evidence is null && request.RetainDays is null &&
+                        !request.IncludeInterruptedCommand && request.ResourceKey is null)
+                    {
+                        try
+                        {
+                            var result=jobs.Maintain(maintenance);
+                            response=new(result.Status,correlation,Maintenance:result);
+                        }
+                        catch(Microsoft.Data.Sqlite.SqliteException e)
+                        {
+                            logger.LogWarning("Maintenance store request failed {Correlation} code {Code}",correlation,e.SqliteErrorCode);
+                            response=new(StatusCode.STORE_UNAVAILABLE,correlation);
+                        }
+                        catch(InvalidOperationException e)
+                        {
+                            logger.LogWarning("Maintenance invariant failed {Correlation} {Error}",correlation,e.Message);
+                            response=new(StatusCode.STORE_UNAVAILABLE,correlation);
+                        }
+                    }
+                    else if (request?.Operation == AdminOperation.Job && request.Worker is null && request.Maintenance is null)
                     {
                         try
                         {
@@ -123,7 +147,8 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                         request.Command is null && request.Steps is null && request.WorkingDirectory is null &&
                         request.StepIndex is null && request.ExpectedCompletedSteps is null && request.StateFilter is null &&
                         request.PageSize is null && request.BeforeSeq is null && request.Decision is null &&
-                        request.Evidence is null && request.RetainDays is null && !request.IncludeInterruptedCommand && request.ResourceKey is null && user is not null)
+                        request.Evidence is null && request.RetainDays is null && !request.IncludeInterruptedCommand && request.ResourceKey is null &&
+                        request.Maintenance is null && user is not null)
                     {
                         try
                         {
@@ -141,7 +166,8 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                         request.Steps is null && request.StepIndex is null && request.ExpectedCompletedSteps is null &&
                         request.StateFilter is null && request.PageSize is null && request.BeforeSeq is null &&
                         request.Decision is null && request.Evidence is null && request.RetainDays is null &&
-                        request.ExecutionContext is null && request.Worker is null && !request.IncludeInterruptedCommand && request.ResourceKey is null)
+                        request.ExecutionContext is null && request.Worker is null && !request.IncludeInterruptedCommand && request.ResourceKey is null &&
+                        request.Maintenance is null)
                     {
                         using var actual = WindowsIdentity.GetCurrent();
                         var status = new AdminStatus(StatusCode.OK, correlation, Environment.ProcessId, Environment.MachineName,

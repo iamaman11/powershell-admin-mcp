@@ -30,6 +30,12 @@ else if (args is ["maintenance", "store-schema"])
     Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(schema,PipeWire.Json));
     Environment.ExitCode=schema.Status==StoreSchemaCode.READBACK_FAILED?1:0;
 }
+else if(args is ["maintenance", "drain"] || args is ["maintenance", "resume"])
+{
+    var result=await MaintenanceDrain.ExecuteAsync(args[1]=="drain"?MaintenanceAction.Drain:MaintenanceAction.Resume);
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result,PipeWire.Json));
+    Environment.ExitCode=result.Status==StatusCode.OK?0:1;
+}
 else if (args is ["doctor"] || args is ["doctor","--evidence",_])
 {
     var report=await Doctor.ObserveAsync(args.Length==3?args[2]:null);
@@ -120,6 +126,6 @@ else if (args is ["stdio"])
 }
 else
 {
-    Console.Error.WriteLine("Usage: WindowsAdminMCP.exe service|stdio|tunnel|doctor [boot|--evidence path]|maintenance store-schema|recovery|configure-recovery");
+    Console.Error.WriteLine("Usage: WindowsAdminMCP.exe service|stdio|tunnel|doctor [boot|--evidence path]|maintenance store-schema|drain|resume|recovery|configure-recovery");
     Environment.ExitCode = 2;
 }

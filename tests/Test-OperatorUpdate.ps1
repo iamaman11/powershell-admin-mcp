@@ -21,9 +21,11 @@ $report=[pscustomobject]@{service=[pscustomobject]@{status='OK'};store=[pscustom
 Assert-IdleStore $report
 foreach($field in @('running','queued','cancelRequested')){
     $report.store.$field=1
-    Check (Reject {Assert-IdleStore $report} 'UPDATE_ACTIVE_JOBS') "h5.block_$field"
+    Assert-ValidStore $report
+    Check (Reject {Assert-IdleStore $report} 'UPDATE_DRAIN_INCOMPLETE') "h5.wait_after_drain_$field"
     $report.store.$field=0
 }
+Check ((Assert-ValidStore $report) -eq $null) 'h5.preflight_allows_active_jobs_until_verified_artifact'
 Check (Reject {Assert-IdleStore ([pscustomobject]@{service=$null;store=$null})} 'UPDATE_STORE_UNCONFIRMED') 'h5.fail_closed_store_unconfirmed'
 $exe='C:\Program Files\WindowsAdminMCP\native\WindowsAdminMCP.exe'
 $local=[pscustomobject]@{ExecutablePath=$exe;CommandLine='"'+$exe+'" stdio';ParentProcessId=42;SessionId=1}
@@ -67,3 +69,18 @@ try{
     $installed.files.PSObject.Properties.Remove('native/installer/Update-Native.ps1')
     Check (Reject {Assert-InstalledUpdateSource $helperDir $fixtureRoot $installed} 'UPDATE_INSTALLED_HELPER_NOT_IN_MANIFEST') 'h5.unlisted_installed_updater_denied'
 }finally{Remove-Item -LiteralPath $fixtureRoot -Recurse -Force}
+$packageRoot=Join-Path ([IO.Path]::GetTempPath()) ('wmcp-drain-package-'+[guid]::NewGuid().ToString('N'))
+try{
+    [void][IO.Directory]::CreateDirectory((Join-Path $packageRoot 'native'))
+    $binary=Join-Path $packageRoot 'native\WindowsAdminMCP.exe'
+    [IO.File]::WriteAllText($binary,'verified-candidate-fixture')
+    $hash=(Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash
+    [IO.File]::WriteAllText((Join-Path $packageRoot 'manifest.json'),(@{files=@{'native/WindowsAdminMCP.exe'=$hash}}|ConvertTo-Json -Depth 3))
+    $zip=Join-Path ([IO.Path]::GetTempPath()) ('wmcp-drain-'+[guid]::NewGuid().ToString('N')+'.zip')
+    try{
+        [IO.Compression.ZipFile]::CreateFromDirectory($packageRoot,$zip)
+        $extracted=Join-Path $packageRoot 'selected\WindowsAdminMCP.exe'
+        Check ((Extract-VerifiedDrainTool $zip (Join-Path $packageRoot 'selected')) -ceq $extracted -and
+            (Get-FileHash -LiteralPath $extracted -Algorithm SHA256).Hash -ceq $hash) 'h5.verified_candidate_cli_extracted'
+    }finally{if(Test-Path -LiteralPath $zip){Remove-Item -LiteralPath $zip -Force}}
+}finally{Remove-Item -LiteralPath $packageRoot -Recurse -Force}
