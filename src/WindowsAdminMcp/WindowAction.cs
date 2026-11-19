@@ -33,7 +33,8 @@ public sealed record WindowActionResult(
     [property: JsonPropertyName("effect_unknown")] bool EffectUnknown = false,
     [property: JsonPropertyName("foreground_changed")] bool? ForegroundChanged = null,
     [property: JsonPropertyName("detail")] string? Detail = null,
-    [property: JsonPropertyName("elapsed_ms")] long? ElapsedMs = null);
+    [property: JsonPropertyName("elapsed_ms")] long? ElapsedMs = null,
+    [property: JsonPropertyName("target_activated")] bool? TargetActivated = null);
 
 // The disposable child uses native UIA2 with AutoSetFocus disabled. An untrusted
 // provider can still change focus on its own; report the observed result.

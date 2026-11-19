@@ -201,7 +201,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             .WaitAsync(TimeSpan.FromSeconds(5));
         Check(click.Status == WindowActionCode.COMPLETED &&
             Volatile.Read(ref clickCount) == 1, "windows.action_invoke_occluded_button");
-        Check(click.ForegroundChanged == false, "windows.action_invoke_preserves_foreground");
+        Check(click.ForegroundChanged == false && click.TargetActivated == false,
+            "windows.action_invoke_preserves_foreground");
         var inputTarget = result.Elements.Single(e => e.Role.Contains("Edit", StringComparison.Ordinal));
         var edit = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, inputTarget.ElementId, WindowActionKind.SET_VALUE,
@@ -209,7 +210,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         var edited = (string)created.Form.Invoke(new Func<string>(() => created.Input.Text));
         Check(edit.Status == WindowActionCode.COMPLETED && edited == "CI_UIA_UPDATED_VALUE",
             "windows.action_set_value_occluded_edit");
-        Check(edit.ForegroundChanged == false, "windows.action_set_value_preserves_foreground");
+        Check(edit.ForegroundChanged == false && edit.TargetActivated == false,
+            "windows.action_set_value_preserves_foreground");
         var checkboxTarget = result.Elements.Single(e => e.Role.Contains("CheckBox", StringComparison.Ordinal));
         var toggle = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, checkboxTarget.ElementId, WindowActionKind.TOGGLE, null)))
@@ -217,6 +219,7 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         bool checkedAfter = (bool)created.Form.Invoke(new Func<bool>(() =>
             created.Form.Controls.OfType<System.Windows.Forms.CheckBox>().Single().Checked));
         Check(toggle.Status == WindowActionCode.COMPLETED && toggle.ForegroundChanged == false &&
+            toggle.TargetActivated == false &&
             checkedAfter, "windows.action_toggle_occluded_checkbox_without_focus");
         var radioTarget = result.Elements.Single(e => e.Role.Contains("RadioButton", StringComparison.Ordinal));
         var select = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
@@ -225,6 +228,7 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         bool selectedAfter = (bool)created.Form.Invoke(new Func<bool>(() =>
             created.Form.Controls.OfType<System.Windows.Forms.RadioButton>().Single().Checked));
         Check(select.Status == WindowActionCode.COMPLETED && select.ForegroundChanged == false &&
+            select.TargetActivated == false &&
             selectedAfter, "windows.action_select_occluded_radio_without_focus");
         var deepTree = await Task.Run(() => WindowInspector.InspectCore(
             created.Handle, WindowInspector.MaxDepth, 100, realWindowId))
@@ -243,7 +247,7 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             new WindowActionRequest(realWindowId, deepTarget!.ElementId, WindowActionKind.INVOKE, null)))
             .WaitAsync(TimeSpan.FromSeconds(5));
         Check(deepInvoke.Status == WindowActionCode.COMPLETED &&
-            deepInvoke.ForegroundChanged == false &&
+            deepInvoke.ForegroundChanged == false && deepInvoke.TargetActivated == false &&
             Volatile.Read(ref deepClickCount) == 1,
             "windows.action_deep_control_without_focus");
         var page1 = await Task.Run(() => WindowInspector.InspectCore(
@@ -265,7 +269,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             $"focus={pathInvoke.ForegroundChanged} clicks={Volatile.Read(ref pagedClickCount)} " +
             $"path={paged.Path}");
         Check(pathInvoke.Status == WindowActionCode.COMPLETED &&
-            pathInvoke.ForegroundChanged == false && Volatile.Read(ref pagedClickCount) == 1,
+            pathInvoke.ForegroundChanged == false && pathInvoke.TargetActivated == false &&
+            Volatile.Read(ref pagedClickCount) == 1,
             "windows.action_paged_element_exact_path_without_focus");
         var parentPath = paged.Path[..paged.Path.LastIndexOf('.')];
         var parent = page1.Elements.Concat(page2.Elements).Single(e => e.Path == parentPath);

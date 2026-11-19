@@ -65,6 +65,16 @@ try{
         Send $p 1 'tools/list' @{_meta=$meta}
         $list=Receive $p 1
         Assert (@($list.tools).Count -eq 8 -and @($list.tools.name|Where-Object {$_ -in @('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element')}).Count -eq 8) 'r5.window_tools_including_inspect'
+        $inspectTool=@($list.tools|Where-Object name -eq 'windows.inspect_window')
+        $actionTool=@($list.tools|Where-Object name -eq 'windows.invoke_element')
+        Assert ($inspectTool.Count -eq 1 -and $actionTool.Count -eq 1 -and
+            @(@('window_id','max_depth','max_elements','start_path','start_element_id','offset')|Where-Object {-not $inspectTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
+            @(@('window_id','element_id','action','value','confirm','element_path')|Where-Object {-not $actionTool[0].inputSchema.properties.Contains($_)}).Count -eq 0) 'r5.actual_tools_list_exposes_paged_uia_contract'
+        Assert ($actionTool[0].outputSchema.properties.Contains('foreground_changed') -and
+            $actionTool[0].outputSchema.properties.Contains('target_activated')) 'r5.typed_uia_focus_observation_fields'
+        $schemaBytes=[Text.Encoding]::UTF8.GetByteCount(($list|ConvertTo-Json -Depth 30 -Compress))
+        Write-Host "MCP_TOOLS_LIST_BYTES=$schemaBytes"
+        Assert ($schemaBytes -le 24000) 'r5.typed_tool_schema_under_24kb_with_margin'
         Assert (@($list.tools|Where-Object {$_.name -eq 'powershell_status' -and $_.Contains('outputSchema')}).Count -eq 1) 'r1.typed_status_schema'
         $v=Wait-Status $p 'OK'
         Assert ($v.service_pid -eq $svc.ProcessId -and $v.execution_sid -eq 'S-1-5-18' -and $v.elevated) 'r1.scm_pid_and_real_execution_identity'

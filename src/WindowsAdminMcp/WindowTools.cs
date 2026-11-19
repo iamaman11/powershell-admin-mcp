@@ -33,7 +33,7 @@ public sealed record WindowListResult(
 public sealed class WindowTools
 {
     [McpServerTool(Name = "windows.list_windows", UseStructuredContent = true),
-     Description("List named top-level windows in the current authorized interactive USER desktop. Includes occluded windows, never changes focus or accesses other sessions. Maximum 100 results.")]
+     Description("List up to 100 top-level USER desktop windows, including occluded ones. Never changes focus or crosses sessions.")]
     public static async Task<WindowListResult> ListWindows(int max_windows = 50,
         CancellationToken cancellationToken = default)
     {
@@ -59,7 +59,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.inspect_window", UseStructuredContent = true),
-     Description("Read up to 100 UIA elements without focus or input values. Optional start_path + fresh start_element_id selects a verified subtree; offset pages through it (next_offset). Paths never authorize actions alone. Bounded 5-second USER worker.")]
+     Description("Read up to 100 UIA elements per page, without focus or input values. offset/next_offset paginate; start_path plus fresh start_element_id verifies a subtree. A path alone grants no authority. Isolated 5-second worker.")]
     public static async Task<WindowInspectResult> InspectWindow(string window_id, int max_depth = 12,
         int max_elements = 100, string? start_path = null, string? start_element_id = null,
         int offset = 0, CancellationToken cancellationToken = default)
@@ -88,7 +88,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.capture_window", UseStructuredContent = true),
-     Description("Capture pixels of a selected window_id using Windows Graphics Capture, even when occluded. Only authorized foreground USER desktop, never changes focus. Minimized/protected windows may be unavailable. PNG max 2 MB and max_width 256..1920. No desktop screenshot fallback.")]
+     Description("Capture a USER window with Windows Graphics Capture, including occluded windows, without focus. PNG max 2 MB; max_width 256-1920. Minimized/protected may fail; no desktop fallback.")]
     public static async Task<ModelContextProtocol.Protocol.CallToolResult> CaptureWindow(string window_id,
         int max_width = 1280, CancellationToken cancellationToken = default)
     {
@@ -112,7 +112,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.invoke_element", UseStructuredContent = true),
-     Description("Act on a fresh element_id (30 seconds) from windows.inspect_window. Optional element_path addresses nodes beyond the first 100, always fingerprint-checked. Requires confirm=true and authorized USER desktop. UIA2 disables automatic focus but providers may still change it (foreground_changed). No synthetic input or auto-retry after unknown effect.")]
+     Description("Typed UIA action on a fresh 30-second element_id, confirm=true. element_path addresses later pages with fingerprint check. AutoSetFocus is disabled; providers may still activate windows (foreground_changed, target_activated). No synthetic input or retry after uncertain effect.")]
     public static async Task<WindowActionResult> InvokeElement(string window_id, string element_id,
         WindowActionKind action, string? value = null, bool confirm = false,
         string? element_path = null,

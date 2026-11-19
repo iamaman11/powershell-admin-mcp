@@ -131,8 +131,13 @@ internal static class WindowActionNoFocus
                 ? Method<SetValueAction>(pattern, PatternActionSlot)(pattern, request.Value!)
                 : Method<InvokeAction>(pattern, PatternActionSlot)(pattern);
             bool changedDuringPreparation = foregroundAtEntry != foregroundBefore;
-            bool changedDuringAction = foregroundBefore != GetForegroundWindow();
+            IntPtr foregroundAfter = GetForegroundWindow();
+            bool changedDuringAction = foregroundBefore != foregroundAfter;
             bool changed = changedDuringPreparation || changedDuringAction;
+            // This observes the top-level target HWND only, not the identity
+            // or title of any unrelated foreground window. It does not claim
+            // that UIA caused the transition or guarantee preservation.
+            bool targetActivated = foregroundAtEntry != hwnd && foregroundAfter == hwnd;
             string? focusDetail = changedDuringPreparation && changedDuringAction ? "FOREGROUND_PREPARE_AND_ACTION" :
                 changedDuringPreparation ? "FOREGROUND_PREPARE" :
                 changedDuringAction ? "FOREGROUND_ACTION" : null;
@@ -140,10 +145,10 @@ internal static class WindowActionNoFocus
                 ? new(WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
                     ForegroundChanged: changed, Detail: result.ToString("X8") +
                         (focusDetail is null ? "" : ":" + focusDetail),
-                    ElapsedMs: clock.ElapsedMilliseconds)
+                    ElapsedMs: clock.ElapsedMilliseconds, TargetActivated: targetActivated)
                 : new(WindowActionCode.COMPLETED, ForegroundChanged: changed,
                     Detail: focusDetail,
-                    ElapsedMs: clock.ElapsedMilliseconds);
+                    ElapsedMs: clock.ElapsedMilliseconds, TargetActivated: targetActivated);
         }
         catch (Exception error) when (error is COMException or InvalidOperationException or
                                       ArgumentException or NotSupportedException)
