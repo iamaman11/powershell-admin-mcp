@@ -10,6 +10,44 @@ $runs=@($base,[pscustomobject]@{id=13;head_sha=$sha;head_branch='main';event='pu
     [pscustomobject]@{id=15;head_sha=('b'*40);head_branch='main';event='push';status='completed';conclusion='success'})
 Check ((Select-UpdateRun $runs $sha) -eq 12) 'h5.update_requires_exact_successful_main_push'
 Check (Reject {Select-UpdateRun @($runs[1],$runs[2],$runs[3]) $sha} 'UPDATE_MAIN_CI_NOT_ACCEPTED') 'h5.no_unaccepted_fallback'
+$artifact=[pscustomobject]@{id=123;name='WindowsAdminMCP-offline-package';expired=$false;size_in_bytes=100000000;
+    workflow_run=[pscustomobject]@{id=12;head_sha=$sha}}
+Check ((Select-UpdateArtifact @($artifact) '12' $sha).id -eq 123) 'h5.artifact_bound_to_exact_main_run'
+Check (Reject {Select-UpdateArtifact @($artifact) '13' $sha} 'UPDATE_ARTIFACT_IDENTITY_UNCONFIRMED') 'h5.no_foreign_run_artifact'
+Check (Reject {Select-UpdateArtifact @($artifact) '12' ('b'*40)} 'UPDATE_ARTIFACT_IDENTITY_UNCONFIRMED') 'h5.no_foreign_commit_artifact'
+Check (Reject {Select-UpdateArtifact @($artifact,$artifact) '12' $sha} 'UPDATE_ARTIFACT_IDENTITY_UNCONFIRMED') 'h5.no_ambiguous_artifact'
+Check (Reject {Select-UpdateArtifact @([pscustomobject]@{id=123;name=$artifact.name;expired=$true;
+    size_in_bytes=100000000;workflow_run=$artifact.workflow_run}) '12' $sha} 'UPDATE_ARTIFACT_IDENTITY_UNCONFIRMED') 'h5.no_expired_artifact'
+$source=[IO.MemoryStream]::new([byte[]](1,2,3,4,5,6,7,8))
+$destination=[IO.MemoryStream]::new()
+try{
+    Copy-UpdateDownloadStream $source $destination ([Threading.CancellationToken]::None) 8 1 8
+    Check (([Convert]::ToHexString($destination.ToArray())) -ceq '0102030405060708') 'h5.stream_download_exact_bytes'
+}finally{$source.Dispose();$destination.Dispose()}
+$source=[IO.MemoryStream]::new([byte[]](1,2,3,4))
+$destination=[IO.MemoryStream]::new()
+try{
+    Check (Reject {Copy-UpdateDownloadStream $source $destination ([Threading.CancellationToken]::None) 8 1 8} 'UPDATE_DOWNLOAD_INCOMPLETE') 'h5.truncated_stream_rejected'
+}finally{$source.Dispose();$destination.Dispose()}
+$source=[IO.MemoryStream]::new([byte[]](1,2,3,4))
+$destination=[IO.MemoryStream]::new()
+try{
+    Check (Reject {Copy-UpdateDownloadStream $source $destination ([Threading.CancellationToken]::None) 0 1 3} 'UPDATE_DOWNLOAD_SIZE_LIMIT') 'h5.oversized_stream_rejected'
+}finally{$source.Dispose();$destination.Dispose()}
+$wrapperRoot=Join-Path ([IO.Path]::GetTempPath()) ('wmcp-artifact-'+[guid]::NewGuid().ToString('N'))
+try{
+    [void][IO.Directory]::CreateDirectory($wrapperRoot)
+    [IO.File]::WriteAllText((Join-Path $wrapperRoot 'WindowsAdminMCP-update.json'),'{}')
+    [IO.File]::WriteAllText((Join-Path $wrapperRoot 'WindowsAdminMCP-win-x64.zip'),'fake-package')
+    $outer=Join-Path ([IO.Path]::GetTempPath()) ('wmcp-artifact-'+[guid]::NewGuid().ToString('N')+'.zip')
+    try{
+        [IO.Compression.ZipFile]::CreateFromDirectory($wrapperRoot,$outer)
+        $expanded=Join-Path $wrapperRoot 'selected'
+        [void][IO.Directory]::CreateDirectory($expanded)
+        Expand-UpdateArtifact $outer $expanded
+        Check ((Get-Content -LiteralPath (Join-Path $expanded 'WindowsAdminMCP-update.json') -Raw) -ceq '{}') 'h5.wrapper_extracts_only_named_files'
+    }finally{if(Test-Path -LiteralPath $outer){Remove-Item -LiteralPath $outer -Force}}
+}finally{Remove-Item -LiteralPath $wrapperRoot -Recurse -Force}
 $path=Join-Path ([IO.Path]::GetTempPath()) ('update-receipt-'+[guid]::NewGuid().ToString('N')+'.json')
 try{
     [IO.File]::WriteAllText($path,(@{schema=1;commit=$sha;run_id='12';sha256=('A'*64)}|ConvertTo-Json -Compress))
