@@ -48,6 +48,16 @@ else if (args is ["doctor", "boot"])
     Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(boot, PipeWire.Json));
     Environment.ExitCode = boot.Status == BootEvidenceCode.FULL_BOOT_OBSERVED ? 0 : 1;
 }
+else if (args is ["window-inspect-worker", var legacyWindowId, var legacyDepth, var legacyMax])
+{
+    // Compatibility with the original bounded worker wire used by native
+    // acceptance and an already-installed frontend during staged upgrades.
+    WindowInspectResult result = int.TryParse(legacyDepth, out int depth) &&
+        int.TryParse(legacyMax, out int maxElements)
+        ? WindowInspector.InspectInWorker(legacyWindowId, depth, maxElements)
+        : new(WindowInspectCode.INVALID_ARGUMENT, []);
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, PipeWire.Json));
+}
 else if (args is ["window-inspect-worker", var windowId, var depthText, var maxText,
     var pathText, var refText, var offsetText])
 {
