@@ -43,7 +43,7 @@ internal static class WindowActionNoFocus
     private delegate int SetValueAction(IntPtr self, [MarshalAs(UnmanagedType.BStr)] string value);
 
     internal static WindowActionResult Invoke(IntPtr hwnd, int[] path, int[] expectedRuntimeId,
-        WindowActionRequest request, Stopwatch clock)
+        WindowActionRequest request, Stopwatch clock, bool radioInvoke = false)
     {
         if (path.Length > 5 || expectedRuntimeId.Length is < 1 or > 128)
             return new(WindowActionCode.STALE_ELEMENT, ElapsedMs: clock.ElapsedMilliseconds);
@@ -106,6 +106,7 @@ internal static class WindowActionNoFocus
             {
                 WindowActionKind.INVOKE => InvokePatternId,
                 WindowActionKind.SET_VALUE => ValuePatternId,
+                WindowActionKind.SELECT when radioInvoke => InvokePatternId,
                 WindowActionKind.SELECT => SelectionItemPatternId,
                 WindowActionKind.TOGGLE => TogglePatternId,
                 _ => 0

@@ -91,9 +91,16 @@ internal static class WindowAction
                     if (!current.IsEnabled) return new(WindowActionCode.DISABLED);
                     if (Pattern(element, current.ControlType, request.Action) is null)
                         return new(WindowActionCode.UNSUPPORTED_ACTION);
+                    // WinForms radios may report Select() success without checking
+                    // the button when AutoSetFocus is off. Invoke is the equivalent
+                    // accessible activation when the radio exposes that pattern.
+                    bool radioInvoke = request.Action == WindowActionKind.SELECT &&
+                        current.ControlType == ControlType.RadioButton &&
+                        element.TryGetCurrentPattern(InvokePattern.Pattern, out _);
                     // Match the exact runtime ID again in the native UIA2 view before acting.
                     // Never fall back to managed Invoke/SetValue: those default to setting focus.
-                    return WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(), request, clock);
+                    return WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(), request,
+                        clock, radioInvoke);
                 }
                 if (depth >= 5) continue;
                 var children = new List<AutomationElement>();
