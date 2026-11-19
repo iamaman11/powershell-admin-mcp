@@ -18,6 +18,111 @@ function Read-UpdateReceipt([string]$path,[string]$commit,[string]$runId){
         [string]$r['sha256'] -cnotmatch '^[A-Fa-f0-9]{64}$'){throw 'UPDATE_RECEIPT_MISMATCH'}
     return [string]$r.sha256
 }
+function Select-UpdateArtifact($artifacts,[string]$runId,[string]$commit){
+    $candidates=@($artifacts|Where-Object {$_ -and $_.name -ceq 'WindowsAdminMCP-offline-package' -and
+        $_.expired -eq $false -and [string]$_.workflow_run.id -ceq $runId -and
+        $_.workflow_run.head_sha -ceq $commit})
+    if($candidates.Count -ne 1 -or [long]$candidates[0].id -le 0 -or
+        [long]$candidates[0].size_in_bytes -le 0 -or [long]$candidates[0].size_in_bytes -gt 268435456){
+        throw 'UPDATE_ARTIFACT_IDENTITY_UNCONFIRMED'
+    }
+    return $candidates[0]
+}
+function Copy-UpdateDownloadStream([IO.Stream]$source,[IO.Stream]$destination,
+    [Threading.CancellationToken]$deadline,[long]$expectedBytes,[int]$stallSeconds=30,
+    [long]$maxBytes=268435456){
+    if($stallSeconds -lt 1 -or $maxBytes -le 0 -or $expectedBytes -gt $maxBytes){
+        throw 'UPDATE_DOWNLOAD_LIMIT_INVALID'
+    }
+    $buffer=[byte[]]::new(65536)
+    $total=[long]0
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    $lastReport=[long]0
+    while($true){
+        $readDeadline=[Threading.CancellationTokenSource]::CreateLinkedTokenSource($deadline)
+        try{
+            $readDeadline.CancelAfter([TimeSpan]::FromSeconds($stallSeconds))
+            $count=$source.ReadAsync($buffer,0,$buffer.Length,$readDeadline.Token).GetAwaiter().GetResult()
+        }finally{$readDeadline.Dispose()}
+        if($count -eq 0){break}
+        $total+=$count
+        if($total -gt $maxBytes){throw 'UPDATE_DOWNLOAD_SIZE_LIMIT'}
+        $destination.Write($buffer,0,$count)
+        if($clock.ElapsedMilliseconds - $lastReport -ge 5000){
+            $lastReport=$clock.ElapsedMilliseconds
+            $percent=if($expectedBytes -gt 0){[math]::Min(99,[int](100*$total/$expectedBytes))}else{-1}
+            Write-Progress -Activity 'WindowsAdminMCP update' -Status ("Downloading GitHub artifact: {0:N1} MiB" -f ($total/1MB)) -PercentComplete $percent
+            Write-Host ("UPDATE_DOWNLOAD_PROGRESS bytes=$total expected_bytes=$expectedBytes elapsed_seconds=$([int]$clock.Elapsed.TotalSeconds)")
+        }
+    }
+    if($total -eq 0 -or ($expectedBytes -gt 0 -and $total -ne $expectedBytes)){
+        throw 'UPDATE_DOWNLOAD_INCOMPLETE'
+    }
+    Write-Progress -Activity 'WindowsAdminMCP update' -Completed
+    Write-Host ("UPDATE_DOWNLOAD_COMPLETE bytes=$total elapsed_seconds=$([int]$clock.Elapsed.TotalSeconds)")
+}
+function Save-UpdateArtifact([string]$uri,[string]$token,[string]$output){
+    for($attempt=1;$attempt -le 2;$attempt++){
+        $client=$null;$request=$null;$response=$null;$inputStream=$null;$outputStream=$null;$deadline=$null
+        $retryable=$true;$complete=$false
+        try{
+            Write-Host "UPDATE_DOWNLOAD_START attempt=$attempt max_seconds=240 stall_seconds=30"
+            $client=[Net.Http.HttpClient]::new()
+            $client.Timeout=[TimeSpan]::FromSeconds(240)
+            $request=[Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get,[uri]$uri)
+            $request.Headers.Authorization=[Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer',$token)
+            $request.Headers.UserAgent.ParseAdd('WindowsAdminMCP-Updater')
+            $request.Headers.Accept.ParseAdd('application/vnd.github+json')
+            $deadline=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(240))
+            $response=$client.SendAsync($request,[Net.Http.HttpCompletionOption]::ResponseHeadersRead,$deadline.Token).GetAwaiter().GetResult()
+            if(-not $response.IsSuccessStatusCode){
+                $retryable=[int]$response.StatusCode -eq 429 -or [int]$response.StatusCode -ge 500
+                throw "UPDATE_ARTIFACT_HTTP_$([int]$response.StatusCode)"
+            }
+            $expected=[long]($response.Content.Headers.ContentLength ?? 0)
+            if($expected -gt 268435456){$retryable=$false;throw 'UPDATE_DOWNLOAD_SIZE_LIMIT'}
+            $inputStream=$response.Content.ReadAsStreamAsync($deadline.Token).GetAwaiter().GetResult()
+            $outputStream=[IO.File]::Open($output,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+            Copy-UpdateDownloadStream $inputStream $outputStream $deadline.Token $expected
+            $outputStream.Flush()
+            $complete=$true
+            return
+        }catch{
+            $reason=if($_.Exception.Message -match '^UPDATE_[A-Z0-9_]+$'){
+                $_.Exception.Message
+            }else{$_.Exception.GetType().Name}
+            if($reason -match '^UPDATE_DOWNLOAD_(SIZE_LIMIT|LIMIT_INVALID)$'){$retryable=$false}
+            if(-not $retryable -or $attempt -eq 2){throw "UPDATE_ARTIFACT_DOWNLOAD_FAILED attempt=$attempt reason=$reason"}
+            Write-Warning "UPDATE_DOWNLOAD_RETRY attempt=$attempt reason=$reason"
+        }finally{
+            if($outputStream){$outputStream.Dispose()}
+            if($inputStream){$inputStream.Dispose()}
+            if($response){$response.Dispose()}
+            if($request){$request.Dispose()}
+            if($client){$client.Dispose()}
+            if($deadline){$deadline.Dispose()}
+            # The caller extracts only a completed transfer. No partial bytes
+            # survive a retry or an exhausted download attempt.
+            if(-not $complete -and (Test-Path -LiteralPath $output)){
+                Remove-Item -LiteralPath $output -Force
+            }
+        }
+        Start-Sleep -Seconds 3
+    }
+}
+function Expand-UpdateArtifact([string]$archivePath,[string]$destination){
+    $archive=[IO.Compression.ZipFile]::OpenRead($archivePath)
+    try{
+        foreach($name in @('WindowsAdminMCP-win-x64.zip','WindowsAdminMCP-update.json')){
+            $items=@($archive.Entries|Where-Object {$_.Name -ceq $name})
+            $limit=if($name -ceq 'WindowsAdminMCP-update.json'){4096}else{268435456}
+            if($items.Count -ne 1 -or $items[0].Length -le 0 -or $items[0].Length -gt $limit){
+                throw 'UPDATE_ARTIFACT_CONTENT_INVALID'
+            }
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($items[0],(Join-Path $destination $name))
+        }
+    }finally{$archive.Dispose()}
+}
 function Assert-IdleStore($report){
     Assert-ValidStore $report
     if($report.store.running -ne 0 -or $report.store.queued -ne 0 -or $report.store.cancelRequested -ne 0){
@@ -286,8 +391,15 @@ try{
         $runId=[string](Select-UpdateRun $runs $main)
         $download=Join-Path $root ('update-'+[guid]::NewGuid().ToString('N'))
         [void][IO.Directory]::CreateDirectory($download)
-        & gh run download $runId --repo $repo --name WindowsAdminMCP-offline-package --dir $download
-        if($LASTEXITCODE -ne 0){throw 'UPDATE_ARTIFACT_DOWNLOAD_FAILED'}
+        $artifact=Select-UpdateArtifact (Invoke-GhJson "repos/$repo/actions/runs/$runId/artifacts?per_page=100").artifacts $runId $main
+        $token=(& gh auth token --hostname github.com)
+        if($LASTEXITCODE -ne 0 -or -not $token){throw 'UPDATE_GITHUB_AUTH_UNAVAILABLE'}
+        $archivePath=Join-Path $download 'github-artifact.zip'
+        try{
+            Save-UpdateArtifact "https://api.github.com/repos/$repo/actions/artifacts/$($artifact.id)/zip" (([string]$token).Trim()) $archivePath
+        }finally{$token=$null}
+        Expand-UpdateArtifact $archivePath $download
+        Remove-Item -LiteralPath $archivePath -Force
         $packages=@(Get-ChildItem -LiteralPath $download -File -Recurse -Filter 'WindowsAdminMCP-win-x64.zip')
         $receipts=@(Get-ChildItem -LiteralPath $download -File -Recurse -Filter 'WindowsAdminMCP-update.json')
         if($packages.Count -ne 1 -or $receipts.Count -ne 1){throw 'UPDATE_ARTIFACT_CONTENT_INVALID'}
