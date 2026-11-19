@@ -41,6 +41,9 @@ public sealed record WindowInspectResult(
 internal static class WindowInspector
 {
     internal const int ElementRefSeconds = 30;
+    // Chromium's page document can be nested well below its browser chrome.
+    // Keep node count and the isolated worker deadline unchanged.
+    internal const int MaxDepth = 16;
     private const long FutureSkewMs = 5000;
 
     // Runtime IDs are ephemeral. A fresh token also binds the window identity
@@ -70,7 +73,7 @@ internal static class WindowInspector
     }
 
     internal static bool ValidArguments(string? windowId, int maxDepth, int maxElements) =>
-        WindowCatalog.TryParseId(windowId, out _) && maxDepth is >= 0 and <= 5 &&
+        WindowCatalog.TryParseId(windowId, out _) && maxDepth is >= 0 and <= MaxDepth &&
         maxElements is >= 1 and <= 100;
 
     internal static WindowInspectResult InspectInWorker(string windowId, int maxDepth, int maxElements)
@@ -92,7 +95,7 @@ internal static class WindowInspector
     internal static WindowInspectResult InspectCore(IntPtr hwnd, int maxDepth, int maxElements, string? windowId = null)
     {
         var clock = Stopwatch.StartNew();
-        if (hwnd == IntPtr.Zero || maxDepth is < 0 or > 5 || maxElements is < 1 or > 100)
+        if (hwnd == IntPtr.Zero || maxDepth is < 0 or > MaxDepth || maxElements is < 1 or > 100)
             return new(WindowInspectCode.INVALID_ARGUMENT, [], ElapsedMs: clock.ElapsedMilliseconds);
         try
         {
