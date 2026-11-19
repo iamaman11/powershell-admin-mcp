@@ -84,7 +84,7 @@ internal static class WindowActionNoFocus
             // fingerprint walker; never act if the views disagree.
             foreach (int childIndex in path)
             {
-                if (childIndex is < 0 or > 100)
+                if (childIndex is < 0 or > WindowInspector.MaxTraversal)
                     return new(WindowActionCode.STALE_ELEMENT, ElapsedMs: clock.ElapsedMilliseconds);
                 IntPtr child = IntPtr.Zero;
                 try

@@ -260,6 +260,9 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         var pathInvoke = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, paged!.ElementId, WindowActionKind.INVOKE,
                 null, paged.Path))).WaitAsync(TimeSpan.FromSeconds(5));
+        Console.WriteLine($"PAGED_ACTION status={pathInvoke.Status} detail={pathInvoke.Detail} " +
+            $"focus={pathInvoke.ForegroundChanged} clicks={Volatile.Read(ref pagedClickCount)} " +
+            $"path={paged.Path}");
         Check(pathInvoke.Status == WindowActionCode.COMPLETED &&
             pathInvoke.ForegroundChanged == false && Volatile.Read(ref pagedClickCount) == 1,
             "windows.action_paged_element_exact_path_without_focus");
