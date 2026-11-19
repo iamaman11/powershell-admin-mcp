@@ -45,6 +45,9 @@ Check(WindowCatalog.ResolveId(staleWindowId, 1, out _) == WindowResolveCode.STAL
     "windows.reject_stale_hwnd");
 Check(WindowInspector.ValidArguments(testWindowId, 0, 1) &&
     WindowInspector.ValidArguments(testWindowId, 16, 100) &&
+    WindowInspector.ValidArguments(testWindowId, 16, 100, offset: 100) &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 1, "0.1", null) &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 100, offset: 1950) &&
     !WindowInspector.ValidArguments(testWindowId, 17, 50) &&
     !WindowInspector.ValidArguments(testWindowId, 3, 101) &&
     !WindowInspector.ValidArguments("invalid", 3, 60), "windows.inspect_bounded_arguments");
@@ -58,7 +61,15 @@ Check(WindowInspector.TryParseElementRef(freshElementId, out _) &&
     !WindowInspector.TryParseElementRef("bad", out _) &&
     !WindowInspector.TryParseElementRef("e1:1:0123456789abcdef0123456789abcdef", out _),
     "windows.action_fresh_reference_and_stale_rejection");
+Check(WindowInspector.TryParsePath("0.1.0.25", out var parsedPath) &&
+    parsedPath.SequenceEqual(new[] { 1, 0, 25 }) &&
+    !WindowInspector.TryParsePath("0..1", out _) &&
+    !WindowInspector.TryParsePath("0.01", out _) &&
+    !WindowInspector.TryParsePath("1.0", out _) &&
+    !WindowInspector.TryParsePath("0.2001", out _), "windows.inspect_strict_path_contract");
 Check(WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.INVOKE, null)) &&
+    WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.INVOKE, null, "0.1")) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.INVOKE, null, "0..1")) &&
     !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.INVOKE, "unexpected")) &&
     !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.SET_VALUE, new string('x', 4097))),
     "windows.action_bounded_arguments");
@@ -75,6 +86,7 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         TaskCreationOptions.RunContinuationsAsynchronously);
     int clickCount = 0;
     int deepClickCount = 0;
+    int pagedClickCount = 0;
     var uiThread = new Thread(() =>
     {
         try
@@ -114,6 +126,22 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                   Dock = System.Windows.Forms.DockStyle.Fill };
             deepButton.Click += (_, _) => Interlocked.Increment(ref deepClickCount);
             nested.Controls.Add(deepButton);
+            // More than one page of UIA controls. An addressable action must
+            // work even when the target lies beyond the first 100 elements.
+            var many = new System.Windows.Forms.Panel
+                { Left = 292, Top = 10, Width = 30, Height = 80, AutoScroll = true };
+            form.Controls.Add(many);
+            for (int i = 0; i < 125; i++)
+            {
+                var item = new System.Windows.Forms.Button
+                {
+                    Text = i == 124 ? "CI_UIA_PAGED_BUTTON" : $"CI_UIA_PAGE_{i}",
+                    AccessibleName = i == 124 ? "CI_UIA_PAGED_BUTTON" : $"CI_UIA_PAGE_{i}",
+                    Left = 0, Top = i * 25, Width = 50, Height = 24
+                };
+                if (i == 124) item.Click += (_, _) => Interlocked.Increment(ref pagedClickCount);
+                many.Controls.Add(item);
+            }
             form.Shown += (_, _) =>
             {
                 cover.BackColor = System.Drawing.Color.Magenta;
@@ -202,6 +230,13 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             created.Handle, WindowInspector.MaxDepth, 100, realWindowId))
             .WaitAsync(TimeSpan.FromSeconds(5));
         var deepTarget = deepTree.Elements.SingleOrDefault(e => e.Name == "CI_UIA_DEEP_BUTTON");
+        if (deepTarget is null && deepTree.NextOffset is int nextPage)
+        {
+            var nextDeepTree = await Task.Run(() => WindowInspector.InspectCore(
+                created.Handle, WindowInspector.MaxDepth, 100, realWindowId, offset: nextPage))
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            deepTarget = nextDeepTree.Elements.SingleOrDefault(e => e.Name == "CI_UIA_DEEP_BUTTON");
+        }
         Check(deepTree.Status == WindowInspectCode.COMPLETED && deepTarget is { Depth: > 5 },
             "windows.inspect_deep_controls_under_bounded_tree");
         var deepInvoke = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
@@ -211,6 +246,45 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             deepInvoke.ForegroundChanged == false &&
             Volatile.Read(ref deepClickCount) == 1,
             "windows.action_deep_control_without_focus");
+        var page1 = await Task.Run(() => WindowInspector.InspectCore(
+            created.Handle, WindowInspector.MaxDepth, 100, realWindowId))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        Check(page1.Status == WindowInspectCode.COMPLETED && page1.Truncated &&
+            page1.NextOffset == 100, "windows.inspect_bounded_first_page");
+        var page2 = await Task.Run(() => WindowInspector.InspectCore(
+            created.Handle, WindowInspector.MaxDepth, 100, realWindowId, offset: 100))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        var paged = page2.Elements.SingleOrDefault(e => e.Name == "CI_UIA_PAGED_BUTTON");
+        Check(page2.Status == WindowInspectCode.COMPLETED && paged is not null &&
+            page1.Elements.All(e => e.Name != paged.Name), "windows.inspect_second_page_exposes_deep_sibling");
+        if (paged is null) throw new InvalidOperationException("PAGED_TARGET_MISSING");
+        var pathInvoke = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, paged.ElementId, WindowActionKind.INVOKE,
+                null, paged.Path))).WaitAsync(TimeSpan.FromSeconds(5));
+        Console.WriteLine($"PAGED_ACTION status={pathInvoke.Status} detail={pathInvoke.Detail} " +
+            $"focus={pathInvoke.ForegroundChanged} clicks={Volatile.Read(ref pagedClickCount)} " +
+            $"path={paged.Path}");
+        Check(pathInvoke.Status == WindowActionCode.COMPLETED &&
+            pathInvoke.ForegroundChanged == false && Volatile.Read(ref pagedClickCount) == 1,
+            "windows.action_paged_element_exact_path_without_focus");
+        var parentPath = paged.Path[..paged.Path.LastIndexOf('.')];
+        var parent = page1.Elements.Concat(page2.Elements).Single(e => e.Path == parentPath);
+        var subtree = await Task.Run(() => WindowInspector.InspectCore(
+            created.Handle, WindowInspector.MaxDepth, 100, realWindowId,
+            parent.Path, parent.ElementId, offset: 100)).WaitAsync(TimeSpan.FromSeconds(5));
+        Check(subtree.Status == WindowInspectCode.COMPLETED &&
+            subtree.Elements.Any(e => e.Name == paged.Name),
+            "windows.inspect_verified_subtree_page");
+        var staleSubtree = await Task.Run(() => WindowInspector.InspectCore(
+            created.Handle, WindowInspector.MaxDepth, 10, realWindowId,
+            parent.Path, paged.ElementId)).WaitAsync(TimeSpan.FromSeconds(5));
+        Check(staleSubtree.Status == WindowInspectCode.STALE_ELEMENT,
+            "windows.inspect_reject_mismatched_subtree_ref");
+        var stalePath = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, paged.ElementId, WindowActionKind.INVOKE,
+                null, parent.Path))).WaitAsync(TimeSpan.FromSeconds(5));
+        Check(stalePath.Status == WindowActionCode.STALE_ELEMENT && Volatile.Read(ref pagedClickCount) == 1,
+            "windows.action_reject_mismatched_exact_path");
     }
     finally
     {

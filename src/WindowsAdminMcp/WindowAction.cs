@@ -24,7 +24,8 @@ internal sealed record WindowActionRequest(
     [property: JsonPropertyName("window_id")] string WindowId,
     [property: JsonPropertyName("element_id")] string ElementId,
     [property: JsonPropertyName("action")] WindowActionKind Action,
-    [property: JsonPropertyName("value")] string? Value);
+    [property: JsonPropertyName("value")] string? Value,
+    [property: JsonPropertyName("element_path")] string? ElementPath = null);
 
 public sealed record WindowActionResult(
     [property: JsonPropertyName("status")] WindowActionCode Status,
@@ -41,6 +42,7 @@ internal static class WindowAction
     internal static bool Valid(WindowActionRequest request) =>
         WindowCatalog.TryParseId(request.WindowId, out _) &&
         WindowInspector.TryParseElementRef(request.ElementId, out _) &&
+        (request.ElementPath is null || WindowInspector.TryParsePath(request.ElementPath, out _)) &&
         Enum.IsDefined(request.Action) &&
         (request.Action == WindowActionKind.SET_VALUE ?
             request.Value is { Length: <= 4096 } && request.Value?.Contains('\0') == false :
@@ -71,9 +73,32 @@ internal static class WindowAction
             var root = AutomationElement.FromHandle(hwnd);
             if (root is null) return new(WindowActionCode.UIA_UNAVAILABLE);
             var walker = TreeWalker.ControlViewWalker;
+            WindowActionResult ActOnMatch(AutomationElement element, int[] path)
+            {
+                var current = element.Current;
+                if (current.IsPassword) return new(WindowActionCode.PASSWORD_DENIED);
+                if (!current.IsEnabled) return new(WindowActionCode.DISABLED);
+                if (Pattern(element, current.ControlType, request.Action) is null)
+                    return new(WindowActionCode.UNSUPPORTED_ACTION);
+                bool radioInvoke = request.Action == WindowActionKind.SELECT &&
+                    current.ControlType == ControlType.RadioButton &&
+                    element.TryGetCurrentPattern(InvokePattern.Pattern, out _);
+                return WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(), request,
+                    clock, radioInvoke);
+            }
+            WindowInspector.TryParseElementRef(request.ElementId, out long snapshotMs);
+            if (request.ElementPath is not null)
+            {
+                WindowInspector.TryParsePath(request.ElementPath, out var path);
+                var selected = WindowInspector.ResolvePath(root, walker, path);
+                if (selected is null || !string.Equals(
+                    WindowInspector.ElementRef(selected, request.WindowId, snapshotMs),
+                    request.ElementId, StringComparison.Ordinal))
+                    return new(WindowActionCode.STALE_ELEMENT, ElapsedMs: clock.ElapsedMilliseconds);
+                return ActOnMatch(selected, path);
+            }
             var stack = new Stack<(AutomationElement Element, int Depth, int[] Path)>();
             stack.Push((root, 0, []));
-            WindowInspector.TryParseElementRef(request.ElementId, out long snapshotMs);
             int inspected = 0;
             while (stack.Count > 0 && inspected < 100)
             {
@@ -86,29 +111,16 @@ internal static class WindowAction
                 try { candidate = WindowInspector.ElementRef(element, request.WindowId, snapshotMs); }
                 catch (ElementNotAvailableException) { continue; }
                 if (string.Equals(candidate, request.ElementId, StringComparison.Ordinal))
-                {
-                    if (current.IsPassword) return new(WindowActionCode.PASSWORD_DENIED);
-                    if (!current.IsEnabled) return new(WindowActionCode.DISABLED);
-                    if (Pattern(element, current.ControlType, request.Action) is null)
-                        return new(WindowActionCode.UNSUPPORTED_ACTION);
-                    // WinForms radios may report Select() success without checking
-                    // the button when AutoSetFocus is off. Invoke is the equivalent
-                    // accessible activation when the radio exposes that pattern.
-                    bool radioInvoke = request.Action == WindowActionKind.SELECT &&
-                        current.ControlType == ControlType.RadioButton &&
-                        element.TryGetCurrentPattern(InvokePattern.Pattern, out _);
-                    // Match the exact runtime ID again in the native UIA2 view before acting.
-                    // Never fall back to managed Invoke/SetValue: those default to setting focus.
-                    return WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(), request,
-                        clock, radioInvoke);
-                }
+                    return ActOnMatch(element, path);
                 if (depth >= WindowInspector.MaxDepth) continue;
                 var children = new List<AutomationElement>();
                 try
                 {
                     var child = walker.GetFirstChild(element);
-                    int remaining = Math.Max(0, 100 - inspected - stack.Count);
-                    while (child is not null && children.Count < remaining)
+                    // Match the first inspection page exactly. A caller can
+                    // supply element_path for later pages instead of scanning
+                    // an unbounded tree during an action.
+                    while (child is not null && children.Count < 100)
                     {
                         children.Add(child);
                         child = walker.GetNextSibling(child);

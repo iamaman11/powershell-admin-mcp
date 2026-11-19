@@ -13,6 +13,7 @@ internal static class WindowActionNoFocus
     // Slots from the Windows SDK UIAutomationClient interfaces, including IUnknown.
     private const int ElementFromHandleSlot = 6;
     private const int ControlViewWalkerSlot = 14;
+    private const int GetAutoFocusSlot = 58;
     private const int AutoSetFocusSlot = 59;
     private const int ElementRuntimeIdSlot = 4;
     private const int ElementCurrentPatternSlot = 16;
@@ -27,6 +28,8 @@ internal static class WindowActionNoFocus
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int SetAutoFocus(IntPtr self, int enabled);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int GetAutoFocus(IntPtr self, out int enabled);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int ElementFromHandle(IntPtr self, IntPtr hwnd, out IntPtr element);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
@@ -52,6 +55,7 @@ internal static class WindowActionNoFocus
         IntPtr unknown = IntPtr.Zero, automation = IntPtr.Zero, walker = IntPtr.Zero;
         IntPtr element = IntPtr.Zero, pattern = IntPtr.Zero;
         bool dispatched = false;
+        IntPtr foregroundAtEntry = GetForegroundWindow();
         try
         {
             factory = Activator.CreateInstance(Type.GetTypeFromCLSID(ClassId, throwOnError: true)!);
@@ -63,6 +67,10 @@ internal static class WindowActionNoFocus
             // Must precede ElementFromHandle and GetCurrentPattern: this switch
             // applies to the COM client instance issuing the action.
             Check(Method<SetAutoFocus>(automation, AutoSetFocusSlot)(automation, 0));
+            Check(Method<GetAutoFocus>(automation, GetAutoFocusSlot)(automation, out int autoFocus));
+            if (autoFocus != 0)
+                return new(WindowActionCode.UIA_UNAVAILABLE, Detail: "AUTOSETFOCUS_NOT_DISABLED",
+                    ElapsedMs: clock.ElapsedMilliseconds);
             Check(Method<ElementFromHandle>(automation, ElementFromHandleSlot)(
                 automation, hwnd, out element));
             if (element == IntPtr.Zero)
@@ -76,7 +84,7 @@ internal static class WindowActionNoFocus
             // fingerprint walker; never act if the views disagree.
             foreach (int childIndex in path)
             {
-                if (childIndex is < 0 or > 100)
+                if (childIndex is < 0 or > WindowInspector.MaxTraversal)
                     return new(WindowActionCode.STALE_ELEMENT, ElapsedMs: clock.ElapsedMilliseconds);
                 IntPtr child = IntPtr.Zero;
                 try
@@ -122,12 +130,19 @@ internal static class WindowActionNoFocus
             int result = request.Action == WindowActionKind.SET_VALUE
                 ? Method<SetValueAction>(pattern, PatternActionSlot)(pattern, request.Value!)
                 : Method<InvokeAction>(pattern, PatternActionSlot)(pattern);
-            bool changed = foregroundBefore != GetForegroundWindow();
+            bool changedDuringPreparation = foregroundAtEntry != foregroundBefore;
+            bool changedDuringAction = foregroundBefore != GetForegroundWindow();
+            bool changed = changedDuringPreparation || changedDuringAction;
+            string? focusDetail = changedDuringPreparation && changedDuringAction ? "FOREGROUND_PREPARE_AND_ACTION" :
+                changedDuringPreparation ? "FOREGROUND_PREPARE" :
+                changedDuringAction ? "FOREGROUND_ACTION" : null;
             return result < 0
                 ? new(WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
-                    ForegroundChanged: changed, Detail: result.ToString("X8"),
+                    ForegroundChanged: changed, Detail: result.ToString("X8") +
+                        (focusDetail is null ? "" : ":" + focusDetail),
                     ElapsedMs: clock.ElapsedMilliseconds)
                 : new(WindowActionCode.COMPLETED, ForegroundChanged: changed,
+                    Detail: focusDetail,
                     ElapsedMs: clock.ElapsedMilliseconds);
         }
         catch (Exception error) when (error is COMException or InvalidOperationException or
