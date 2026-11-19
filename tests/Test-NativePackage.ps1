@@ -350,8 +350,10 @@ try{
                 $crossVersion.job.execution.audit_persisted) 'h1.legacy_reads_actual_candidate_result'
         }finally{Stop-Service WindowsAdminMCP}
         $prepared=& $installer -Action Prepare -ExpectedCommit $baseline.commit|ConvertFrom-Json
-        Check ($prepared.status -eq 'TRIAL_PREPARED' -and $prepared.logon_enabled -and
-            $prepared.service_start -eq 'Auto' -and -not $prepared.rollback_retained) 'r6.restored_baseline_reprepare'
+        # This is the exact historical package after rollback: its installed
+        # NativeStartup.ps1 still implements demand-only Prepare.
+        Check ($prepared.status -eq 'TRIAL_PREPARED' -and -not $prepared.logon_enabled -and
+            $prepared.service_start -eq 'Manual' -and -not $prepared.rollback_retained) 'r6.restored_baseline_reprepare'
         $null=& $installer -Action Maintenance -ExpectedCommit $baseline.commit
         $null=& $installer -Action Install -PackagePath $replacementZip -ExpectedSha256 $newDigest
         # A failed schema-4 trial can be repaired forward without falsely Accepting it.
