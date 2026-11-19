@@ -59,11 +59,13 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.inspect_window", UseStructuredContent = true),
-     Description("Read a bounded UI Automation control tree from a window_id in the same authorized USER desktop. Never activates controls or reads input values. A short-lived worker is killed after 5 seconds.")]
+     Description("Read up to 100 UIA elements without focus or input values. Optional start_path + fresh start_element_id selects a verified subtree; offset pages through it (next_offset). Paths never authorize actions alone. Bounded 5-second USER worker.")]
     public static async Task<WindowInspectResult> InspectWindow(string window_id, int max_depth = 12,
-        int max_elements = 100, CancellationToken cancellationToken = default)
+        int max_elements = 100, string? start_path = null, string? start_element_id = null,
+        int offset = 0, CancellationToken cancellationToken = default)
     {
-        if (!WindowInspector.ValidArguments(window_id, max_depth, max_elements))
+        if (!WindowInspector.ValidArguments(window_id, max_depth, max_elements,
+            start_path, start_element_id, offset))
             return new(WindowInspectCode.INVALID_ARGUMENT, []);
         var status = await AdminTools.Status(cancellationToken);
         if (status.Status != StatusCode.OK)
@@ -81,7 +83,8 @@ public sealed class WindowTools
             return new(resolved == WindowResolveCode.ACCESS_DENIED ? WindowInspectCode.ACCESS_DENIED :
                 resolved == WindowResolveCode.WRONG_SESSION ? WindowInspectCode.USER_CONTEXT_UNAVAILABLE :
                 WindowInspectCode.STALE_WINDOW, [], Detail: resolved.ToString());
-        return await WindowInspector.RunIsolatedAsync(window_id, max_depth, max_elements, cancellationToken);
+        return await WindowInspector.RunIsolatedAsync(window_id, max_depth, max_elements,
+            cancellationToken, start_path, start_element_id, offset);
     }
 
     [McpServerTool(Name = "windows.capture_window", UseStructuredContent = true),
@@ -109,12 +112,13 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.invoke_element", UseStructuredContent = true),
-     Description("Act on a fresh element_id (expires after 30 seconds) from windows.inspect_window. Requires confirm=true and authorized USER desktop; only UIA INVOKE, SET_VALUE, SELECT or TOGGLE. Native UIA2 disables automatic focus, but a provider may still change it (foreground_changed). No synthetic input. Value is never put in child arguments or action audit. Timeout means UNKNOWN EFFECT: do not retry automatically.")]
+     Description("Act on a fresh element_id (30 seconds) from windows.inspect_window. Optional element_path addresses nodes beyond the first 100, always fingerprint-checked. Requires confirm=true and authorized USER desktop. UIA2 disables automatic focus but providers may still change it (foreground_changed). No synthetic input or auto-retry after unknown effect.")]
     public static async Task<WindowActionResult> InvokeElement(string window_id, string element_id,
         WindowActionKind action, string? value = null, bool confirm = false,
+        string? element_path = null,
         CancellationToken cancellationToken = default)
     {
-        var request = new WindowActionRequest(window_id, element_id, action, value);
+        var request = new WindowActionRequest(window_id, element_id, action, value, element_path);
         if (!WindowAction.Valid(request)) return new(WindowActionCode.INVALID_ARGUMENT);
         if (!confirm) return new(WindowActionCode.CONFIRMATION_REQUIRED);
 

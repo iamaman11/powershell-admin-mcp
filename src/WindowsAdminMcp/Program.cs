@@ -48,12 +48,14 @@ else if (args is ["doctor", "boot"])
     Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(boot, PipeWire.Json));
     Environment.ExitCode = boot.Status == BootEvidenceCode.FULL_BOOT_OBSERVED ? 0 : 1;
 }
-else if (args is ["window-inspect-worker", var windowId, var depthText, var maxText])
+else if (args is ["window-inspect-worker", var windowId, var depthText, var maxText,
+    var pathText, var refText, var offsetText])
 {
     // Short-lived on-demand UIA reader; independently validates USER desktop.
     WindowInspectResult result = int.TryParse(depthText, out int depth) &&
-        int.TryParse(maxText, out int maxElements)
-        ? WindowInspector.InspectInWorker(windowId, depth, maxElements)
+        int.TryParse(maxText, out int maxElements) && int.TryParse(offsetText, out int offset)
+        ? WindowInspector.InspectInWorker(windowId, depth, maxElements,
+            pathText == "-" ? null : pathText, refText == "-" ? null : refText, offset)
         : new(WindowInspectCode.INVALID_ARGUMENT, []);
     Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, PipeWire.Json));
 }
