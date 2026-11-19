@@ -102,7 +102,7 @@ internal static class WindowAction
                     return WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(), request,
                         clock, radioInvoke);
                 }
-                if (depth >= 5) continue;
+                if (depth >= WindowInspector.MaxDepth) continue;
                 var children = new List<AutomationElement>();
                 try
                 {

@@ -60,8 +60,8 @@ public sealed class WindowTools
 
     [McpServerTool(Name = "windows.inspect_window", UseStructuredContent = true),
      Description("Read a bounded UI Automation control tree from a window_id in the same authorized USER desktop. Never activates controls or reads input values. A short-lived worker is killed after 5 seconds.")]
-    public static async Task<WindowInspectResult> InspectWindow(string window_id, int max_depth = 3,
-        int max_elements = 60, CancellationToken cancellationToken = default)
+    public static async Task<WindowInspectResult> InspectWindow(string window_id, int max_depth = 12,
+        int max_elements = 100, CancellationToken cancellationToken = default)
     {
         if (!WindowInspector.ValidArguments(window_id, max_depth, max_elements))
             return new(WindowInspectCode.INVALID_ARGUMENT, []);

@@ -45,7 +45,7 @@ internal static class WindowActionNoFocus
     internal static WindowActionResult Invoke(IntPtr hwnd, int[] path, int[] expectedRuntimeId,
         WindowActionRequest request, Stopwatch clock, bool radioInvoke = false)
     {
-        if (path.Length > 5 || expectedRuntimeId.Length is < 1 or > 128)
+        if (path.Length > WindowInspector.MaxDepth || expectedRuntimeId.Length is < 1 or > 128)
             return new(WindowActionCode.STALE_ELEMENT, ElapsedMs: clock.ElapsedMilliseconds);
 
         object? factory = null;
