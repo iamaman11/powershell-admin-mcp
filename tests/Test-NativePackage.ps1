@@ -14,6 +14,7 @@ Check ($startupText.Contains('$m.details.child_state -ne ''running''') -and
     $startupText.Contains('$m.details.evidence -ne ''same_child''') -and
     $startupText.Contains('[string]::IsNullOrWhiteSpace([string]$m.details.child_generation)') -and
     $startupText.Contains('$delivery.details.accepted -lt 1') -and
+    $startupText.Contains("status='REMOTE_ACCEPTED'") -and
     -not $startupText.Contains('tools_list') -and
     -not $startupText.Contains('$m.state -ne ''discovered''')) 'r6.accept_does_not_require_fresh_tool_discovery'
 $verified=& $installer -PackagePath $Package -ExpectedSha256 $Sha256|ConvertFrom-Json
@@ -106,19 +107,39 @@ try{
     Check $blocked 'r6.accept_requires_explicit_remote_confirmation'
     $prepare=& $installer -Action Prepare -ExpectedCommit $result.commit|ConvertFrom-Json
     $task=Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel'
-    Check ($prepare.status -eq 'TRIAL_PREPARED' -and -not $prepare.logon_enabled -and -not $task.Triggers[0].Enabled -and $task.State.ToString() -ne 'Running' -and $prepare.service_start -eq 'Manual') 'r6.actual_task_demand_only'
+    Check ($prepare.status -eq 'TRIAL_PREPARED' -and $prepare.logon_enabled -and $task.Triggers[0].Enabled -and
+        $task.State.ToString() -ne 'Running' -and $prepare.service_start -eq 'Auto' -and
+        (Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'").StartMode -eq 'Auto') 'r6.trial_autostart_independent_of_acceptance'
     $repeatPrepare=& $installer -Action Prepare -ExpectedCommit $result.commit|ConvertFrom-Json
-    Check ($repeatPrepare.status -eq 'TRIAL_PREPARED' -and -not $repeatPrepare.logon_enabled) 'r6.prepare_idempotent'
+    Check ($repeatPrepare.status -eq 'TRIAL_PREPARED' -and $repeatPrepare.logon_enabled -and
+        $repeatPrepare.service_start -eq 'Auto') 'r6.prepare_idempotent'
+    # Recreate the exact old failure state, plus an administratively disabled
+    # task. A verified unaccepted trial must repair both on the next Prepare.
+    Set-Service WindowsAdminMCP -StartupType Manual
+    $task=Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel'
+    $trigger=$task.Triggers[0];$trigger.Enabled=$false
+    Set-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel' -Trigger $trigger|Out-Null
+    Disable-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel'|Out-Null
+    $degraded=& (Join-Path $root 'native\NativeStartup.ps1') -Action Status|ConvertFrom-Json
+    Check (-not $degraded.startup_ready -and -not $degraded.logon_enabled -and
+        $degraded.service_start -eq 'Manual') 'r6.reproduce_stopped_manual_disabled_startup'
+    $repaired=& $installer -Action Prepare -ExpectedCommit $result.commit|ConvertFrom-Json
+    $task=Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel'
+    Check ($repaired.status -eq 'TRIAL_PREPARED' -and $repaired.logon_enabled -and
+        $repaired.service_start -eq 'Auto' -and $task.State.ToString() -ne 'Disabled' -and
+        (Test-Path (Join-Path $root '.rollback'))) 'r6.prepare_repairs_unaccepted_startup'
     $native=Join-Path $root 'native\WindowsAdminMCP.exe'
     $recovery=& $native maintenance recovery|ConvertFrom-Json
     Check ($LASTEXITCODE -eq 0 -and $recovery.ready -and $recovery.nonCrashFailures -and $recovery.resetSeconds -eq 86400 -and @($recovery.actions).Count -eq 4 -and $recovery.actions[3].type -eq 0) 'r6.scm_recovery_native_readback'
     $blocked=$false
     try{& $installer -Action Accept -ExpectedCommit $result.commit -RemoteAcceptanceConfirmed|Out-Null}catch{if($_.Exception.Message -eq 'TRIAL_TASK_NOT_RUNNING'){$blocked=$true}else{throw}}
-    Check ($blocked -and (Test-Path (Join-Path $root '.rollback')) -and -not (Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel').Triggers[0].Enabled) 'r6.operator_attestation_alone_cannot_accept'
+    Check ($blocked -and (Test-Path (Join-Path $root '.rollback')) -and
+        (Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel').Triggers[0].Enabled) 'r6.operator_attestation_alone_cannot_accept'
     $native=Join-Path $root 'native\WindowsAdminMCP.exe'
     $startup=Join-Path $root 'native\NativeStartup.ps1'
     $state=& $startup -Action Status|ConvertFrom-Json
-    Check ($state.definition_valid -and $state.service_binding_valid -and -not $state.startup_ready -and -not $state.logon_enabled) 'r6.startup_readback_demand_only'
+    Check ($state.definition_valid -and $state.service_binding_valid -and $state.startup_ready -and
+        $state.logon_enabled -and $state.service_start -eq 'Auto') 'r6.trial_startup_readback_durable'
     $doctorInfo=[Diagnostics.ProcessStartInfo]::new($native)
     $doctorInfo.ArgumentList.Add('doctor');$doctorInfo.UseShellExecute=$false
     $doctorInfo.RedirectStandardOutput=$true;$doctorInfo.RedirectStandardError=$true
@@ -131,7 +152,8 @@ try{
         }finally{if(-not $process.HasExited){$process.Kill($true);$process.WaitForExit()};$process.Dispose()}
     }
     $doctor=Read-Doctor
-    Check ($doctor.package.status -eq 'VERIFIED' -and $doctor.package.commit -eq $result.commit -and $doctor.startup.definitionValid -and -not $doctor.startup.ready) 'r6.doctor_installed_manifest_and_startup'
+    Check ($doctor.package.status -eq 'VERIFIED' -and $doctor.package.commit -eq $result.commit -and
+        $doctor.startup.definitionValid -and $doctor.startup.ready) 'r6.doctor_installed_manifest_and_startup'
     $unexpected=Join-Path $root 'native\unexpected-fixture.txt'
     try{
         [IO.File]::WriteAllText($unexpected,'fixture')
@@ -141,8 +163,9 @@ try{
         $doctor=Read-Doctor
         Check ($doctor.package.status -eq 'FILE_SET_MISMATCH' -and $null -eq $doctor.startup) 'r6.doctor_unexpected_file_blocks_script'
     }finally{Remove-Item -LiteralPath $unexpected -Force}
-    & $startup -Action RemoveTrial -ExpectedNativeSha256 (Get-FileHash -LiteralPath $native).Hash|Out-Null
-    Check (-not(Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel' -ErrorAction SilentlyContinue)) 'r6.remove_quiescent_trial'
+    $offline=& $installer -Action Maintenance -ExpectedCommit $result.commit|ConvertFrom-Json
+    Check ($offline.status -eq 'MAINTENANCE_READY' -and $offline.service_start -eq 'Manual' -and
+        -not(Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel' -ErrorAction SilentlyContinue)) 'r6.quiesce_unaccepted_autostart_for_offline_rollback'
     $rollback=& $installer -Action Rollback|ConvertFrom-Json
     Check ($rollback.status -eq 'ROLLED_BACK_OFFLINE' -and -not(Test-Path (Join-Path $root 'native')) -and -not(Test-Path (Join-Path $root 'client')) -and -not(Test-Path (Join-Path $root '.rollback'))) 'r6.explicit_clean_install_rollback'
 
@@ -327,7 +350,10 @@ try{
                 $crossVersion.job.execution.audit_persisted) 'h1.legacy_reads_actual_candidate_result'
         }finally{Stop-Service WindowsAdminMCP}
         $prepared=& $installer -Action Prepare -ExpectedCommit $baseline.commit|ConvertFrom-Json
-        Check ($prepared.status -eq 'TRIAL_PREPARED' -and -not $prepared.logon_enabled -and -not $prepared.rollback_retained) 'r6.restored_baseline_reprepare'
+        # This is the exact historical package after rollback: its installed
+        # NativeStartup.ps1 still implements demand-only Prepare.
+        Check ($prepared.status -eq 'TRIAL_PREPARED' -and -not $prepared.logon_enabled -and
+            $prepared.service_start -eq 'Manual' -and -not $prepared.rollback_retained) 'r6.restored_baseline_reprepare'
         $null=& $installer -Action Maintenance -ExpectedCommit $baseline.commit
         $null=& $installer -Action Install -PackagePath $replacementZip -ExpectedSha256 $newDigest
         # A failed schema-4 trial can be repaired forward without falsely Accepting it.
@@ -353,7 +379,8 @@ try{
         Check ($rollback.status -eq 'ROLLED_BACK_OFFLINE' -and
             (Get-Content (Join-Path $root 'manifest.json') -Raw|ConvertFrom-Json).commit -ceq $candidateCommit) 'h5.rollback_restores_prior_unaccepted_candidate'
         $prepared=& $installer -Action Prepare -ExpectedCommit $candidateCommit|ConvertFrom-Json
-        Check ($prepared.status -eq 'TRIAL_PREPARED' -and $prepared.rollback_retained -and -not $prepared.logon_enabled -and
+        Check ($prepared.status -eq 'TRIAL_PREPARED' -and $prepared.rollback_retained -and $prepared.logon_enabled -and
+            $prepared.service_start -eq 'Auto' -and
             (Test-Path -LiteralPath (Join-Path $root '.rollback\journal.json')) -and
             -not(Test-Path -LiteralPath (Join-Path $root ('.trial-backup-'+$candidateCommit)))) 'h5.prior_trial_journal_reattached_without_acceptance'
         $read=Read-SavedJob
