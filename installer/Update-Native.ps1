@@ -352,6 +352,9 @@ try{
     $current=Read-Manifest
     $prepared=& $installer -Action Prepare -ExpectedCommit $current.commit|ConvertFrom-Json
     if($prepared.status -ne 'TRIAL_PREPARED'){throw 'UPDATE_PREPARE_UNCONFIRMED'}
+    if($Action -eq 'update' -and (-not $prepared.logon_enabled -or $prepared.service_start -ne 'Auto')){
+        throw 'UPDATE_TRIAL_AUTOSTART_UNCONFIRMED'
+    }
     $stage='start'
     $null=& $startup -Action Start -ExpectedNativeSha256 $current.files.'native/WindowsAdminMCP.exe'
     $stage='readiness'
@@ -364,6 +367,8 @@ try{
     }while($clock.Elapsed.TotalSeconds -lt 20)
     if($null -eq $after.service -or $after.service.status -ne 'OK' -or
         -not $after.service.versions.informational_version.EndsWith('+'+$current.commit)){throw 'UPDATE_SERVICE_READBACK_FAILED'}
+    $startupState=& $startup -Action Status|ConvertFrom-Json
+    if($Action -eq 'update' -and -not $startupState.startup_ready){throw 'UPDATE_STARTUP_DURABILITY_READBACK_FAILED'}
     $ready=$false
     if($after.tun -eq 'READY'){
         $clock=[Diagnostics.Stopwatch]::StartNew()
@@ -387,9 +392,10 @@ try{
     }
     $trialStatus=if($ready){'TRIAL_LOCAL_READY'}elseif($after.tun -ne 'READY'){'TRIAL_WAITING_FOR_TUN'}else{'TRIAL_NOT_READY'}
     [pscustomobject]@{status=$trialStatus;commit=$current.commit;tun=$after.tun;local_ready=$ready;
+        startup_ready=$startupState.startup_ready;remote_accepted=$false;
         closed_local_clients=$closedClients;closed_blocking_launchers=$closedLaunchers;
         cancelled_queued=$cancelledQueued;cancel_requested=$cancelRequested;
-        needs_reconciliation=$after.store.needsReconciliation;remote_accepted=$false;
+        needs_reconciliation=$after.store.needsReconciliation;
         next_action='verify eight MCP tools externally, then use -Action accept -RemoteAcceptanceConfirmed'}|ConvertTo-Json -Compress
 }catch{
     # Restore transport only when no maintenance/swap was attempted. Once

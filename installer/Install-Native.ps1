@@ -187,7 +187,7 @@ if($Action -in @('Prepare','Accept','Maintenance')){
         }
         if($pending -and (Test-Path -LiteralPath $previous)){throw 'ACCEPTANCE_BACKUP_EXISTS'}
         $result=& $startup -Action Accept -ExpectedNativeSha256 $m.files['native/WindowsAdminMCP.exe'] -RemoteAcceptanceConfirmed|ConvertFrom-Json
-        if($result.status -ne 'AUTOSTART_ACCEPTED'){throw 'STARTUP_ACCEPTANCE_MISSING'}
+        if($result.status -ne 'REMOTE_ACCEPTED'){throw 'REMOTE_ACCEPTANCE_MISSING'}
         # Previous files are retained, but no longer represent an unfinished transaction.
         # The same-volume rename is the final local commit point.
         if($pending){Move-NativePath $backup $previous}

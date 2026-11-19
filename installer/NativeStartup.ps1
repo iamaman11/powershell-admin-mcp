@@ -1,5 +1,7 @@
 # One native service and one interactive logon task; no second tunnel or network owner.
-# Prepare one demand-start task for explicit trials; enable logon only after acceptance.
+# Local durability is independent of external trial acceptance. The service
+# and existing interactive logon task recover normally while the verified
+# candidate still retains its unaccepted rollback journal.
 [CmdletBinding()]
 param([ValidateSet('Plan','Prepare','Accept','RemoveTrial','Status','Start','Stop','Maintenance')][string]$Action='Plan',
       [ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$ExpectedNativeSha256,
@@ -14,7 +16,7 @@ $svcName='WindowsAdminMCP'
 $user=[Security.Principal.WindowsIdentity]::GetCurrent()
 $principal=[Security.Principal.WindowsPrincipal]::new($user)
 if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'ADMINISTRATOR_REQUIRED'}
-function New-Definition([bool]$EnableLogon=$false) {
+function New-Definition([bool]$EnableLogon=$true) {
     $a=New-ScheduledTaskAction -Execute $native -Argument 'tunnel' -WorkingDirectory $root
     $p=New-ScheduledTaskPrincipal -UserId $user.Name -LogonType Interactive -RunLevel Highest
     $trigger=New-ScheduledTaskTrigger -AtLogOn -User $user.Name
@@ -28,7 +30,8 @@ function Get-State {
     $definitionValid=$false
     if($task){try{Assert-Task $task -ReadOnly;$definitionValid=$true}catch{}}
     $serviceValid=[bool]($svc -and $svc.PathName -ieq ('"'+$native+'" service') -and $svc.StartName -eq 'LocalSystem')
-    $logon=[bool]($task -and @($task.Triggers).Count -eq 1 -and $task.Triggers[0].Enabled)
+    $logon=[bool]($task -and @($task.Triggers).Count -eq 1 -and $task.Triggers[0].Enabled -and
+        $task.State.ToString() -ne 'Disabled')
     $recovery=$null
     if($svc){try{$recovery=& $native maintenance recovery | ConvertFrom-Json;if($LASTEXITCODE -ne 0){$recovery=$null}}catch{}}
     $tunnels=@(Get-CimInstance Win32_Process -Filter "Name='tunnel-client-runtime.exe'"|Select-Object ProcessId,SessionId,ExecutablePath)
@@ -115,26 +118,53 @@ switch($Action){
         $recovery=if($svc.State -eq 'Stopped'){& $native maintenance configure-recovery | ConvertFrom-Json}else{& $native maintenance recovery | ConvertFrom-Json}
         if($LASTEXITCODE -ne 0 -or -not $recovery.ready){throw 'SCM_RECOVERY_READBACK_FAILED'}
         $task=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-        if($task){
-            Assert-Task $task
-            if($task.Triggers[0].Enabled){throw 'ALREADY_ACCEPTED'}
-        }else{
+        if($task){Assert-Task $task}
+        $oldMode=$svc.StartMode
+        $oldEnabled=[bool]($task -and $task.Triggers[0].Enabled)
+        $oldTaskDisabled=[bool]($task -and $task.State.ToString() -eq 'Disabled')
+        $created=$false
+        if(-not $task){
             if($svc.StartMode -ne 'Manual'){throw 'MANUAL_SERVICE_REQUIRED'}
             if(@(Get-Process -Name 'tunnel-client-runtime' -ErrorAction SilentlyContinue).Count){throw 'ACTIVE_TUNNEL_MAINTENANCE_REQUIRED'}
             if(@(Get-ScheduledTask|Where-Object {$_.TaskName -like 'WindowsAdminMCP-R6-*' -and $_.State.ToString() -eq 'Running'}).Count){throw 'ACTIVE_TRIAL_TASK'}
-            Register-ScheduledTask -TaskName $name -InputObject (New-Definition)|Out-Null
-            try{
-                $task=Get-ScheduledTask -TaskName $name
-                Assert-Task $task
-                if($task.Triggers[0].Enabled -or $task.State.ToString() -eq 'Running'){throw 'TRIAL_TASK_NOT_DEMAND_ONLY'}
-            }catch{
-                Unregister-ScheduledTask -TaskName $name -Confirm:$false
-                throw
+        }
+        try{
+            if(-not $task){
+                Register-ScheduledTask -TaskName $name -InputObject (New-Definition)|Out-Null
+                $created=$true
+            }elseif(-not $oldEnabled){
+                $trigger=New-ScheduledTaskTrigger -AtLogOn -User $user.Name
+                $trigger.Enabled=$true
+                Set-ScheduledTask -TaskName $name -Trigger $trigger|Out-Null
             }
+            if($oldTaskDisabled){Enable-ScheduledTask -TaskName $name|Out-Null}
+            Set-Service -Name $svcName -StartupType Automatic
+            $ready=Get-State
+            if(-not $ready.startup_ready){throw 'TRIAL_AUTOSTART_READBACK_FAILED'}
+        }catch{
+            if($oldMode -eq 'Manual'){
+                try{Set-Service -Name $svcName -StartupType Manual}catch{Write-Warning 'TRIAL_SERVICE_MODE_RESTORE_FAILED'}
+            }
+            if($created){
+                try{Unregister-ScheduledTask -TaskName $name -Confirm:$false}catch{Write-Warning 'TRIAL_TASK_REMOVE_FAILED'}
+            }elseif($task -and -not $oldEnabled){
+                try{
+                    $trigger=New-ScheduledTaskTrigger -AtLogOn -User $user.Name
+                    $trigger.Enabled=$false
+                    Set-ScheduledTask -TaskName $name -Trigger $trigger|Out-Null
+                }catch{Write-Warning 'TRIAL_TASK_TRIGGER_RESTORE_FAILED'}
+            }
+            if($oldTaskDisabled){
+                try{Disable-ScheduledTask -TaskName $name|Out-Null}catch{Write-Warning 'TRIAL_TASK_STATE_RESTORE_FAILED'}
+            }
+            throw
         }
         Get-State|ConvertTo-Json -Depth 4 -Compress
     }
     'Accept'{
+        # Compatibility repair for older demand-only trials is allowed, but
+        # fresh verified candidates have already enabled durable startup.
+        # External evidence, not these registration bits, authorizes Accept.
         if(-not $RemoteAcceptanceConfirmed){throw 'REMOTE_ACCEPTANCE_REQUIRED'}
         $receipt=Assert-RemoteEvidence
         $task=Get-ScheduledTask -TaskName $name
@@ -164,7 +194,7 @@ switch($Action){
             if($oldMode -eq 'Manual'){Set-Service -Name $svcName -StartupType Manual}
             throw
         }
-        [pscustomobject]@{status='AUTOSTART_ACCEPTED';pid=$receipt.pid;generation=$receipt.generation;accepted_responses=$receipt.accepted_responses}|ConvertTo-Json -Compress
+        [pscustomobject]@{status='REMOTE_ACCEPTED';pid=$receipt.pid;generation=$receipt.generation;accepted_responses=$receipt.accepted_responses}|ConvertTo-Json -Compress
     }
     'Maintenance'{
         # Explicit offline transition only. The operator must first finish jobs
@@ -205,9 +235,16 @@ switch($Action){
     }
     'Start'{
         $null=Assert-Installed
+        # Start is also the explicit self-repair entry point for a verified
+        # installation left in the old Manual/disabled-trigger trial state.
+        if(-not (Get-State).startup_ready){
+            & $PSCommandPath -Action Prepare -ExpectedNativeSha256 $ExpectedNativeSha256|Out-Null
+        }
         Assert-Task (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)
-        Start-Service -Name $svcName
-        Start-ScheduledTask -TaskName $name
+        $svc=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
+        if($svc.State -ne 'Running'){Start-Service -Name $svcName}
+        $task=Get-ScheduledTask -TaskName $name
+        if($task.State.ToString() -ne 'Running'){Start-ScheduledTask -TaskName $name}
         Get-State|ConvertTo-Json -Depth 4 -Compress
     }
     'Stop'{
