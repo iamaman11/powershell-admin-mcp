@@ -44,8 +44,8 @@ var staleWindowId = WindowCatalog.FormatId(new WindowIdentity(long.MaxValue, 424
 Check(WindowCatalog.ResolveId(staleWindowId, 1, out _) == WindowResolveCode.STALE_WINDOW,
     "windows.reject_stale_hwnd");
 Check(WindowInspector.ValidArguments(testWindowId, 0, 1) &&
-    WindowInspector.ValidArguments(testWindowId, 5, 100) &&
-    !WindowInspector.ValidArguments(testWindowId, 6, 50) &&
+    WindowInspector.ValidArguments(testWindowId, 16, 100) &&
+    !WindowInspector.ValidArguments(testWindowId, 17, 50) &&
     !WindowInspector.ValidArguments(testWindowId, 3, 101) &&
     !WindowInspector.ValidArguments("invalid", 3, 60), "windows.inspect_bounded_arguments");
 Check(WindowInspector.InspectCore(IntPtr.Zero, 1, 20).Status == WindowInspectCode.INVALID_ARGUMENT,
@@ -74,6 +74,7 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
     var ready = new TaskCompletionSource<(IntPtr Handle, System.Windows.Forms.Form Form, System.Windows.Forms.TextBox Input)>(
         TaskCreationOptions.RunContinuationsAsynchronously);
     int clickCount = 0;
+    int deepClickCount = 0;
     var uiThread = new Thread(() =>
     {
         try
@@ -95,6 +96,24 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             form.Controls.Add(input);
             form.Controls.Add(checkbox);
             form.Controls.Add(radio);
+            // Emulate Chromium's deeply nested ControlView hierarchy without a browser dependency.
+            var nested = new System.Windows.Forms.Panel
+                { Left = 10, Top = 142, Width = 275, Height = 42,
+                  AccessibleRole = System.Windows.Forms.AccessibleRole.Grouping };
+            form.Controls.Add(nested);
+            for (int level = 0; level < 7; level++)
+            {
+                var inner = new System.Windows.Forms.Panel
+                    { Dock = System.Windows.Forms.DockStyle.Fill,
+                      AccessibleRole = System.Windows.Forms.AccessibleRole.Grouping };
+                nested.Controls.Add(inner);
+                nested = inner;
+            }
+            var deepButton = new System.Windows.Forms.Button
+                { Text = "CI_UIA_DEEP_BUTTON", AccessibleName = "CI_UIA_DEEP_BUTTON",
+                  Dock = System.Windows.Forms.DockStyle.Fill };
+            deepButton.Click += (_, _) => Interlocked.Increment(ref deepClickCount);
+            nested.Controls.Add(deepButton);
             form.Shown += (_, _) =>
             {
                 cover.BackColor = System.Drawing.Color.Magenta;
@@ -179,6 +198,19 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             created.Form.Controls.OfType<System.Windows.Forms.RadioButton>().Single().Checked));
         Check(select.Status == WindowActionCode.COMPLETED && select.ForegroundChanged == false &&
             selectedAfter, "windows.action_select_occluded_radio_without_focus");
+        var deepTree = await Task.Run(() => WindowInspector.InspectCore(
+            created.Handle, WindowInspector.MaxDepth, 100, realWindowId))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        var deepTarget = deepTree.Elements.SingleOrDefault(e => e.Name == "CI_UIA_DEEP_BUTTON");
+        Check(deepTree.Status == WindowInspectCode.COMPLETED && deepTarget is { Depth: > 5 },
+            "windows.inspect_deep_controls_under_bounded_tree");
+        var deepInvoke = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, deepTarget!.ElementId, WindowActionKind.INVOKE, null)))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        Check(deepInvoke.Status == WindowActionCode.COMPLETED &&
+            deepInvoke.ForegroundChanged == false &&
+            Volatile.Read(ref deepClickCount) == 1,
+            "windows.action_deep_control_without_focus");
     }
     finally
     {
