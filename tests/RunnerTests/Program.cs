@@ -257,8 +257,9 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         var paged = page2.Elements.SingleOrDefault(e => e.Name == "CI_UIA_PAGED_BUTTON");
         Check(page2.Status == WindowInspectCode.COMPLETED && paged is not null &&
             page1.Elements.All(e => e.Name != paged.Name), "windows.inspect_second_page_exposes_deep_sibling");
+        if (paged is null) throw new InvalidOperationException("PAGED_TARGET_MISSING");
         var pathInvoke = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
-            new WindowActionRequest(realWindowId, paged!.ElementId, WindowActionKind.INVOKE,
+            new WindowActionRequest(realWindowId, paged.ElementId, WindowActionKind.INVOKE,
                 null, paged.Path))).WaitAsync(TimeSpan.FromSeconds(5));
         Console.WriteLine($"PAGED_ACTION status={pathInvoke.Status} detail={pathInvoke.Detail} " +
             $"focus={pathInvoke.ForegroundChanged} clicks={Volatile.Read(ref pagedClickCount)} " +
@@ -266,7 +267,7 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         Check(pathInvoke.Status == WindowActionCode.COMPLETED &&
             pathInvoke.ForegroundChanged == false && Volatile.Read(ref pagedClickCount) == 1,
             "windows.action_paged_element_exact_path_without_focus");
-        var parentPath = paged!.Path[..paged.Path.LastIndexOf('.')];
+        var parentPath = paged.Path[..paged.Path.LastIndexOf('.')];
         var parent = page1.Elements.Concat(page2.Elements).Single(e => e.Path == parentPath);
         var subtree = await Task.Run(() => WindowInspector.InspectCore(
             created.Handle, WindowInspector.MaxDepth, 100, realWindowId,
