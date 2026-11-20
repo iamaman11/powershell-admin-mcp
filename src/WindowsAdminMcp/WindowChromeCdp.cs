@@ -228,6 +228,22 @@ internal static class WindowChromeCdp
                 if (!TryPoint(box.GetProperty("model").GetProperty("content"),
                     metrics.GetProperty("cssVisualViewport"), out double x, out double y))
                     return Rejected(WindowActionCode.CDP_TARGET_NOT_VISIBLE);
+                // The rectangle alone is insufficient: a popover or overlay may
+                // cover it. Require the actual hit element to be the selected
+                // DOM node or one of its children before dispatching a click.
+                var resolvedNode = await cdp.Call("DOM.resolveNode", new { backendNodeId }, sessionId);
+                string objectId = resolvedNode.GetProperty("object").GetProperty("objectId").GetString()!;
+                var hit = await cdp.Call("Runtime.callFunctionOn", new
+                {
+                    objectId,
+                    functionDeclaration = "function(x,y) { const h = document.elementFromPoint(x,y); return h !== null && (h === this || this.contains(h)); }",
+                    arguments = new[] { new { value = x }, new { value = y } },
+                    returnByValue = true,
+                    silent = true
+                }, sessionId);
+                if (!hit.GetProperty("result").TryGetProperty("value", out var hitVerified) ||
+                    hitVerified.ValueKind != JsonValueKind.True)
+                    return Rejected(WindowActionCode.CDP_TARGET_NOT_VISIBLE);
                 dispatched = true;
                 await cdp.Call("Input.dispatchMouseEvent", new { type = "mousePressed", x, y,
                     button = "left", clickCount = 1 }, sessionId);
