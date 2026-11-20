@@ -103,6 +103,35 @@ Check(new WindowActionResult(WindowActionCode.COMPLETED).EffectState == WindowEf
     new WindowActionResult(WindowActionCode.STALE_ELEMENT).EffectState == WindowEffectState.NO_EFFECT &&
     new WindowActionResult(WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT, EffectUnknown: true).EffectState ==
         WindowEffectState.EFFECT_UNKNOWN, "windows.action_effect_state_never_assumes_success");
+Check(WindowChromeCdp.TryReadEndpoint(
+        "9222\n/devtools/browser/01234567-89ab-cdef-0123-456789abcdef\n", out var chromeEndpoint) &&
+    chromeEndpoint?.Host == "127.0.0.1" && chromeEndpoint.Port == 9222 &&
+    !WindowChromeCdp.TryReadEndpoint(
+        "9222\nhttp://example.com/steal", out _) &&
+    !WindowChromeCdp.TryReadEndpoint(
+        "0\n/devtools/browser/01234567-89ab-cdef-0123-456789abcdef", out _) &&
+    !WindowChromeCdp.TryReadEndpoint(
+        "99999\n/devtools/browser/01234567-89ab-cdef-0123-456789abcdef", out _),
+    "chrome.cdp_local_opt_in_endpoint_only");
+Check(WindowChromeCdp.MatchesWindow("Profile Control Plane - Google Chrome (Valer)",
+        "Profile Control Plane", new WindowBounds(100, 80, 1200, 800),
+        new WindowBounds(80, 64, 960, 640), 1.25) &&
+    !WindowChromeCdp.MatchesWindow("Unrelated - Google Chrome (Valer)",
+        "Profile Control Plane", new WindowBounds(100, 80, 1200, 800),
+        new WindowBounds(80, 64, 960, 640), 1.25) &&
+    !WindowChromeCdp.MatchesWindow("Profile Control Plane - Google Chrome (Valer)",
+        "Profile Control Plane", new WindowBounds(900, 80, 1200, 800),
+        new WindowBounds(80, 64, 960, 640), 1.25),
+    "chrome.cdp_exact_window_title_and_bounds");
+using (var model = System.Text.Json.JsonDocument.Parse("{\"quad\":[10,20,30,20,30,40,10,40],\"viewport\":{\"clientWidth\":100,\"clientHeight\":100}}"))
+{
+    var root = model.RootElement;
+    Check(WindowChromeCdp.TryPoint(root.GetProperty("quad"), root.GetProperty("viewport"),
+            out var cx, out var cy) && cx == 20 && cy == 30 &&
+        !WindowChromeCdp.TryPoint(root.GetProperty("quad"),
+            System.Text.Json.JsonDocument.Parse("{\"clientWidth\":15,\"clientHeight\":100}").RootElement,
+            out _, out _), "chrome.cdp_reject_off_viewport_click");
+}
 var providerFailed = new WindowActionResult(WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT,
     EffectUnknown: true, FailureStage: WindowFailureStage.DISPATCH_UIA,
     HResult: "80040200", ExceptionType: "COMException", ProviderResponse: "FAIL");

@@ -34,6 +34,11 @@ internal static class WindowPhysicalClick
                 current.ControlType != ControlType.TabItem)
                 return new(WindowActionCode.UNSUPPORTED_ACTION, ElapsedMs: clock.ElapsedMilliseconds);
 
+            // Chrome web content can be clicked through its explicitly opted-in
+            // DevTools connection without stealing desktop focus or mouse position.
+            var background = WindowChromeCdp.TryDispatch(hwnd, target, request, clock);
+            if (background is not null) return background;
+
             if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd))
                 return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
                     ElapsedMs: clock.ElapsedMilliseconds, FailureStage: stage);
@@ -114,6 +119,9 @@ internal static class WindowPhysicalClick
                 target.Current.IsOffscreen || IsIconic(hwnd) || !IsWindowVisible(hwnd))
                 return new(WindowActionCode.FOCUS_UNAVAILABLE, FailureStage: stage,
                     ElapsedMs: clock.ElapsedMilliseconds);
+
+            var background = WindowChromeCdp.TryDispatch(hwnd, target, request, clock);
+            if (background is not null) return background;
 
             if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd))
                 return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
