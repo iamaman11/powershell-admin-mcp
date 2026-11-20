@@ -7,7 +7,7 @@ internal sealed record WindowEffectBaseline(string[] Identities);
 
 internal static class WindowEffectObserver
 {
-    internal static WindowEffectBaseline? Capture(WindowActionRequest request)
+    internal static WindowEffectBaseline Capture(WindowActionRequest request)
     {
         if (request.ExpectedName is null) return new([]);
         return request.ExpectedKind switch
