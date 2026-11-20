@@ -13,7 +13,8 @@ public enum WindowInspectCode
 {
     COMPLETED, INVALID_ARGUMENT, SERVICE_UNAVAILABLE, USER_CONTEXT_UNAVAILABLE, DESKTOP_UNAVAILABLE,
     STALE_WINDOW, STALE_ELEMENT, ACCESS_DENIED, UIA_UNAVAILABLE, TIMEOUT, WORKER_FAILED,
-    STATE_NOT_OBSERVED, CDP_UNAVAILABLE, CDP_TARGET_NOT_FOUND, CDP_TARGET_AMBIGUOUS
+    STATE_NOT_OBSERVED, CDP_UNAVAILABLE, CDP_TARGET_NOT_FOUND, CDP_TARGET_AMBIGUOUS,
+    CDP_CONTEXT_MISMATCH
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowRoleFilter>))]
@@ -29,7 +30,9 @@ public enum WindowInspectScope { WINDOW, TABS, TAB }
 public sealed record WindowTab(
     [property: JsonPropertyName("tab_id")] string TabId,
     [property: JsonPropertyName("title")] string Title,
-    [property: JsonPropertyName("url")] string Url);
+    [property: JsonPropertyName("url")] string Url,
+    [property: JsonPropertyName("origin")] string Origin,
+    [property: JsonPropertyName("profile_name"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ProfileName = null);
 
 public sealed record WindowElement(
     [property: JsonPropertyName("path")] string Path,
@@ -65,7 +68,8 @@ internal sealed record WindowInspectRequest(
     string WindowId, int MaxDepth, int MaxElements,
     string? StartPath, string? StartElementId, int Offset, bool IncludeDetails,
     string? NameContains, WindowRoleFilter? RoleFilter, int WaitMs,
-    WindowInspectScope Scope = WindowInspectScope.WINDOW, string? TabId = null);
+    WindowInspectScope Scope = WindowInspectScope.WINDOW, string? TabId = null,
+    string? ExpectedProfile = null, string? ExpectedOrigin = null, string? ExpectedUrl = null);
 
 // UI Automation can block inside a third-party provider. Run it in a bounded,
 // on-demand copy of this executable, never on the MCP request/USER worker thread.
@@ -126,19 +130,27 @@ internal static class WindowInspector
         string? startPath = null, string? startElementId = null, int offset = 0,
         bool includeDetails = false, string? nameContains = null,
         WindowRoleFilter? roleFilter = null, int waitMs = 0,
-        WindowInspectScope scope = WindowInspectScope.WINDOW, string? tabId = null) =>
+        WindowInspectScope scope = WindowInspectScope.WINDOW, string? tabId = null,
+        string? expectedProfile = null, string? expectedOrigin = null, string? expectedUrl = null) =>
         ArgumentError(windowId, maxDepth, maxElements, startPath, startElementId,
-            offset, includeDetails, nameContains, roleFilter, waitMs, scope, tabId) is null;
+            offset, includeDetails, nameContains, roleFilter, waitMs, scope, tabId,
+            expectedProfile, expectedOrigin, expectedUrl) is null;
 
     // Report the offending typed field without exposing browser contents.
     internal static string? ArgumentError(string? windowId, int maxDepth, int maxElements,
         string? startPath = null, string? startElementId = null, int offset = 0,
         bool includeDetails = false, string? nameContains = null,
         WindowRoleFilter? roleFilter = null, int waitMs = 0,
-        WindowInspectScope scope = WindowInspectScope.WINDOW, string? tabId = null)
+        WindowInspectScope scope = WindowInspectScope.WINDOW, string? tabId = null,
+        string? expectedProfile = null, string? expectedOrigin = null, string? expectedUrl = null)
     {
         if (!WindowCatalog.TryParseId(windowId, out _)) return "window_id: invalid or missing window reference";
         if (!Enum.IsDefined(scope)) return "scope: expected WINDOW, TABS or TAB";
+        if (scope == WindowInspectScope.WINDOW &&
+            (expectedProfile is not null || expectedOrigin is not null || expectedUrl is not null))
+            return "scope: expected_profile/origin/url require TABS or TAB";
+        string? contextError = WindowChromeCdp.ContextArgumentError(expectedProfile, expectedOrigin, expectedUrl);
+        if (contextError is not null) return contextError;
         if (scope == WindowInspectScope.WINDOW && tabId is not null)
             return "tab_id: only valid with scope=TAB";
         if (scope == WindowInspectScope.TABS && tabId is not null)
@@ -176,13 +188,15 @@ internal static class WindowInspector
         string? startPath = null, string? startElementId = null, int offset = 0,
         bool includeDetails = false, string? nameContains = null,
         WindowRoleFilter? roleFilter = null, int waitMs = 0,
-        WindowInspectScope scope = WindowInspectScope.WINDOW, string? tabId = null)
+        WindowInspectScope scope = WindowInspectScope.WINDOW, string? tabId = null,
+        string? expectedProfile = null, string? expectedOrigin = null, string? expectedUrl = null)
     {
         if (!ValidArguments(windowId, maxDepth, maxElements, startPath, startElementId,
-            offset, includeDetails, nameContains, roleFilter, waitMs, scope, tabId))
+            offset, includeDetails, nameContains, roleFilter, waitMs, scope, tabId,
+            expectedProfile, expectedOrigin, expectedUrl))
             return new(WindowInspectCode.INVALID_ARGUMENT, [], Detail: ArgumentError(windowId, maxDepth,
                 maxElements, startPath, startElementId, offset, includeDetails, nameContains,
-                roleFilter, waitMs, scope, tabId));
+                roleFilter, waitMs, scope, tabId, expectedProfile, expectedOrigin, expectedUrl));
         using var self = Process.GetCurrentProcess();
         var desktop = DesktopCapture.ObserveDesktop(self.SessionId);
         if (desktop.Code != CaptureCode.COMPLETED)
@@ -196,7 +210,7 @@ internal static class WindowInspector
             ? InspectCore(hwnd, maxDepth, maxElements, windowId, startPath, startElementId,
                 offset, includeDetails, nameContains, roleFilter, waitMs)
             : WindowChromeCdp.InspectTab(hwnd, windowId, scope, tabId, maxElements,
-                offset, nameContains, roleFilter);
+                offset, nameContains, roleFilter, expectedProfile, expectedOrigin, expectedUrl);
     }
 
     // Paths are never authority on their own. Callers must also provide the
@@ -388,13 +402,15 @@ internal static class WindowInspector
         CancellationToken cancellationToken, string? startPath = null, string? startElementId = null,
         int offset = 0, bool includeDetails = false, string? nameContains = null,
         WindowRoleFilter? roleFilter = null, int waitMs = 0,
-        WindowInspectScope scope = WindowInspectScope.WINDOW, string? tabId = null)
+        WindowInspectScope scope = WindowInspectScope.WINDOW, string? tabId = null,
+        string? expectedProfile = null, string? expectedOrigin = null, string? expectedUrl = null)
     {
         if (!ValidArguments(windowId, maxDepth, maxElements, startPath, startElementId,
-            offset, includeDetails, nameContains, roleFilter, waitMs, scope, tabId))
+            offset, includeDetails, nameContains, roleFilter, waitMs, scope, tabId,
+            expectedProfile, expectedOrigin, expectedUrl))
             return new(WindowInspectCode.INVALID_ARGUMENT, [], Detail: ArgumentError(windowId, maxDepth,
                 maxElements, startPath, startElementId, offset, includeDetails, nameContains,
-                roleFilter, waitMs, scope, tabId));
+                roleFilter, waitMs, scope, tabId, expectedProfile, expectedOrigin, expectedUrl));
         var executable = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(executable)) return new(WindowInspectCode.WORKER_FAILED, []);
         var start = new ProcessStartInfo(executable)
@@ -415,7 +431,8 @@ internal static class WindowInspector
             if (!process.Start()) return new(WindowInspectCode.WORKER_FAILED, []);
             launched = true;
             var request = new WindowInspectRequest(windowId, maxDepth, maxElements, startPath,
-                startElementId, offset, includeDetails, nameContains, roleFilter, waitMs, scope, tabId);
+                startElementId, offset, includeDetails, nameContains, roleFilter, waitMs, scope, tabId,
+                expectedProfile, expectedOrigin, expectedUrl);
             string payload = JsonSerializer.Serialize(request, PipeWire.Json);
             await process.StandardInput.WriteAsync(payload.AsMemory(), deadline.Token);
             await process.StandardInput.FlushAsync(deadline.Token);

@@ -5,6 +5,8 @@ using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Runtime.InteropServices;
+using System.Windows.Automation;
 
 // Address individual Chrome tabs without using foreground focus. This is a
 // bounded CDP adapter, not a second browser manager or arbitrary script tool.
@@ -16,6 +18,55 @@ internal static partial class WindowChromeCdp
 
     internal static bool ValidTargetId(string? id) => id is { Length: >= 16 and <= 64 } &&
         id.All(Uri.IsHexDigit);
+
+    internal static string? ContextArgumentError(string? profile, string? origin, string? url)
+    {
+        if (profile is not null && (profile.Length is < 1 or > 100 ||
+            string.IsNullOrWhiteSpace(profile) || profile.Contains('\0')))
+            return "expected_profile: expected 1..100 non-whitespace characters without NUL";
+        if (origin is not null && (origin.Length > 2048 || !TryHttpUri(origin, out var parsedOrigin) ||
+            !string.Equals(origin.TrimEnd('/'), parsedOrigin!.GetLeftPart(UriPartial.Authority),
+                StringComparison.OrdinalIgnoreCase)))
+            return "expected_origin: expected an HTTP(S) origin (scheme, host and optional port)";
+        if (url is not null && (url.Length > 2048 || !TryHttpUri(url, out _)))
+            return "expected_url: expected an absolute HTTP(S) URL up to 2048 characters";
+        if (origin is not null && url is not null && !MatchesContext(url, origin, null))
+            return "expected_origin: does not match expected_url";
+        return null;
+    }
+
+    private static bool TryHttpUri(string value, out Uri? uri) =>
+        Uri.TryCreate(value, UriKind.Absolute, out uri) &&
+        uri.Scheme is "https" or "http" && uri.UserInfo.Length == 0;
+
+    internal static bool MatchesContext(string actualUrl, string? expectedOrigin, string? expectedUrl)
+    {
+        if (!TryHttpUri(actualUrl, out var actual)) return false;
+        return (expectedOrigin is null || string.Equals(actual!.GetLeftPart(UriPartial.Authority),
+                expectedOrigin.TrimEnd('/'), StringComparison.OrdinalIgnoreCase)) &&
+            (expectedUrl is null || TryHttpUri(expectedUrl, out var expected) &&
+                string.Equals(actual!.AbsoluteUri, expected!.AbsoluteUri, StringComparison.Ordinal));
+    }
+
+    // Verify the *native Chrome toolbar* profile button, never page content or
+    // an inferred profile from a tab title. A missing/ambiguous button fails closed.
+    private static bool ChromeProfileMatches(IntPtr hwnd, string expected)
+    {
+        try
+        {
+            var root = AutomationElement.FromHandle(hwnd);
+            if (root is null) return false;
+            var buttons = root.FindAll(TreeScope.Descendants, new AndCondition(
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
+                new PropertyCondition(AutomationElement.NameProperty, expected)));
+            int matches = 0;
+            foreach (AutomationElement button in buttons)
+                if (!IsInsideDocument(button) && ++matches > 1) return false;
+            return matches == 1;
+        }
+        catch (Exception e) when (e is COMException or ElementNotAvailableException or
+            InvalidOperationException) { return false; }
+    }
 
     private static bool TryParseTabElementRef(string? token, out TabElementRef? result)
     {
@@ -122,7 +173,8 @@ internal static partial class WindowChromeCdp
 
     internal static WindowInspectResult InspectTab(IntPtr hwnd, string windowId,
         WindowInspectScope scope, string? tabId, int maxElements, int offset,
-        string? nameFilter, WindowRoleFilter? roleFilter)
+        string? nameFilter, WindowRoleFilter? roleFilter,
+        string? expectedProfile = null, string? expectedOrigin = null, string? expectedUrl = null)
     {
         if (hwnd == IntPtr.Zero || !TryEndpoint(out var endpoint))
             return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: "CHROME_REMOTE_DEBUGGING_UNAVAILABLE");
@@ -132,8 +184,11 @@ internal static partial class WindowChromeCdp
             using var owner = Process.GetProcessById(identity.ProcessId);
             if (!owner.ProcessName.Equals("chrome", StringComparison.OrdinalIgnoreCase))
                 return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: "NOT_CHROME");
+            if (expectedProfile is not null && !ChromeProfileMatches(hwnd, expectedProfile))
+                return new(WindowInspectCode.CDP_CONTEXT_MISMATCH, [], Detail: "PROFILE_NOT_VERIFIED");
             return InspectTabAsync(endpoint!, hwnd, windowId, scope, tabId, maxElements,
-                offset, nameFilter, roleFilter).GetAwaiter().GetResult();
+                offset, nameFilter, roleFilter, expectedProfile, expectedOrigin, expectedUrl)
+                .GetAwaiter().GetResult();
         }
         catch (Exception e) when (e is WebSocketException or IOException or JsonException or
             OperationCanceledException or InvalidOperationException or KeyNotFoundException or
@@ -147,7 +202,8 @@ internal static partial class WindowChromeCdp
 
     private static async Task<WindowInspectResult> InspectTabAsync(Uri endpoint, IntPtr hwnd,
         string windowId, WindowInspectScope scope, string? tabId, int maxElements, int offset,
-        string? nameFilter, WindowRoleFilter? roleFilter)
+        string? nameFilter, WindowRoleFilter? roleFilter,
+        string? expectedProfile, string? expectedOrigin, string? expectedUrl)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(4));
         using var socket = new ClientWebSocket();
@@ -156,10 +212,12 @@ internal static partial class WindowChromeCdp
         var tabs = await TargetsForWindow(cdp, hwnd);
         if (scope == WindowInspectScope.TABS)
         {
+            tabs = tabs.Where(t => MatchesContext(t.Url, expectedOrigin, expectedUrl)).ToList();
             var page = tabs.Skip(offset).Take(maxElements).Select(t =>
             {
                 var uri = new Uri(t.Url);
-                return new WindowTab(t.Id, t.Title, uri.GetLeftPart(UriPartial.Path));
+                return new WindowTab(t.Id, t.Title, uri.GetLeftPart(UriPartial.Path),
+                    uri.GetLeftPart(UriPartial.Authority), expectedProfile);
             }).ToArray();
             return new(WindowInspectCode.COMPLETED, [], tabs.Count > offset + page.Length,
                 NextOffset: tabs.Count > offset + page.Length ? offset + page.Length : null,
@@ -167,6 +225,8 @@ internal static partial class WindowChromeCdp
         }
         var selected = tabs.SingleOrDefault(t => string.Equals(t.Id, tabId, StringComparison.Ordinal));
         if (selected is null) return new(WindowInspectCode.CDP_TARGET_NOT_FOUND, []);
+        if (!MatchesContext(selected.Url, expectedOrigin, expectedUrl))
+            return new(WindowInspectCode.CDP_CONTEXT_MISMATCH, [], Detail: "TAB_URL_MISMATCH");
         string sessionId = await Attach(cdp, selected.Id);
         string loader = await Loader(cdp, sessionId);
         var ax = await cdp.Call("Accessibility.getFullAXTree", new { }, sessionId);
@@ -259,6 +319,27 @@ internal static partial class WindowChromeCdp
         return false;
     }
 
+    internal static bool HasAxValue(JsonElement ax, string name, string value)
+    {
+        int matches = 0;
+        bool equals = false;
+        foreach (var node in ax.GetProperty("nodes").EnumerateArray())
+        {
+            if (node.TryGetProperty("ignored", out var ignored) && ignored.GetBoolean() ||
+                AxValue(node, "name") != name || IsProtectedAx(node)) continue;
+            matches++;
+            equals = node.TryGetProperty("value", out var axValue) &&
+                axValue.TryGetProperty("value", out var text) && text.ValueKind == JsonValueKind.String &&
+                string.Equals(text.GetString(), value, StringComparison.Ordinal);
+        }
+        return matches == 1 && equals;
+    }
+
+    private static bool ExpectedAxState(JsonElement ax, WindowActionRequest request) =>
+        request.ExpectedKind == WindowExpectedKind.UIA_VALUE
+            ? HasAxValue(ax, request.ExpectedName!, request.ExpectedValue!)
+            : HasAxName(ax, request.ExpectedName!);
+
     private static async Task ReplaceFocusedText(Session cdp, string sessionId, string value)
     {
         // Chrome receives the same replacement gesture for foreground and
@@ -328,6 +409,9 @@ internal static partial class WindowChromeCdp
             var tabs = await TargetsForWindow(cdp, hwnd);
             var selected = tabs.SingleOrDefault(t => t.Id == target.TargetId);
             if (selected is null) return Rejected(WindowActionCode.CDP_TARGET_AMBIGUOUS);
+            if (!MatchesContext(selected.Url, request.ExpectedOrigin, request.ExpectedUrl) ||
+                request.ExpectedProfile is not null && !ChromeProfileMatches(hwnd, request.ExpectedProfile))
+                return Rejected(WindowActionCode.CDP_CONTEXT_MISMATCH);
             string sessionId = await Attach(cdp, selected.Id);
             string loader = await Loader(cdp, sessionId);
             if (loader != target.LoaderId) return Rejected(WindowActionCode.STALE_ELEMENT);
@@ -344,8 +428,8 @@ internal static partial class WindowChromeCdp
                 return Rejected(WindowActionCode.STALE_ELEMENT);
             if (request.ExpectedName is not null)
             {
-                bool before = request.ExpectedKind == WindowExpectedKind.UIA_ELEMENT
-                    ? HasAxName(ax, request.ExpectedName)
+                bool before = request.ExpectedKind is WindowExpectedKind.UIA_ELEMENT or WindowExpectedKind.UIA_VALUE
+                    ? ExpectedAxState(ax, request)
                     : WindowAction.ExternalStatePresent(request.ExpectedKind, request.ExpectedName);
                 if (before == (request.ExpectedChange == WindowExpectedChange.APPEARS))
                     return Rejected(WindowActionCode.EXPECTED_STATE_ALREADY_TRUE);
@@ -409,9 +493,8 @@ internal static partial class WindowChromeCdp
             bool? effect = null;
             if (request.ExpectedName is not null)
             {
-                bool latest = request.ExpectedKind == WindowExpectedKind.UIA_ELEMENT
-                    ? HasAxName(await cdp.Call("Accessibility.getFullAXTree", new { }, sessionId),
-                        request.ExpectedName)
+                bool latest = request.ExpectedKind is WindowExpectedKind.UIA_ELEMENT or WindowExpectedKind.UIA_VALUE
+                    ? ExpectedAxState(await cdp.Call("Accessibility.getFullAXTree", new { }, sessionId), request)
                     : WindowAction.ExternalStatePresent(request.ExpectedKind, request.ExpectedName);
                 effect = latest ==
                     (request.ExpectedChange == WindowExpectedChange.APPEARS);

@@ -65,14 +65,17 @@ public sealed class WindowTools
         int offset = 0, bool include_details = false, string? name_contains = null,
         WindowRoleFilter? role_filter = null, int wait_ms = 0,
         WindowInspectScope scope = WindowInspectScope.WINDOW, string? tab_id = null,
+        string? expected_profile = null, string? expected_origin = null, string? expected_url = null,
         CancellationToken cancellationToken = default)
     {
         if (!WindowInspector.ValidArguments(window_id, max_depth, max_elements,
             start_path, start_element_id, offset, include_details,
-            name_contains, role_filter, wait_ms, scope, tab_id))
+            name_contains, role_filter, wait_ms, scope, tab_id,
+            expected_profile, expected_origin, expected_url))
             return new(WindowInspectCode.INVALID_ARGUMENT, [], Detail: WindowInspector.ArgumentError(
                 window_id, max_depth, max_elements, start_path, start_element_id, offset,
-                include_details, name_contains, role_filter, wait_ms, scope, tab_id));
+                include_details, name_contains, role_filter, wait_ms, scope, tab_id,
+                expected_profile, expected_origin, expected_url));
         var status = await AdminTools.Status(cancellationToken);
         if (status.Status != StatusCode.OK)
             return new(WindowInspectCode.SERVICE_UNAVAILABLE, [], Detail: status.Status.ToString());
@@ -91,7 +94,8 @@ public sealed class WindowTools
                 WindowInspectCode.STALE_WINDOW, [], Detail: resolved.ToString());
         return await WindowInspector.RunIsolatedAsync(window_id, max_depth, max_elements,
             cancellationToken, start_path, start_element_id, offset, include_details,
-            name_contains, role_filter, wait_ms, scope, tab_id);
+            name_contains, role_filter, wait_ms, scope, tab_id,
+            expected_profile, expected_origin, expected_url);
     }
 
     [McpServerTool(Name = "windows.capture_window", UseStructuredContent = true),
@@ -125,10 +129,13 @@ public sealed class WindowTools
         string? element_path = null, string? expected_name = null,
         WindowExpectedChange? expected_change = null, WindowKey? key = null,
         WindowExpectedKind expected_kind = WindowExpectedKind.UIA_ELEMENT,
+        string? expected_value = null, string? expected_profile = null,
+        string? expected_origin = null, string? expected_url = null,
         CancellationToken cancellationToken = default)
     {
         var request = new WindowActionRequest(window_id, element_id, action, value,
-            element_path, expected_name, expected_change, key, expected_kind);
+            element_path, expected_name, expected_change, key, expected_kind,
+            expected_value, expected_profile, expected_origin, expected_url);
         if (!WindowAction.Valid(request)) return new(WindowActionCode.INVALID_ARGUMENT);
         if (!confirm) return new(WindowActionCode.CONFIRMATION_REQUIRED);
 

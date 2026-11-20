@@ -17,7 +17,7 @@ public enum WindowKey { ENTER, SPACE, ESCAPE }
 public enum WindowExpectedChange { APPEARS, DISAPPEARS }
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowExpectedKind>))]
-public enum WindowExpectedKind { UIA_ELEMENT, WINDOW_TITLE, PROCESS_NAME }
+public enum WindowExpectedKind { UIA_ELEMENT, UIA_VALUE, WINDOW_TITLE, PROCESS_NAME }
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowEffectState>))]
 public enum WindowEffectState { NO_EFFECT, EFFECT_VERIFIED, EFFECT_UNKNOWN }
@@ -35,7 +35,7 @@ public enum WindowActionCode
     TIMEOUT_UNKNOWN_EFFECT, ACTION_FAILED_UNKNOWN_EFFECT, WORKER_FAILED_UNKNOWN_EFFECT,
     EXPECTED_STATE_ALREADY_TRUE, WINDOW_NOT_VISIBLE, FOREGROUND_UNAVAILABLE,
     CLICK_POINT_UNAVAILABLE, TARGET_OCCLUDED, INPUT_FAILED_UNKNOWN_EFFECT,
-    FOCUS_UNAVAILABLE, CDP_UNAVAILABLE, CDP_TARGET_AMBIGUOUS,
+    FOCUS_UNAVAILABLE, CDP_UNAVAILABLE, CDP_TARGET_AMBIGUOUS, CDP_CONTEXT_MISMATCH,
     CDP_TARGET_NOT_VISIBLE, CDP_FAILED_UNKNOWN_EFFECT
 }
 
@@ -48,7 +48,11 @@ internal sealed record WindowActionRequest(
     [property: JsonPropertyName("expected_name")] string? ExpectedName = null,
     [property: JsonPropertyName("expected_change")] WindowExpectedChange? ExpectedChange = null,
     [property: JsonPropertyName("key")] WindowKey? Key = null,
-    [property: JsonPropertyName("expected_kind")] WindowExpectedKind ExpectedKind = WindowExpectedKind.UIA_ELEMENT);
+    [property: JsonPropertyName("expected_kind")] WindowExpectedKind ExpectedKind = WindowExpectedKind.UIA_ELEMENT,
+    [property: JsonPropertyName("expected_value")] string? ExpectedValue = null,
+    [property: JsonPropertyName("expected_profile")] string? ExpectedProfile = null,
+    [property: JsonPropertyName("expected_origin")] string? ExpectedOrigin = null,
+    [property: JsonPropertyName("expected_url")] string? ExpectedUrl = null);
 
 public sealed record WindowActionResult(
     [property: JsonPropertyName("status")] WindowActionCode Status,
@@ -80,12 +84,21 @@ internal static class WindowAction
 {
     internal static bool Valid(WindowActionRequest request) =>
         WindowCatalog.TryParseId(request.WindowId, out _) &&
+        WindowChromeCdp.ContextArgumentError(request.ExpectedProfile, request.ExpectedOrigin,
+            request.ExpectedUrl) is null &&
+        (WindowChromeCdp.ValidTabElementRef(request.ElementId) ||
+            request.ExpectedProfile is null && request.ExpectedOrigin is null && request.ExpectedUrl is null) &&
         (WindowInspector.TryParseElementRef(request.ElementId, out _) ||
          WindowChromeCdp.ValidTabElementRef(request.ElementId)) &&
         (request.ElementPath is null || WindowInspector.TryParseElementRef(request.ElementId, out _) &&
          WindowInspector.TryParsePath(request.ElementPath, out _)) &&
         Enum.IsDefined(request.Action) &&
         Enum.IsDefined(request.ExpectedKind) &&
+        (request.ExpectedKind == WindowExpectedKind.UIA_VALUE ?
+            request.ExpectedValue is { Length: <= 4096 } &&
+            !request.ExpectedValue.Contains('\0') && request.ExpectedName is not null :
+            request.ExpectedValue is null) &&
+        (request.ExpectedKind == WindowExpectedKind.UIA_ELEMENT || request.ExpectedName is not null) &&
         (request.ExpectedName is null && request.ExpectedChange is null ||
          request.ExpectedName is { Length: >= 1 and <= 128 } &&
          !string.IsNullOrWhiteSpace(request.ExpectedName) &&
@@ -177,7 +190,7 @@ internal static class WindowAction
                         var verification = Stopwatch.StartNew();
                         do
                         {
-                            var afterRoot = request.ExpectedKind == WindowExpectedKind.UIA_ELEMENT
+                            var afterRoot = request.ExpectedKind is WindowExpectedKind.UIA_ELEMENT or WindowExpectedKind.UIA_VALUE
                                 ? AutomationElement.FromHandle(hwnd) : root;
                             observed = afterRoot is not null &&
                                 ExpectedStatePresent(afterRoot, request) ==
@@ -259,12 +272,25 @@ internal static class WindowAction
         return found is not null && !found.Current.IsOffscreen;
     }
 
+    private static bool ExpectedValuePresent(AutomationElement root, string name, string value)
+    {
+        var controls = root.FindAll(TreeScope.Descendants,
+            new PropertyCondition(AutomationElement.NameProperty, name));
+        if (controls.Count != 1) return false;
+        var element = controls[0];
+        return !element.Current.IsPassword &&
+            element.TryGetCurrentPattern(ValuePattern.Pattern, out var pattern) &&
+            pattern is ValuePattern valuePattern &&
+            string.Equals(valuePattern.Current.Value, value, StringComparison.Ordinal);
+    }
+
     private static bool ExpectedStatePresent(AutomationElement root, WindowActionRequest request)
     {
         string name = request.ExpectedName!;
         return request.ExpectedKind switch
         {
             WindowExpectedKind.UIA_ELEMENT => ExpectedNamePresent(root, name),
+            WindowExpectedKind.UIA_VALUE => ExpectedValuePresent(root, name, request.ExpectedValue!),
             WindowExpectedKind.WINDOW_TITLE or WindowExpectedKind.PROCESS_NAME =>
                 ExternalStatePresent(request.ExpectedKind, name),
             _ => false
