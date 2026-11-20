@@ -217,7 +217,7 @@ internal static partial class WindowChromeCdp
             {
                 var uri = new Uri(t.Url);
                 return new WindowTab(t.Id, t.Title, uri.GetLeftPart(UriPartial.Path),
-                    uri.GetLeftPart(UriPartial.Authority), expectedProfile);
+                    uri.GetLeftPart(UriPartial.Authority));
             }).ToArray();
             return new(WindowInspectCode.COMPLETED, [], tabs.Count > offset + page.Length,
                 NextOffset: tabs.Count > offset + page.Length ? offset + page.Length : null,
