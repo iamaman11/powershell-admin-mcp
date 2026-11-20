@@ -19,6 +19,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
     // before stopping SCM; a service restart also clears it.
     private long maintenanceUntil;
     private bool Draining => maintenanceUntil!=0 && Environment.TickCount64<maintenanceUntil;
+    internal bool AdmissionOpen { get { lock(gate) return connection is not null && !Draining; } }
     private SqliteConnection Db => connection ?? throw new InvalidOperationException("Store unavailable");
     private const string Columns = "job_id,op_key,state,command_hash,created_utc,updated_utc,completed_steps,step_count,reboot_evidence,reconciliation,history_pruned_utc,user_sid,user_session,user_logon_sid,resource_key";
     internal const int DetailedLimit=10000, RetentionDays=30, PruneBatch=8;

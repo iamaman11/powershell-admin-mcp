@@ -133,7 +133,8 @@ internal static class Doctor
         using var self=Process.GetCurrentProcess();
         // Historical reconciliation is still a DEGRADED store check, but
         // never conflated with current admission capacity or service liveness.
-        bool localReady=service && store is not null && store.Detailed < store.TotalLimit;
+        bool localReady=service && response.Info?.AdmissionOpen==true && store is not null &&
+            store.Detailed < store.TotalLimit;
         return new(1,checks.Any(c=>c.Status==DoctorState.DEGRADED)?DoctorState.DEGRADED:
             checks.Any(c=>c.Status==DoctorState.NOT_TESTED)?DoctorState.NOT_TESTED:DoctorState.OK,
             Guid.NewGuid().ToString("N"),DateTimeOffset.UtcNow,clock.ElapsedMilliseconds,checks.ToArray(),

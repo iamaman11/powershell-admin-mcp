@@ -583,7 +583,6 @@ try{
         next_action='verify eight MCP tools externally, then use -Action accept -RemoteAcceptanceConfirmed'}|ConvertTo-Json -Compress
 }catch{
     $reason=if($_.Exception.Message -match '^UPDATE_[A-Z0-9_]+$'){$_.Exception.Message}else{$_.Exception.GetType().Name}
-    try{Write-OperatorStage 'FAILED' $reason}catch{Write-Warning 'UPDATE_OPERATOR_RECEIPT_WRITE_FAILED'}
     # Restore transport only when no maintenance/swap was attempted. Once
     # offline maintenance begins the installer journals are the source of truth;
     # do not auto-accept, erase history or guess a rollback after interruption.
@@ -594,6 +593,7 @@ try{
     if($stopping -and -not $maintenance -and $stage -in @('drain','maintenance') -and $before.task -eq 'Running'){
         try{$null=& $startup -Action Start -ExpectedNativeSha256 $installed.files.'native/WindowsAdminMCP.exe'}catch{Write-Warning 'UPDATE_PRE_SWAP_RESTART_FAILED'}
     }
+    try{Write-OperatorStage 'FAILED' $reason}catch{Write-Warning 'UPDATE_OPERATOR_RECEIPT_WRITE_FAILED'}
     Write-Error ("UPDATE_FAILED stage="+$stage+" reason="+$_.Exception.Message) -ErrorAction Continue
     throw
 }finally{

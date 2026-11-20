@@ -923,12 +923,14 @@ try
     var one=coordinator.Dispatch(new(AdminOperation.Job,JobAction.submit,Key:"drain-active",Command:"Start-Sleep -Seconds 20",
         ExecutionContext:CommandContext.USER),"fixture",owner.Sid,owner);
     var lease=coordinator.DispatchWorker(new(WorkerAction.poll),owner).Work;
-    Check(one.Status==StatusCode.OK && lease is not null,"maintenance.owned_worker_running");
+    Check(one.Status==StatusCode.OK && lease is not null && coordinator.AdmissionOpen,
+        "maintenance.owned_worker_running");
     if(lease is null)throw new InvalidOperationException("Missing maintenance fixture lease");
     var queued=coordinator.Dispatch(new(AdminOperation.Job,JobAction.submit,Key:"drain-queued",Command:"Write-Output never"),"fixture");
     Check(queued.Status==StatusCode.OK,"maintenance.queued_fixture");
     var drained=coordinator.Maintain(MaintenanceAction.Drain);
     Check(drained is {Status:StatusCode.OK,Draining:true,CancelledQueued:1,CancelRequested:1} &&
+        !coordinator.AdmissionOpen &&
         coordinator.Summary() is {Queued:0,Running:0,CancelRequested:1},"maintenance.atomic_cancel_and_gate");
     Check(coordinator.Dispatch(new(AdminOperation.Job,JobAction.submit,Key:"late",Command:"Write-Output late"),"fixture").Status==StatusCode.BUSY &&
         coordinator.DispatchWorker(new(WorkerAction.poll),owner).Work is null &&
@@ -940,6 +942,7 @@ try
         coordinator.Summary() is {Queued:0,Running:0,CancelRequested:0,NeedsReconciliation:1},
         "maintenance.unknown_effect_retained");
     Check(coordinator.Maintain(MaintenanceAction.Resume) is {Status:StatusCode.OK,Draining:false} &&
+        coordinator.AdmissionOpen &&
         coordinator.Dispatch(new(AdminOperation.Job,JobAction.submit,Key:"post-drain",Command:"Write-Output ok"),"fixture").Status==StatusCode.OK,
         "maintenance.release_restores_admission");
 }
