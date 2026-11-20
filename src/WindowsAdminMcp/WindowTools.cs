@@ -59,7 +59,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.inspect_window", UseStructuredContent = true),
-     Description("Inspect UIA window or Chrome tabs; paginated.")]
+     Description("Inspect UIA or Chrome tabs.")]
     public static async Task<WindowInspectResult> InspectWindow(string window_id, int max_depth = 12,
         int max_elements = 100, string? start_path = null, string? start_element_id = null,
         int offset = 0, bool include_details = false, string? name_contains = null,

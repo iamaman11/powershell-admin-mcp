@@ -260,7 +260,7 @@ internal static partial class WindowChromeCdp
             {
                 await cdp.Call("DOM.focus", new { backendNodeId }, sessionId);
                 dispatched = true;
-                await cdp.Call("Input.insertText", new { text = request.Value! }, sessionId);
+                await ReplaceFocusedText(cdp, sessionId, request.Value!);
             }
             else
             {
@@ -282,7 +282,10 @@ internal static partial class WindowChromeCdp
             return new(WindowActionCode.COMPLETED,
                 ForegroundChanged: foregroundAtEntry != foregroundAtExit,
                 TargetActivated: foregroundAtEntry != hwnd && foregroundAtExit == hwnd,
-                ProviderResponse: providerResponse, ElapsedMs: clock.ElapsedMilliseconds);
+                ProviderResponse: providerResponse, ElapsedMs: clock.ElapsedMilliseconds,
+                ExpectedStateObserved: request.Action == WindowActionKind.TYPE_TEXT &&
+                    request.ExpectedName is null
+                    ? await ReadTextValue(cdp, sessionId, backendNodeId, request.Value!) : null);
         }
         catch (Exception e) when (e is WebSocketException or IOException or JsonException or
                                    OperationCanceledException or InvalidOperationException or KeyNotFoundException)

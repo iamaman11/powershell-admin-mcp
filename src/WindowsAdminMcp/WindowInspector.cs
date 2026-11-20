@@ -29,8 +29,7 @@ public enum WindowInspectScope { WINDOW, TABS, TAB }
 public sealed record WindowTab(
     [property: JsonPropertyName("tab_id")] string TabId,
     [property: JsonPropertyName("title")] string Title,
-    [property: JsonPropertyName("url")] string Url,
-    [property: JsonPropertyName("active_title_match")] bool ActiveTitleMatch);
+    [property: JsonPropertyName("url")] string Url);
 
 public sealed record WindowElement(
     [property: JsonPropertyName("path")] string Path,

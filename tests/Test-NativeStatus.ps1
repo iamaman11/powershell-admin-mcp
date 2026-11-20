@@ -68,8 +68,8 @@ try{
         $inspectTool=@($list.tools|Where-Object name -eq 'windows.inspect_window')
         $actionTool=@($list.tools|Where-Object name -eq 'windows.invoke_element')
         Assert ($inspectTool.Count -eq 1 -and $actionTool.Count -eq 1 -and
-            @(@('window_id','max_depth','max_elements','start_path','start_element_id','offset','include_details','name_contains','role_filter','wait_ms')|Where-Object {-not $inspectTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
-            @(@('window_id','element_id','action','value','confirm','element_path','expected_name','expected_change','key')|Where-Object {-not $actionTool[0].inputSchema.properties.Contains($_)}).Count -eq 0) 'r5.actual_tools_list_exposes_typed_semantic_uia_contract'
+            @(@('window_id','max_depth','max_elements','start_path','start_element_id','offset','include_details','name_contains','role_filter','wait_ms','scope','tab_id')|Where-Object {-not $inspectTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
+            @(@('window_id','element_id','action','value','confirm','element_path','expected_name','expected_change','key','expected_kind')|Where-Object {-not $actionTool[0].inputSchema.properties.Contains($_)}).Count -eq 0) 'r5.actual_tools_list_exposes_typed_semantic_uia_contract'
         Assert ($actionTool[0].outputSchema.properties.Contains('foreground_changed') -and
             $actionTool[0].outputSchema.properties.Contains('target_activated') -and
             $actionTool[0].outputSchema.properties.Contains('effect_state') -and

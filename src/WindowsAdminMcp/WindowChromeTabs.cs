@@ -159,8 +159,7 @@ internal static partial class WindowChromeCdp
             var page = tabs.Skip(offset).Take(maxElements).Select(t =>
             {
                 var uri = new Uri(t.Url);
-                return new WindowTab(t.Id, t.Title, uri.GetLeftPart(UriPartial.Path),
-                    t.TitleMatch);
+                return new WindowTab(t.Id, t.Title, uri.GetLeftPart(UriPartial.Path));
             }).ToArray();
             return new(WindowInspectCode.COMPLETED, [], tabs.Count > offset + page.Length,
                 NextOffset: tabs.Count > offset + page.Length ? offset + page.Length : null,
@@ -247,6 +246,43 @@ internal static partial class WindowChromeCdp
             if (!(node.TryGetProperty("ignored", out var ignored) && ignored.GetBoolean()) &&
                 AxValue(node, "name") == name) return true;
         return false;
+    }
+
+    private static async Task ReplaceFocusedText(Session cdp, string sessionId, string value)
+    {
+        // Chrome receives the same replacement gesture for foreground and
+        // background tabs. Only the focused tab target receives these events.
+        await cdp.Call("Input.dispatchKeyEvent", new { type = "keyDown", key = "Control",
+            code = "ControlLeft", windowsVirtualKeyCode = 17 }, sessionId);
+        await cdp.Call("Input.dispatchKeyEvent", new { type = "keyDown", key = "a",
+            code = "KeyA", windowsVirtualKeyCode = 65, modifiers = 2 }, sessionId);
+        await cdp.Call("Input.dispatchKeyEvent", new { type = "keyUp", key = "a",
+            code = "KeyA", windowsVirtualKeyCode = 65, modifiers = 2 }, sessionId);
+        await cdp.Call("Input.dispatchKeyEvent", new { type = "keyUp", key = "Control",
+            code = "ControlLeft", windowsVirtualKeyCode = 17 }, sessionId);
+        if (value.Length > 0) await cdp.Call("Input.insertText", new { text = value }, sessionId);
+        else
+        {
+            await cdp.Call("Input.dispatchKeyEvent", new { type = "keyDown", key = "Backspace",
+                code = "Backspace", windowsVirtualKeyCode = 8 }, sessionId);
+            await cdp.Call("Input.dispatchKeyEvent", new { type = "keyUp", key = "Backspace",
+                code = "Backspace", windowsVirtualKeyCode = 8 }, sessionId);
+        }
+    }
+
+    private static async Task<bool> ReadTextValue(Session cdp, string sessionId, int backendNodeId,
+        string expectedValue)
+    {
+        var resolved = await cdp.Call("DOM.resolveNode", new { backendNodeId }, sessionId);
+        string objectId = resolved.GetProperty("object").GetProperty("objectId").GetString()!;
+        var readback = await cdp.Call("Runtime.callFunctionOn", new
+        {
+            objectId,
+            functionDeclaration = "function(){return 'value' in this ? this.value : this.textContent;}",
+            returnByValue = true, silent = true
+        }, sessionId);
+        return readback.GetProperty("result").TryGetProperty("value", out var value) &&
+            value.ValueKind == JsonValueKind.String && value.GetString() == expectedValue;
     }
 
     internal static WindowActionResult InvokeTab(IntPtr hwnd, WindowActionRequest request,
@@ -337,16 +373,8 @@ internal static partial class WindowChromeCdp
                 await cdp.Call("DOM.focus", new { backendNodeId = target.BackendId }, sessionId);
                 if (request.Action == WindowActionKind.TYPE_TEXT)
                 {
-                    await cdp.Call("Input.dispatchKeyEvent", new { type = "keyDown", key = "Control",
-                        code = "ControlLeft", windowsVirtualKeyCode = 17 }, sessionId);
-                    await cdp.Call("Input.dispatchKeyEvent", new { type = "keyDown", key = "a",
-                        code = "KeyA", windowsVirtualKeyCode = 65, modifiers = 2 }, sessionId);
-                    await cdp.Call("Input.dispatchKeyEvent", new { type = "keyUp", key = "a",
-                        code = "KeyA", windowsVirtualKeyCode = 65, modifiers = 2 }, sessionId);
-                    await cdp.Call("Input.dispatchKeyEvent", new { type = "keyUp", key = "Control",
-                        code = "ControlLeft", windowsVirtualKeyCode = 17 }, sessionId);
                     dispatched = true;
-                    await cdp.Call("Input.insertText", new { text = request.Value! }, sessionId);
+                    await ReplaceFocusedText(cdp, sessionId, request.Value!);
                 }
                 else
                 {
@@ -378,16 +406,7 @@ internal static partial class WindowChromeCdp
             }
             else if (request.Action == WindowActionKind.TYPE_TEXT)
             {
-                var resolved = await cdp.Call("DOM.resolveNode", new { backendNodeId = target.BackendId }, sessionId);
-                string objectId = resolved.GetProperty("object").GetProperty("objectId").GetString()!;
-                var readback = await cdp.Call("Runtime.callFunctionOn", new
-                {
-                    objectId,
-                    functionDeclaration = "function(){return 'value' in this ? this.value : this.textContent;}",
-                    returnByValue = true, silent = true
-                }, sessionId);
-                effect = readback.GetProperty("result").TryGetProperty("value", out var value) &&
-                    value.ValueKind == JsonValueKind.String && value.GetString() == request.Value;
+                effect = await ReadTextValue(cdp, sessionId, target.BackendId, request.Value!);
             }
             return new(WindowActionCode.COMPLETED, TargetVerified: true,
                 TargetIdentity: request.ElementId, ProviderResponse: provider,

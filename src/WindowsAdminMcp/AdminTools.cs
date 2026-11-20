@@ -81,7 +81,7 @@ public sealed class AdminTools
     }
 
     [McpServerTool(Name="powershell_job",UseStructuredContent=true),
-        Description("Durable jobs; no uncertain replay.")]
+        Description("Durable PS jobs; no replay.")]
     public static async Task<JobReply> Job(JobAction action,string? operation_key=null,string? job_id=null,
         string? command=null,int timeout_seconds=30,string? working_directory=null,JobStep[]? steps=null,
         [Description("Logs: 1-based step.")] int? step_index=null,int? expected_completed_steps=null,
@@ -119,7 +119,7 @@ public sealed class AdminTools
     internal static TimeSpan ExecWaitBudget(int executionSeconds) => TimeSpan.FromSeconds(Math.Min(executionSeconds + 5, 90));
 
     [McpServerTool(Name="powershell_exec",UseStructuredContent=true),
-        Description("PowerShell step; USER default; poll PENDING.")]
+        Description("PS step; USER default; poll PENDING.")]
     public static async Task<ExecutionResult> Exec(string command,int timeout_seconds=30,
         string? working_directory=null,string? operation_key=null,CommandContext? execution_context=null,string? resource_key=null,CancellationToken cancellationToken=default)
     {
