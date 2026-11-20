@@ -24,6 +24,7 @@ public sealed record UpdateToolResult(
     [property: JsonPropertyName("operation_commit")] string? OperationCommit = null,
     [property: JsonPropertyName("rollback_pending")] bool? RollbackPending = null,
     [property: JsonPropertyName("task_state")] string? TaskState = null,
+    [property: JsonPropertyName("last_task_result")] int? LastTaskResult = null,
     [property: JsonPropertyName("detail")] string? Detail = null);
 
 internal sealed record UpdateTaskWire(
@@ -33,7 +34,9 @@ internal sealed record UpdateTaskWire(
     [property: JsonPropertyName("commit")] string? Commit = null,
     [property: JsonPropertyName("reason")] string? Reason = null,
     [property: JsonPropertyName("rollback_pending")] bool? RollbackPending = null,
-    [property: JsonPropertyName("task_state")] string? TaskState = null);
+    [property: JsonPropertyName("task_state")] string? TaskState = null,
+    [property: JsonPropertyName("task")] string? Task = null,
+    [property: JsonPropertyName("last_task_result")] int? LastTaskResult = null);
 
 [McpServerToolType]
 public sealed class UpdateTools
@@ -115,7 +118,7 @@ public sealed class UpdateTools
                 return new(UpdateToolCode.OPERATOR_FAILED, operationId, InstalledCommit: package.Commit,
                     Detail: "OPERATOR_PROTOCOL_ERROR");
             return new(code, wire.OperationId ?? operationId, wire.Stage, package.Commit,
-                wire.Commit, wire.RollbackPending ?? pending, wire.TaskState, wire.Reason);
+                wire.Commit, wire.RollbackPending ?? pending, wire.TaskState, wire.LastTaskResult, wire.Reason);
         }
         catch (Exception e) when (e is OperationCanceledException or IOException or
                                   Win32Exception or JsonException or InvalidOperationException)

@@ -169,6 +169,13 @@ Check(WindowChromeCdp.ProfileLabelMatches("Valer", "Valer") &&
     !WindowChromeCdp.ProfileLabelMatches("Another Valer", "Valer") &&
     !WindowChromeCdp.ProfileLabelMatches("Valer test profile", "Valer"),
     "chrome.profile_delimiters_are_unambiguous");
+var updateRequested = System.Text.Json.JsonSerializer.Deserialize<UpdateTaskWire>(
+    """{"status":"REQUESTED","operation_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","task":"WindowsAdminMCP-OperatorUpdate"}""", PipeWire.Json);
+var updateIdle = System.Text.Json.JsonSerializer.Deserialize<UpdateTaskWire>(
+    """{"status":"NOT_REQUESTED","operation_id":null,"stage":null,"commit":null,"reason":null,"rollback_pending":null,"task_state":"Absent","last_task_result":null}""", PipeWire.Json);
+Check(updateRequested?.Status == "REQUESTED" && updateRequested.Task == "WindowsAdminMCP-OperatorUpdate" &&
+    updateIdle?.Status == "NOT_REQUESTED" && updateIdle.TaskState == "Absent" && updateIdle.LastTaskResult is null,
+    "operator.strict_json_accepts_request_and_status_receipts");
 Check(WindowChromeCdp.ValidTargetId("0123456789abcdef0123456789abcdef") &&
     !WindowChromeCdp.ValidTargetId("https://example.com") &&
     !WindowChromeCdp.ValidTabElementRef("c1:1:bad:1:bad:deadbeef"),
