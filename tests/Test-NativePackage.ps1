@@ -170,36 +170,46 @@ try{
     Check ($rollback.status -eq 'ROLLED_BACK_OFFLINE' -and -not(Test-Path (Join-Path $root 'native')) -and -not(Test-Path (Join-Path $root 'client')) -and -not(Test-Path (Join-Path $root '.rollback'))) 'r6.explicit_clean_install_rollback'
 
     # A separate actual installation/upgrade/rollback exercise. CI only:
-    # retire the first install journal and enable stopped startup registrations
-    # as a fixture for an accepted baseline, not as remote acceptance evidence.
-    # Build the exact previously installed source in the existing isolated CI.
-    # Do not use a different manifest on the same executable as rollback evidence.
+    # use a genuine historical package, never a new binary with an old manifest.
+    # The immutable ZIP is cached after a successful CI run so main does not
+    # rebuild and re-download the same historical release on every commit.
     $legacyCommit='fed40dc07d9a6f6651430e54b0c48529b80f0327'
-    $legacyRoot=Join-Path $env:RUNNER_TEMP ('legacy-'+[guid]::NewGuid().ToString('N'))
-    $legacyPublish=$legacyRoot+'-publish'
-    $legacyPackage=$legacyRoot+'.zip'
-    $legacyAdded=$false
-    try{
-        & git fetch --no-tags --depth=1 origin $legacyCommit
-        if($LASTEXITCODE -ne 0){throw 'LEGACY_FETCH_FAILED'}
-        & git worktree add --detach $legacyRoot $legacyCommit
-        if($LASTEXITCODE -ne 0){throw 'LEGACY_WORKTREE_FAILED'}
-        $legacyAdded=$true
-        $observedCommit=(& git -C $legacyRoot rev-parse HEAD).Trim()
-        Check ($LASTEXITCODE -eq 0 -and $observedCommit -ceq $legacyCommit) 'h1.exact_legacy_source'
-        Push-Location $legacyRoot
+    $legacyPackage=Join-Path $env:RUNNER_TEMP ('wmcp-legacy-'+$legacyCommit+'.zip')
+    $legacyDigestPath=Join-Path $env:RUNNER_TEMP ('wmcp-legacy-'+$legacyCommit+'.sha256')
+    if((Test-Path -LiteralPath $legacyPackage) -and (Test-Path -LiteralPath $legacyDigestPath)){
+        $legacySha=(Get-Content -LiteralPath $legacyDigestPath -Raw).Trim()
+        Check ($legacySha -match '^[0-9a-fA-F]{64}$' -and
+            (Get-FileHash -LiteralPath $legacyPackage -Algorithm SHA256).Hash -eq $legacySha) 'h1.cached_legacy_package_digest'
+    }else{
+        if((Test-Path -LiteralPath $legacyPackage) -or (Test-Path -LiteralPath $legacyDigestPath)){
+            throw 'LEGACY_CACHE_INCOMPLETE'
+        }
+        $legacyRoot=Join-Path $env:RUNNER_TEMP ('legacy-'+[guid]::NewGuid().ToString('N'))
+        $legacyPublish=$legacyRoot+'-publish'
+        $legacyAdded=$false
         try{
-            & dotnet publish src/WindowsAdminMcp/WindowsAdminMcp.csproj -c Release -r win-x64 --self-contained true -p:RestoreLockedMode=true -o $legacyPublish
-            if($LASTEXITCODE -ne 0){throw 'LEGACY_BUILD_FAILED'}
-            $receipt=& ./installer/New-NativePackage.ps1 -PublishDirectory $legacyPublish -Output $legacyPackage -Commit $legacyCommit|ConvertFrom-Json
-        }finally{Pop-Location}
-        $baseline=& $installer -Action Install -PackagePath $legacyPackage -ExpectedSha256 $receipt.sha256|ConvertFrom-Json
-        Check ($baseline.commit -ceq $legacyCommit) 'h1.actual_legacy_package_installed'
-    }finally{
-        if($legacyAdded){& git worktree remove --force $legacyRoot;if($LASTEXITCODE -ne 0){throw 'LEGACY_WORKTREE_CLEANUP_FAILED'}}
-        if(Test-Path -LiteralPath $legacyPublish){Remove-Item -LiteralPath $legacyPublish -Recurse -Force}
-        if(Test-Path -LiteralPath $legacyPackage){Remove-Item -LiteralPath $legacyPackage -Force}
+            & git fetch --no-tags --depth=1 origin $legacyCommit
+            if($LASTEXITCODE -ne 0){throw 'LEGACY_FETCH_FAILED'}
+            & git worktree add --detach $legacyRoot $legacyCommit
+            if($LASTEXITCODE -ne 0){throw 'LEGACY_WORKTREE_FAILED'}
+            $legacyAdded=$true
+            $observedCommit=(& git -C $legacyRoot rev-parse HEAD).Trim()
+            Check ($LASTEXITCODE -eq 0 -and $observedCommit -ceq $legacyCommit) 'h1.exact_legacy_source'
+            Push-Location $legacyRoot
+            try{
+                & dotnet publish src/WindowsAdminMcp/WindowsAdminMcp.csproj -c Release -r win-x64 --self-contained true -p:RestoreLockedMode=true -o $legacyPublish
+                if($LASTEXITCODE -ne 0){throw 'LEGACY_BUILD_FAILED'}
+                $receipt=& ./installer/New-NativePackage.ps1 -PublishDirectory $legacyPublish -Output $legacyPackage -Commit $legacyCommit|ConvertFrom-Json
+                $legacySha=$receipt.sha256
+                [IO.File]::WriteAllText($legacyDigestPath,$legacySha)
+            }finally{Pop-Location}
+        }finally{
+            if($legacyAdded){& git worktree remove --force $legacyRoot;if($LASTEXITCODE -ne 0){throw 'LEGACY_WORKTREE_CLEANUP_FAILED'}}
+            if(Test-Path -LiteralPath $legacyPublish){Remove-Item -LiteralPath $legacyPublish -Recurse -Force}
+        }
     }
+    $baseline=& $installer -Action Install -PackagePath $legacyPackage -ExpectedSha256 $legacySha|ConvertFrom-Json
+    Check ($baseline.commit -ceq $legacyCommit) 'h1.actual_legacy_package_installed'
     $null=& $installer -Action Prepare -ExpectedCommit $baseline.commit
     $task=Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel'
     $trigger=$task.Triggers[0];$trigger.Enabled=$true
