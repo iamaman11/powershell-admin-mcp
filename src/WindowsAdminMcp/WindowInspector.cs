@@ -30,7 +30,6 @@ public sealed record WindowTab(
     [property: JsonPropertyName("tab_id")] string TabId,
     [property: JsonPropertyName("title")] string Title,
     [property: JsonPropertyName("url")] string Url,
-    [property: JsonPropertyName("origin")] string Origin,
     [property: JsonPropertyName("active_title_match")] bool ActiveTitleMatch);
 
 public sealed record WindowElement(

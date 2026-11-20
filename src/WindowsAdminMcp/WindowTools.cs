@@ -33,7 +33,7 @@ public sealed record WindowListResult(
 public sealed class WindowTools
 {
     [McpServerTool(Name = "windows.list_windows", UseStructuredContent = true),
-     Description("List up to 100 USER windows without focus change.")]
+     Description("List USER windows.")]
     public static async Task<WindowListResult> ListWindows(int max_windows = 50,
         CancellationToken cancellationToken = default)
     {
@@ -59,7 +59,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.inspect_window", UseStructuredContent = true),
-     Description("Inspect USER window UIA or Chrome tabs/TAB via CDP; bounded paging and filters; details <=10.")]
+     Description("Inspect UIA window or Chrome tabs; paginated.")]
     public static async Task<WindowInspectResult> InspectWindow(string window_id, int max_depth = 12,
         int max_elements = 100, string? start_path = null, string? start_element_id = null,
         int offset = 0, bool include_details = false, string? name_contains = null,
@@ -95,7 +95,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.capture_window", UseStructuredContent = true),
-     Description("WGC capture of selected USER window. PNG <=2 MB; no focus change.")]
+     Description("Window PNG, no focus change.")]
     public static async Task<ModelContextProtocol.Protocol.CallToolResult> CaptureWindow(string window_id,
         int max_width = 1280, CancellationToken cancellationToken = default)
     {
@@ -119,7 +119,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.invoke_element", UseStructuredContent = true),
-     Description("UIA, background Chrome, guarded CLICK, TYPE_TEXT or KEY_PRESS. Fresh element_id, confirm=true; verify effects.")]
+     Description("UIA/Chrome action; fresh element_id.")]
     public static async Task<WindowActionResult> InvokeElement(string window_id, string element_id,
         WindowActionKind action, string? value = null, bool confirm = true,
         string? element_path = null, string? expected_name = null,
