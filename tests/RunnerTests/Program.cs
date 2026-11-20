@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 20236)
+Total output lines: 1162
+
 using System.Diagnostics;
 
 static void Check(bool ok, string label)
@@ -118,6 +121,10 @@ Check(WindowChromeCdp.ValidTargetId("0123456789abcdef0123456789abcdef") &&
     !WindowChromeCdp.ValidTargetId("https://example.com") &&
     !WindowChromeCdp.ValidTabElementRef("c1:1:bad:1:bad:deadbeef"),
     "chrome.cdp_target_and_element_reference_boundaries");
+using (var protectedNode = System.Text.Json.JsonDocument.Parse(
+    "{\"properties\":[{\"name\":\"protected\",\"value\":{\"value\":true}}]}"))
+    Check(WindowChromeCdp.IsProtectedAx(protectedNode.RootElement),
+        "chrome.cdp_protected_fields_are_not_actionable");
 Check(new WindowActionResult(WindowActionCode.COMPLETED).EffectState == WindowEffectState.EFFECT_UNKNOWN &&
     new WindowActionResult(WindowActionCode.COMPLETED, ExpectedStateObserved: true).EffectState ==
         WindowEffectState.EFFECT_VERIFIED &&
@@ -576,24 +583,7 @@ using (var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
 // No remote services or arbitrary processes: only a known inert local child.
 var tree = await Run("$p=Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\\ping.exe') -ArgumentList '-n','60','127.0.0.1' -PassThru; [Console]::Out.WriteLine($p.Id); Start-Sleep -Seconds 30", 4);
 Check(tree.Status == ExecutionState.TIMEOUT_UNKNOWN_EFFECT && int.TryParse(tree.Stdout.Trim(), out _), "r2.child_pid_observed");
-int pid = int.Parse(tree.Stdout.Trim(), System.Globalization.CultureInfo.InvariantCulture);
-bool gone;
-try { using var child = Process.GetProcessById(pid); gone = child.WaitForExit(5000); }
-catch (ArgumentException) { gone = true; }
-Check(gone, "r2.job_terminated_child");
-Console.WriteLine("R2_POWERSHELL_RUNNER=PASS (actual candidate runner, direct CI; not exposed through MCP yet)");
-
-using(var bitmap=new System.Drawing.Bitmap(2400,1800))
-{
-    using(var graphics=System.Drawing.Graphics.FromImage(bitmap))graphics.Clear(System.Drawing.Color.SteelBlue);
-    var png=DesktopCapture.Encode(bitmap,1280);
-    Check(png is not null && png.Width==1280 && png.Height==960 &&
-        png.Png.AsSpan(0,8).SequenceEqual(new byte[]{137,80,78,71,13,10,26,10}),"r5.synthetic_png_dimensions_and_signature");
-}
-Check(!DesktopCapture.ValidArguments(0,0,0,10,null,1280),"r5.invalid_region_pair");
-
-Check(TunnelLifetime.UnexpectedExitCode(0)!=0 && TunnelLifetime.UnexpectedExitCode(17)==17,
-    "h5.unexpected_vendor_exit_zero_is_restartable");
+int pid = int.Parse(tree.Stdout.Trim(), …236 tokens truncated…"h5.unexpected_vendor_exit_zero_is_restartable");
 var fixtureCredential=new TunnelHost.Credential(1,"tunnel_"+new string('a',32),"inert-test-key");
 Check(TunnelHost.Valid(fixtureCredential)&&!TunnelHost.Valid(fixtureCredential with {Version=2})&&
     !TunnelHost.Valid(fixtureCredential with {RuntimeKey="bad\nkey"}),"r6.typed_tunnel_credential");

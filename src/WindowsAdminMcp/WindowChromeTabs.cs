@@ -185,13 +185,14 @@ internal static partial class WindowChromeCdp
             if (elements.Count == maxElements) { more = true; break; }
             int backend = node.TryGetProperty("backendDOMNodeId", out var backendValue) &&
                 backendValue.ValueKind == JsonValueKind.Number ? backendValue.GetInt32() : 0;
+            bool password = IsProtectedAx(node);
             bool hiddenName = role is "textbox" or "searchbox" or "combobox" or "RootWebArea";
-            string token = backend > 0 ? ElementToken(stamp, windowId, selected.Id, backend,
+            string token = backend > 0 && !password ? ElementToken(stamp, windowId, selected.Id, backend,
                 loader, selected.Url, role, name) : "";
             elements.Add(new($"0.{position - 1}", null, 1, "ControlType." + RoleName(role),
                 hiddenName ? "[redacted]" : name.Length > 128 ? name[..128] : name,
-                "", true, false, false,
-                backend > 0 ? ["CDP"] : [], token));
+                "", true, false, password,
+                backend > 0 && !password ? ["CDP"] : [], token));
         }
         return new(WindowInspectCode.COMPLETED, [.. elements], more,
             ElementRefExpiresUtc: DateTimeOffset.FromUnixTimeMilliseconds(stamp).AddSeconds(30),
@@ -226,6 +227,16 @@ internal static partial class WindowChromeCdp
         node.TryGetProperty(field, out var value) &&
         value.TryGetProperty("value", out var item) && item.ValueKind == JsonValueKind.String
         ? item.GetString() ?? "" : "";
+
+    internal static bool IsProtectedAx(JsonElement node)
+    {
+        if (!node.TryGetProperty("properties", out var properties) ||
+            properties.ValueKind != JsonValueKind.Array) return false;
+        return properties.EnumerateArray().Any(property =>
+            property.TryGetProperty("name", out var name) && name.GetString() == "protected" &&
+            property.TryGetProperty("value", out var value) &&
+            value.TryGetProperty("value", out var boolean) && boolean.ValueKind == JsonValueKind.True);
+    }
 
     private static async Task<string> Attach(Session cdp, string targetId)
     {
@@ -326,6 +337,7 @@ internal static partial class WindowChromeCdp
                 backend.ValueKind == JsonValueKind.Number && backend.GetInt32() == target.BackendId &&
                 !(node.TryGetProperty("ignored", out var ignored) && ignored.GetBoolean())).ToArray();
             if (nodeMatches.Length != 1) return Rejected(WindowActionCode.STALE_ELEMENT);
+            if (IsProtectedAx(nodeMatches[0])) return Rejected(WindowActionCode.PASSWORD_DENIED);
             string role = AxValue(nodeMatches[0], "role"), name = AxValue(nodeMatches[0], "name");
             if (!string.Equals(ElementDigest(request.WindowId, selected.Id, target.BackendId,
                 loader, selected.Url, role, name), target.Digest, StringComparison.OrdinalIgnoreCase))
