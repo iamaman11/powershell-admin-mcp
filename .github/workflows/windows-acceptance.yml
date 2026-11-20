@@ -46,7 +46,14 @@ jobs:
               if($LASTEXITCODE -ne 0){throw 'PR_ACCEPTANCE_UNAVAILABLE'}
               $accepted=@($runs.workflow_runs|Where-Object {
                 $_.status -eq 'completed' -and $_.conclusion -eq 'success' -and
-                @($_.pull_requests|Where-Object number -eq $pr.number).Count -gt 0
+                $_.event -eq 'pull_request' -and $_.head_sha -ceq $head -and
+                $_.head_branch -ceq $pr.head.ref -and
+                $_.head_repository.full_name -ceq $pr.head.repo.full_name -and
+                # GitHub may clear workflow_run.pull_requests after merging.
+                # Exact SHA + branch + repository still prove the tested head;
+                # a nonempty association must explicitly name this PR.
+                (@($_.pull_requests).Count -eq 0 -or
+                    @($_.pull_requests|Where-Object number -eq $pr.number).Count -gt 0)
               })
               if($accepted.Count -gt 0){$full=$false;break}
             }

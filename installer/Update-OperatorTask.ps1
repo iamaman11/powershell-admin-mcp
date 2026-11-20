@@ -9,9 +9,19 @@ $root=Join-Path $env:ProgramFiles 'WindowsAdminMCP'
 $updater=Join-Path $root 'native\installer\Update-Native.ps1'
 $receipt=Join-Path $root '.operator-update.json'
 $pwsh=Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
+function Test-OperatorPrincipal([string]$userId,[string]$account,[string]$sid=''){
+    if($userId -ieq $account -or ($sid -and $userId -ceq $sid)){return $true}
+    if(-not $sid -or -not $userId){return $false}
+    # Task Scheduler can read back DOMAIN\User as just User. Resolve the
+    # actual principal rather than trusting textual aliases or substrings.
+    try{
+        $resolved=([Security.Principal.NTAccount]::new($userId)).Translate([Security.Principal.SecurityIdentifier])
+        return $resolved.Value -ceq $sid
+    }catch{return $false}
+}
 function Test-OperatorDefinition($task,[string]$account,[string]$executable,[string]$script,[string]$sid=''){
     if($null -eq $task){return $false}
-    if($task.Principal.UserId -ine $account -and $task.Principal.UserId -cne $sid -or
+    if(-not(Test-OperatorPrincipal $task.Principal.UserId $account $sid) -or
         $task.Principal.LogonType.ToString() -ne 'Interactive' -or
         $task.Principal.RunLevel.ToString() -ne 'Highest' -or @($task.Actions).Count -ne 1){return $false}
     $a=$task.Actions[0]
