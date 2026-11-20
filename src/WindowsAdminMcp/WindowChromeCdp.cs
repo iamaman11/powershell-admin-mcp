@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net.WebSockets;
@@ -90,6 +91,9 @@ internal static class WindowChromeCdp
             if (!owner.ProcessName.Equals("chrome", StringComparison.OrdinalIgnoreCase)) return null;
         }
         catch (ArgumentException) { return null; }
+        catch (Win32Exception) { return null; }
+        catch (InvalidOperationException) { return null; }
+        catch (System.Security.SecurityException) { return null; }
         string? localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (string.IsNullOrWhiteSpace(localAppData)) return null;
         string portFile = Path.Combine(localAppData, "Google", "Chrome", "User Data", "DevToolsActivePort");
@@ -107,7 +111,7 @@ internal static class WindowChromeCdp
                 .GetAwaiter().GetResult();
         }
         catch (Exception e) when (e is WebSocketException or IOException or JsonException or
-                                   OperationCanceledException or InvalidOperationException)
+                                   OperationCanceledException or InvalidOperationException or KeyNotFoundException)
         {
             return new(WindowActionCode.CDP_UNAVAILABLE, FailureStage: WindowFailureStage.CDP_CONNECT,
                 ExceptionType: e.GetType().Name, ElapsedMs: clock.ElapsedMilliseconds);
@@ -253,7 +257,7 @@ internal static class WindowChromeCdp
                 ProviderResponse: "CDP_BACKGROUND", ElapsedMs: clock.ElapsedMilliseconds);
         }
         catch (Exception e) when (e is WebSocketException or IOException or JsonException or
-                                   OperationCanceledException or InvalidOperationException)
+                                   OperationCanceledException or InvalidOperationException or KeyNotFoundException)
         {
             return new(dispatched ? WindowActionCode.CDP_FAILED_UNKNOWN_EFFECT : WindowActionCode.CDP_UNAVAILABLE,
                 EffectUnknown: dispatched, FailureStage: dispatched ? WindowFailureStage.DISPATCH_INPUT :
@@ -274,7 +278,7 @@ internal static class WindowChromeCdp
             byte[] payload = JsonSerializer.SerializeToUtf8Bytes(new
                 { id, method, @params = parameters, sessionId },
                 new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull });
-            await socket.SendAsync(payload, WebSocketMessageType.Text, true, cancellationToken);
+            await socket.SendAsync(payload.AsMemory(), WebSocketMessageType.Text, true, cancellationToken);
             var buffer = new byte[16384];
             using var stream = new MemoryStream();
             while (true)
