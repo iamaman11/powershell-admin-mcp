@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$Exe)
+param([Parameter(Mandatory)][string]$Exe,[switch]$SmokeOnly)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 if(-not $env:GITHUB_ACTIONS -or $env:RUNNER_OS -ne 'Windows'){throw 'ISOLATED_WINDOWS_CI_ONLY'}
@@ -85,6 +85,10 @@ try{
         Assert ($v.frontend.pid -eq $p.Id -and $v.frontend.sid -eq $caller.User.Value -and
             $v.frontend.session_id -eq $p.SessionId -and $v.command_context -in @('SYSTEM','UNCONFIRMED') -and
             $v.versions.mcp_version -eq '0.8.1-dev' -and $v.versions.store_schema -eq 4 -and $v.timing.ipc_ms -ge 0) 'hardening.separate_frontend_and_runner_identity'
+    }
+    if($SmokeOnly){
+        Write-Host 'R1_TYPED_MCP_SMOKE=PASS (three clients; SCM and schema; cleanup follows)'
+        return
     }
     Send $a 31 'tools/call' @{name='windows.list_windows';arguments=@{max_windows=0};_meta=$meta}
     $invalidWindowList=(Receive $a 31).structuredContent

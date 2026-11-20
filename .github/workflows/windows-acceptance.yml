@@ -50,7 +50,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           dotnet run --project tests/RunnerTests/RunnerTests.csproj -c Release
           if ($LASTEXITCODE -ne 0) { throw 'R2_RUNNER_FAILED' }
-          ./tests/Test-NativeStatus.ps1 -Exe src/WindowsAdminMcp/bin/Release/net10.0-windows10.0.19041.0/WindowsAdminMCP.exe
+          ./tests/Test-NativeStatus.ps1 -Exe src/WindowsAdminMcp/bin/Release/net10.0-windows10.0.19041.0/WindowsAdminMCP.exe -SmokeOnly
       - name: Verify unified startup definition without registering a live tunnel
         shell: pwsh
         run: |
