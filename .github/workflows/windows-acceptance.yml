@@ -32,10 +32,10 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-          cache: true
-          cache-dependency-path: |
-            research/**/packages.lock.json
-            src/**/packages.lock.json
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('src/**/*.csproj', 'research/**/*.csproj', 'tests/**/*.csproj') }}
       - name: Build pinned SDK and verify wire contract
         shell: pwsh
         run: |
@@ -67,10 +67,10 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-          cache: true
-          cache-dependency-path: |
-            research/**/packages.lock.json
-            src/**/packages.lock.json
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('src/**/*.csproj', 'research/**/*.csproj', 'tests/**/*.csproj') }}
       - name: Exercise SCM, SQLite, Job Objects and shared MCP queue
         shell: pwsh
         run: |
