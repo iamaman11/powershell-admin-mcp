@@ -287,8 +287,8 @@ if(-not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProc
 if($ScheduledOperator){
     if($Action -ne 'update' -or -not $OperationId){throw 'UPDATE_SCHEDULED_OPERATION_INVALID'}
     $operatorTask=Get-ScheduledTask -TaskName 'WindowsAdminMCP-OperatorUpdate' -ErrorAction SilentlyContinue
-    if(-not(Test-ScheduledUpdateIdentity $operatorTask $identity.Name $PSCommandPath $OperationId
-        $identity.User.Value (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'))){
+    $verifiedOperator=Test-ScheduledUpdateIdentity $operatorTask $identity.Name $PSCommandPath $OperationId $identity.User.Value (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe')
+    if(-not $verifiedOperator){
         throw 'UPDATE_SCHEDULED_TASK_NOT_CONFIRMED'
     }
 }elseif([Console]::IsInputRedirected -or $OperationId){
