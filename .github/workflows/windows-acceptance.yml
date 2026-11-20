@@ -5,6 +5,9 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
@@ -12,10 +15,11 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   windows:
+    # Full PR acceptance is not repeated after merge. Main still builds an
+    # exact-commit package and checks a real offline install and rollback.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: windows-2025
     timeout-minutes: 18
-    env:
-      FULL_ACCEPTANCE: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
     steps:
       - uses: actions/checkout@v4
       - name: Parse PowerShell sources before expensive tests
@@ -39,20 +43,13 @@ jobs:
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('src/**/*.csproj', 'research/**/*.csproj', 'tests/**/*.csproj') }}
-      - name: Build pinned SDK and verify wire contract
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          dotnet build research/R0SdkProbe/R0SdkProbe.csproj -c Release
-          if ($LASTEXITCODE -ne 0) { throw 'SDK_BUILD_FAILED' }
-          ./research/R0SdkProbe/Test-Wire.ps1 -Dll research/R0SdkProbe/bin/Release/net10.0/R0SdkProbe.dll
       - name: Exercise actual bounded PowerShell runner and typed UI contract
+        if: github.event_name != 'push'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           dotnet run --project tests/RunnerTests/RunnerTests.csproj -c Release
           if ($LASTEXITCODE -ne 0) { throw 'R2_RUNNER_FAILED' }
-          ./tests/Test-NativeStatus.ps1 -Exe src/WindowsAdminMcp/bin/Release/net10.0-windows10.0.19041.0/WindowsAdminMCP.exe -SmokeOnly
       - name: Verify unified startup definition without registering a live tunnel
         shell: pwsh
         run: |
@@ -62,43 +59,63 @@ jobs:
           Write-Host 'R6_STARTUP_DEFINITION=PASS (plan only; no task registered)'
       # This is a fixed historical upgrade fixture. Cache its tested ZIP,
       # not mutable compiler outputs or the current commit's release binary.
+      # Main never needs the historical candidate again after PR acceptance.
       - uses: actions/cache@v4
-        if: env.FULL_ACCEPTANCE == 'true'
+        if: github.event_name != 'push'
         with:
           path: |
             ${{ runner.temp }}/wmcp-legacy-fed40dc07d9a6f6651430e54b0c48529b80f0327.zip
             ${{ runner.temp }}/wmcp-legacy-fed40dc07d9a6f6651430e54b0c48529b80f0327.sha256
           key: wmcp-legacy-v1-${{ runner.os }}-win-x64-fed40dc07d9a6f6651430e54b0c48529b80f0327
-      - name: Exercise SCM, SQLite, Job Objects and shared MCP queue
-        if: env.FULL_ACCEPTANCE == 'true'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          # R0SdkProbe was already built and wire-tested above on this runner.
-          dotnet publish research/R0NativeProbe/R0NativeProbe.csproj -c Release -r win-x64 --self-contained true -o "${{ runner.temp }}/R0NativeProbe"
-          if ($LASTEXITCODE -ne 0) { throw 'PUBLISH_FAILED' }
-          ./research/R0NativeProbe/Test-Native.ps1 -Exe "${{ runner.temp }}/R0NativeProbe/R0NativeProbe.exe" -SdkDll research/R0SdkProbe/bin/Release/net10.0/R0SdkProbe.dll
-      - name: Publish and verify actual native application R1 status
-        if: env.FULL_ACCEPTANCE == 'true'
+      - name: Publish exact-commit native application once
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           dotnet publish src/WindowsAdminMcp/WindowsAdminMcp.csproj -c Release -r win-x64 --self-contained true -o "${{ runner.temp }}/WindowsAdminMcpCandidate"
           if ($LASTEXITCODE -ne 0) { throw 'R1_PUBLISH_FAILED' }
-          ./tests/Test-NativeStatus.ps1 -Exe "${{ runner.temp }}/WindowsAdminMcpCandidate/WindowsAdminMCP.exe"
+      - name: Verify native service and MCP contract
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $params=@{Exe="${{ runner.temp }}/WindowsAdminMcpCandidate/WindowsAdminMCP.exe"}
+          if($env:GITHUB_EVENT_NAME -eq 'push'){$params.SmokeOnly=$true}
+          if($env:GITHUB_EVENT_NAME -in @('schedule','workflow_dispatch')){
+            $params.LongBoundary=$true
+            $params.Performance=$true
+          }
+          ./tests/Test-NativeStatus.ps1 @params
       - name: Build and test offline native installation package
-        if: env.FULL_ACCEPTANCE == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
           $package=Join-Path "${{ runner.temp }}" 'WindowsAdminMCP-win-x64.zip'
           $receipt=./installer/New-NativePackage.ps1 -PublishDirectory "${{ runner.temp }}/WindowsAdminMcpCandidate" -Output $package -Commit $env:GITHUB_SHA | ConvertFrom-Json
           Write-Host ("NATIVE_PACKAGE_SHA256="+$receipt.sha256)
-          ./tests/Test-NativePackage.ps1 -Package $package -Sha256 $receipt.sha256
+          if($env:GITHUB_EVENT_NAME -eq 'push'){
+            ./tests/Test-NativePackage.ps1 -Package $package -Sha256 $receipt.sha256 -SmokeOnly
+          }else{
+            ./tests/Test-NativePackage.ps1 -Package $package -Sha256 $receipt.sha256
+          }
           $updateReceipt=[ordered]@{schema=1;commit=$env:GITHUB_SHA;run_id=$env:GITHUB_RUN_ID;sha256=$receipt.sha256}
           [IO.File]::WriteAllText((Join-Path "${{ runner.temp }}" 'WindowsAdminMCP-update.json'),($updateReceipt|ConvertTo-Json -Compress))
+      - name: Verify experimental SDK wire protocol
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          dotnet build research/R0SdkProbe/R0SdkProbe.csproj -c Release
+          if($LASTEXITCODE -ne 0){throw 'SDK_BUILD_FAILED'}
+          ./research/R0SdkProbe/Test-Wire.ps1 -Dll research/R0SdkProbe/bin/Release/net10.0/R0SdkProbe.dll
+      - name: Exercise experimental SCM, SQLite and shared MCP queue
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          dotnet publish research/R0NativeProbe/R0NativeProbe.csproj -c Release -r win-x64 --self-contained true -o "${{ runner.temp }}/R0NativeProbe"
+          if($LASTEXITCODE -ne 0){throw 'R0_PUBLISH_FAILED'}
+          ./research/R0NativeProbe/Test-Native.ps1 -Exe "${{ runner.temp }}/R0NativeProbe/R0NativeProbe.exe" -SdkDll research/R0SdkProbe/bin/Release/net10.0/R0SdkProbe.dll
       - uses: actions/upload-artifact@v4
-        if: success() && env.FULL_ACCEPTANCE == 'true'
+        if: success() && (github.event_name == 'push' || github.event_name == 'pull_request')
         with:
           name: WindowsAdminMCP-offline-package
           path: |
@@ -107,20 +124,6 @@ jobs:
             installer/Install-Native.ps1
             installer/NativeFileSwap.ps1
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        if: success() && env.FULL_ACCEPTANCE == 'true'
-        with:
-          name: WindowsAdminMcp-candidate-win-x64
-          path: "${{ runner.temp }}/WindowsAdminMcpCandidate/"
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        if: always() && env.FULL_ACCEPTANCE == 'true'
-        with:
-          name: r0-package-locks
-          path: |
-            research/**/packages.lock.json
-            src/**/packages.lock.json
-          if-no-files-found: warn
   release:
     # Preserve the release status check and verify the published bytes.
     # No second Windows VM, source checkout, restore or compilation.

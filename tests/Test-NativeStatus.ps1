@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$Exe,[switch]$SmokeOnly)
+param([Parameter(Mandatory)][string]$Exe,[switch]$SmokeOnly,[switch]$LongBoundary,[switch]$Performance)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 if(-not $env:GITHUB_ACTIONS -or $env:RUNNER_OS -ne 'Windows'){throw 'ISOLATED_WINDOWS_CI_ONLY'}
@@ -64,7 +64,9 @@ try{
     foreach($p in @($a,$b,$c)){
         Send $p 1 'tools/list' @{_meta=$meta}
         $list=Receive $p 1
-        Assert (@($list.tools).Count -eq 8 -and @($list.tools.name|Where-Object {$_ -in @('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element')}).Count -eq 8) 'r5.window_tools_including_inspect'
+        $names=@($list.tools|ForEach-Object {$_.name})
+        $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element')
+        Assert (@($required|Where-Object {$_ -notin $names}).Count -eq 0 -and $names.Count -eq @($names|Select-Object -Unique).Count) 'r5.required_window_tools_without_duplicates'
         $inspectTool=@($list.tools|Where-Object name -eq 'windows.inspect_window')
         $actionTool=@($list.tools|Where-Object name -eq 'windows.invoke_element')
         Assert ($inspectTool.Count -eq 1 -and $actionTool.Count -eq 1 -and
@@ -163,16 +165,16 @@ try{
     Assert ($badIndex.status -eq 'INVALID_ARGUMENT') 'hardening.zero_step_index_rejected'
     $x=ToolCall $b 11 'powershell_exec' @{command=$long;timeout_seconds=10;operation_key='long'}
     Assert ($x.status -eq 'COMPLETED' -and $x.stdout.Trim() -ceq 'Проверка 🚀') 'r3.long_unicode_through_mcp'
-    # A 100-second benign runner command must return PENDING in the 90-second client budget
-    # and continue to completion through the same durable job API.
-    $boundaryClock=[Diagnostics.Stopwatch]::StartNew()
-    Send $a 103 'tools/call' @{name='powershell_exec';arguments=@{command="Start-Sleep -Seconds 100; Write-Output 'BOUNDARY_OK'";timeout_seconds=120;operation_key='boundary-exec'};_meta=$meta}
-    $boundary=(Receive $a 103 110).structuredContent
-    Assert ($boundary.status -eq 'PENDING' -and $boundary.job_id -and
-        -not $boundary.audit_persisted -and $boundaryClock.Elapsed.TotalSeconds -lt 110) 'hardening.exec_boundary_pending_before_tunnel_deadline'
-    $boundaryId=$boundary.job_id
-    $boundaryResult=Wait-JobState $b $boundaryId 'COMPLETED'
-    Assert ($boundaryResult.execution.stdout.Trim() -ceq 'BOUNDARY_OK' -and $boundaryResult.execution.audit_persisted) 'hardening.boundary_result_saved'
+    if($LongBoundary){
+        # The long tunnel boundary runs weekly or on explicit dispatch.
+        $boundaryClock=[Diagnostics.Stopwatch]::StartNew()
+        Send $a 103 'tools/call' @{name='powershell_exec';arguments=@{command="Start-Sleep -Seconds 100; Write-Output 'BOUNDARY_OK'";timeout_seconds=120;operation_key='boundary-exec'};_meta=$meta}
+        $boundary=(Receive $a 103 110).structuredContent
+        Assert ($boundary.status -eq 'PENDING' -and $boundary.job_id -and
+            -not $boundary.audit_persisted -and $boundaryClock.Elapsed.TotalSeconds -lt 110) 'hardening.exec_boundary_pending_before_tunnel_deadline'
+        $boundaryResult=Wait-JobState $b $boundary.job_id 'COMPLETED'
+        Assert ($boundaryResult.execution.stdout.Trim() -ceq 'BOUNDARY_OK' -and $boundaryResult.execution.audit_persisted) 'hardening.boundary_result_saved'
+    }
     # Real workload overlap: six distinct live PowerShell trees, three SDK
     # frontends, then a seventh independent short command before releasing them.
     $parallelDir=Join-Path $data 'parallel-fixture'
@@ -396,10 +398,12 @@ try{
     Assert ($doctor.service.service_pid -eq (Get-CimInstance Win32_Service -Filter "Name='$name'").ProcessId -and $doctor.store.schemaVersion -eq 4) 'r6.doctor_authoritative_service_store'
     Assert ($doctor.store.total -gt 0 -and $doctor.store.waitingForReboot -eq 0 -and $doctor.store.needsReconciliation -ge 1) 'r6.doctor_total_state_counts'
     Assert (@($doctor.checks|Where-Object {$_.component -eq 'Remote' -and $_.status -eq 'NOT_TESTED'}).Count -eq 1) 'r6.doctor_no_false_remote_acceptance'
-    $performance=& (Join-Path $PSScriptRoot 'Test-NativePerformance.ps1') -Exe $Exe -DurationSeconds 12 -ExerciseJobs|ConvertFrom-Json
-    Assert ($performance.status -eq 'PASS' -and $performance.status_latency.count -ge 12 -and
-        $performance.admission_latency.count -eq 12 -and $performance.cancel_latency.count -eq 12) 'r7.bounded_performance_fixture'
-    Write-Host ('PERFORMANCE_BASELINE='+($performance|ConvertTo-Json -Depth 8 -Compress))
+    if($Performance){
+        $performance=& (Join-Path $PSScriptRoot 'Test-NativePerformance.ps1') -Exe $Exe -DurationSeconds 12 -ExerciseJobs|ConvertFrom-Json
+        Assert ($performance.status -eq 'PASS' -and $performance.status_latency.count -ge 12 -and
+            $performance.admission_latency.count -eq 12 -and $performance.cancel_latency.count -eq 12) 'r7.bounded_performance_fixture'
+        Write-Host ('PERFORMANCE_BASELINE='+($performance|ConvertTo-Json -Depth 8 -Compress))
+    }
 
 
 

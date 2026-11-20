@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$Package,[Parameter(Mandatory)][string]$Sha256)
+param([Parameter(Mandatory)][string]$Package,[Parameter(Mandatory)][string]$Sha256,[switch]$SmokeOnly)
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
 if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows'){throw 'CI_ONLY'}
 . (Join-Path $PSScriptRoot '../installer/NativeFileSwap.ps1')
@@ -22,6 +22,7 @@ Check ($verified.status -eq 'VERIFIED' -and -not(Test-Path -LiteralPath $root)) 
 $rejected=$false
 try{& $installer -PackagePath $Package -ExpectedSha256 ('0'*64)|Out-Null}catch{if($_.Exception.Message -eq 'PACKAGE_SHA256_MISMATCH'){$rejected=$true}else{throw}}
 Check $rejected 'r6.wrong_package_digest_rejected'
+if(-not $SmokeOnly){
 $fixture=Join-Path $env:RUNNER_TEMP ('swap-'+[guid]::NewGuid().ToString('N'))
 $old=Join-Path $fixture 'root';$new=Join-Path $fixture 'incoming'
 try{
@@ -68,6 +69,7 @@ Invoke-NativeFileSwap -Root $Root -Incoming $Incoming -ServiceExisted $true -Val
         Check ((Test-Path (Join-Path $old 'client\old.txt')) -and -not(Test-Path (Join-Path $old 'client\new.txt')) -and -not(Test-Path (Join-Path $old '.rollback'))) 'r6.recover_after_process_kill'
     }finally{if(-not $p.HasExited){$p.Kill();$p.WaitForExit()};$p.Dispose()}
 }finally{Remove-Item -LiteralPath $fixture -Recurse -Force}
+}
 try{
     $result=& $installer -Action Install -PackagePath $Package -ExpectedSha256 $Sha256|ConvertFrom-Json
     $svc=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
@@ -81,6 +83,13 @@ try{
         $expectedHash=$installedManifest.files.PSObject.Properties[$relative].Value
         Check ((Test-Path -LiteralPath $file -PathType Leaf) -and
             (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ceq $expectedHash) "r6.packaged_update_helper_$([IO.Path]::GetFileName($file))"
+    }
+    if($SmokeOnly){
+        $rollback=& $installer -Action Rollback|ConvertFrom-Json
+        Check ($rollback.status -eq 'ROLLED_BACK_OFFLINE' -and -not(Test-Path (Join-Path $root 'native')) -and
+            -not(Test-Path (Join-Path $root 'client')) -and -not(Test-Path (Join-Path $root '.rollback'))) 'r6.smoke_offline_install_rollback'
+        Write-Host 'R6_NATIVE_PACKAGE_SMOKE=PASS (exact-commit ZIP; manifest, install, rollback)'
+        return
     }
     Check (Test-Path -LiteralPath (Join-Path $root 'native\WindowsAdminMCP.ps1') -PathType Leaf) 'r6.installed_operator_entrypoint'
     Check (-not(Get-ScheduledTask -TaskName 'WindowsAdminMCP-Tunnel' -ErrorAction SilentlyContinue)) 'r6.no_unaccepted_autostart'

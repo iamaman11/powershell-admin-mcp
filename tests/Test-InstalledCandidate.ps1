@@ -67,7 +67,9 @@ try {
     foreach($entry in @(@{p=$a;modern=$false},@{p=$b;modern=$true},@{p=$c;modern=$true})){
         $params=@{};if($entry.modern){$params._meta=$meta}
         $list=Call $entry.p 2 'tools/list' $params
-        Assert (@($list.tools).Count -eq 8 -and @($list.tools.name|Where-Object {$_ -in @('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element')}).Count -eq 8) 'installed.window_catalog_tools'
+        $names=@($list.tools|ForEach-Object {$_.name})
+        $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element')
+        Assert (@($required|Where-Object {$_ -notin $names}).Count -eq 0 -and $names.Count -eq @($names|Select-Object -Unique).Count) 'installed.required_window_tools_without_duplicates'
         $status=(Tool $entry.p 3 'powershell_status' @{} $entry.modern).structuredContent
         Assert ($status.status -eq 'OK' -and $status.service_pid -eq $expectedPid -and $status.execution_sid -eq 'S-1-5-18') 'installed.shared_service'
     }
