@@ -22,9 +22,6 @@ internal static class WindowPhysicalClick
         try
         {
             var current = target.Current;
-            if (current.IsOffscreen || IsIconic(hwnd) || !IsWindowVisible(hwnd))
-                return new(WindowActionCode.WINDOW_NOT_VISIBLE, ElapsedMs: clock.ElapsedMilliseconds,
-                    FailureStage: stage);
             if (current.ControlType != ControlType.Button &&
                 current.ControlType != ControlType.Hyperlink &&
                 current.ControlType != ControlType.MenuItem &&
@@ -38,6 +35,10 @@ internal static class WindowPhysicalClick
             // DevTools connection without stealing desktop focus or mouse position.
             var background = WindowChromeCdp.TryDispatch(hwnd, target, request, clock);
             if (background is not null) return background;
+
+            if (current.IsOffscreen || IsIconic(hwnd) || !IsWindowVisible(hwnd))
+                return new(WindowActionCode.WINDOW_NOT_VISIBLE, ElapsedMs: clock.ElapsedMilliseconds,
+                    FailureStage: stage);
 
             if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd))
                 return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
@@ -115,13 +116,17 @@ internal static class WindowPhysicalClick
         WindowFailureStage stage = WindowFailureStage.PREPARE_FOCUS;
         try
         {
-            if (request.Key is null || !target.Current.IsKeyboardFocusable ||
-                target.Current.IsOffscreen || IsIconic(hwnd) || !IsWindowVisible(hwnd))
-                return new(WindowActionCode.FOCUS_UNAVAILABLE, FailureStage: stage,
+            if (request.Key is null)
+                return new(WindowActionCode.INVALID_ARGUMENT, FailureStage: stage,
                     ElapsedMs: clock.ElapsedMilliseconds);
 
             var background = WindowChromeCdp.TryDispatch(hwnd, target, request, clock);
             if (background is not null) return background;
+
+            if (!target.Current.IsKeyboardFocusable || target.Current.IsOffscreen ||
+                IsIconic(hwnd) || !IsWindowVisible(hwnd))
+                return new(WindowActionCode.FOCUS_UNAVAILABLE, FailureStage: stage,
+                    ElapsedMs: clock.ElapsedMilliseconds);
 
             if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd))
                 return new(WindowActionCode.FOREGROUND_UNAVAILABLE,

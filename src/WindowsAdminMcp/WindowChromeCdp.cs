@@ -122,7 +122,7 @@ internal static class WindowChromeCdp
     {
         role = name = null;
         var current = element.Current;
-        if (current.IsPassword || !current.IsEnabled || current.IsOffscreen ||
+        if (current.IsPassword || !current.IsEnabled ||
             string.IsNullOrWhiteSpace(current.Name) || current.Name.Length > 128)
             return false;
         role = current.ControlType == ControlType.Button ? "button" :
@@ -219,7 +219,7 @@ internal static class WindowChromeCdp
                 !string.Equals(GetTitle(hwnd), title, StringComparison.Ordinal) ||
                 WindowCatalog.ResolveId(request.WindowId, Process.GetCurrentProcess().SessionId,
                 out var activeHwnd) != WindowResolveCode.OK || activeHwnd != hwnd ||
-                !element.Current.IsEnabled || element.Current.IsOffscreen)
+                !element.Current.IsEnabled)
                 return Rejected(WindowActionCode.STALE_ELEMENT);
             string providerResponse = "CDP_BACKGROUND";
             if (request.Action == WindowActionKind.CLICK)
