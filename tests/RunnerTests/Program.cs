@@ -137,7 +137,7 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
     {
         try
         {
-            using var form = new System.Windows.Forms.Form { Text = "CI_UIA_OWNED_WINDOW", Width = 330, Height = 300 };
+            using var form = new System.Windows.Forms.Form { Text = "CI_UIA_OWNED_WINDOW", Width = 330, Height = 340 };
             using var button = new System.Windows.Forms.Button
                 { Text = "CI_UIA_OWNED_BUTTON", AccessibleName = "CI_UIA_OWNED_BUTTON", Width = 250 };
             using var input = new System.Windows.Forms.TextBox
@@ -171,6 +171,15 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                 keyboardButton.AccessibleName = "CI_UIA_KEY_ACCEPTED";
             };
             form.Controls.Add(keyboardButton);
+            var delayedButton = new System.Windows.Forms.Button
+                { Text = "CI_UIA_PENDING", AccessibleName = "CI_UIA_PENDING",
+                  Top = 244, Width = 250 };
+            form.Controls.Add(delayedButton);
+            form.Controls.Add(new System.Windows.Forms.GroupBox
+            {
+                Text = "CI_UIA_NONFOCUSABLE_GROUP", AccessibleName = "CI_UIA_NONFOCUSABLE_GROUP",
+                Left = 266, Top = 205, Width = 45, Height = 30
+            });
             // Emulate Chromium's deeply nested ControlView hierarchy without a browser dependency.
             var nested = new System.Windows.Forms.Panel
                 { Left = 10, Top = 142, Width = 275, Height = 42,
@@ -259,21 +268,29 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         _ = Task.Run(async () =>
         {
             await Task.Delay(200);
-            created.Form.BeginInvoke(new Action(() => created.Form.Controls.Add(
-                new System.Windows.Forms.Label
-                {
-                    Text = "CI_UIA_DELAYED_READY", AccessibleName = "CI_UIA_DELAYED_READY",
-                    Top = 244, Width = 250, Height = 20
-                })));
+            created.Form.BeginInvoke(new Action(() =>
+            {
+                var target = created.Form.Controls.OfType<System.Windows.Forms.Button>()
+                    .Single(b => b.AccessibleName == "CI_UIA_PENDING");
+                target.Text = "CI_UIA_DELAYED_READY";
+                target.AccessibleName = "CI_UIA_DELAYED_READY";
+            }));
         });
         var delayed = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 10,
-            realWindowId, nameContains: "CI_UIA_DELAYED_READY", roleFilter: WindowRoleFilter.TEXT,
+            realWindowId, nameContains: "CI_UIA_DELAYED_READY", roleFilter: WindowRoleFilter.BUTTON,
             waitMs: 1200)).WaitAsync(TimeSpan.FromSeconds(5));
+        Console.WriteLine($"DELAYED_SEARCH status={delayed.Status} nodes={delayed.Elements.Length}");
         Check(delayed.Status == WindowInspectCode.COMPLETED &&
             delayed.Elements.Length == 1 && delayed.Elements[0].Name == "CI_UIA_DELAYED_READY",
             "windows.wait_for_late_react_style_element_without_focus");
+        var nonFocusable = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 10,
+            realWindowId, nameContains: "CI_UIA_NONFOCUSABLE_GROUP", includeDetails: true))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        Check(nonFocusable.Status == WindowInspectCode.COMPLETED &&
+            nonFocusable.Elements.Length == 1 && nonFocusable.Elements[0].KeyboardFocusable == false,
+            "windows.inspect_identifies_nonfocusable_group");
         var rejectedKeyboard = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
-            new WindowActionRequest(realWindowId, delayed.Elements[0].ElementId,
+            new WindowActionRequest(realWindowId, nonFocusable.Elements[0].ElementId,
                 WindowActionKind.KEY_PRESS, null, Key: WindowKey.SPACE)))
             .WaitAsync(TimeSpan.FromSeconds(5));
         Check(rejectedKeyboard.Status == WindowActionCode.FOCUS_UNAVAILABLE &&
