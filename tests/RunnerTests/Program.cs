@@ -169,6 +169,13 @@ Check(WindowChromeCdp.ProfileLabelMatches("Valer", "Valer") &&
     !WindowChromeCdp.ProfileLabelMatches("Another Valer", "Valer") &&
     !WindowChromeCdp.ProfileLabelMatches("Valer test profile", "Valer"),
     "chrome.profile_delimiters_are_unambiguous");
+Check(WindowAction.WindowTitleMatches("Example Domain — Camoufox", "Example Domain") &&
+    WindowAction.WindowTitleMatches("Example Domain - Google Chrome", "Example Domain") &&
+    WindowAction.WindowTitleMatches("Exact title", "Exact title") &&
+    !WindowAction.WindowTitleMatches("Unrelated Example Domain — Camoufox", "Example Domain") &&
+    !WindowAction.WindowTitleMatches("Example Domainish — Camoufox", "Example Domain") &&
+    !WindowAction.WindowTitleMatches("Example Domain", "example domain"),
+    "windows.window_title_matches_exact_or_browser_suffix_not_substrings");
 var updateRequested = System.Text.Json.JsonSerializer.Deserialize<UpdateTaskWire>(
     """{"status":"REQUESTED","operation_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","task":"WindowsAdminMCP-OperatorUpdate"}""", PipeWire.Json);
 var updateIdle = System.Text.Json.JsonSerializer.Deserialize<UpdateTaskWire>(
@@ -260,12 +267,13 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
     int pagedClickCount = 0;
     int keyboardClickCount = 0;
     int asyncDispatchCount = 0;
+    int titleDispatchCount = 0;
     System.Windows.Forms.Form? testCover = null;
     var uiThread = new Thread(() =>
     {
         try
         {
-            using var form = new System.Windows.Forms.Form { Text = "CI_UIA_OWNED_WINDOW", Width = 330, Height = 340 };
+            using var form = new System.Windows.Forms.Form { Text = "CI_UIA_OWNED_WINDOW", Width = 330, Height = 390 };
             using var button = new System.Windows.Forms.Button
                 { Text = "CI_UIA_OWNED_BUTTON", AccessibleName = "CI_UIA_OWNED_BUTTON", Width = 250 };
             using var input = new System.Windows.Forms.TextBox
@@ -320,6 +328,22 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                 timer.Start();
             };
             form.Controls.Add(asyncButton);
+            var titleButton = new System.Windows.Forms.Button
+                { Text = "CI_UIA_TITLE_START", AccessibleName = "CI_UIA_TITLE_START",
+                  Top = 316, Width = 250 };
+            titleButton.Click += (_, _) =>
+            {
+                Interlocked.Increment(ref titleDispatchCount);
+                var timer = new System.Windows.Forms.Timer { Interval = 800 };
+                timer.Tick += (_, _) =>
+                {
+                    timer.Stop();
+                    form.Text = "CI_UIA_TITLE_READY — Fixture";
+                    timer.Dispose();
+                };
+                timer.Start();
+            };
+            form.Controls.Add(titleButton);
             // Emulate Chromium's deeply nested ControlView hierarchy without a browser dependency.
             var nested = new System.Windows.Forms.Panel
                 { Left = 10, Top = 142, Width = 275, Height = 42,
@@ -376,6 +400,9 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         using var current = Process.GetCurrentProcess();
         var realWindowId = WindowCatalog.FormatId(new WindowIdentity(created.Handle.ToInt64(),
             current.Id, current.StartTime.ToFileTimeUtc(), current.SessionId));
+        Check(WindowCatalog.TryReadTitle(realWindowId, current.SessionId, out var initialTitle) &&
+            initialTitle == "CI_UIA_OWNED_WINDOW",
+            "windows.read_title_of_exact_verified_window_identity");
         var result = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 40, realWindowId))
             .WaitAsync(TimeSpan.FromSeconds(5));
         Check(result.Status == WindowInspectCode.COMPLETED &&
@@ -475,6 +502,25 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             asyncResult.ObservationState == WindowObservationState.OBSERVED &&
             asyncClock.ElapsedMilliseconds >= 1300 && Volatile.Read(ref asyncDispatchCount) == 1,
             "windows.async_provider_effect_observed_after_one_second_without_redispach");
+        created.Form.Invoke(new Action(() => testCover!.Text = "CI_UIA_TITLE_READY — Fixture"));
+        Check(WindowCatalog.List(100, current.SessionId).Windows.Any(w =>
+                w.WindowId != realWindowId && w.Title == "CI_UIA_TITLE_READY — Fixture") &&
+            !WindowAction.WindowTitlePresent(realWindowId, "CI_UIA_TITLE_READY"),
+            "windows.title_observation_rejects_matching_unrelated_window");
+        var titleTree = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 10,
+            realWindowId, nameContains: "CI_UIA_TITLE_START", roleFilter: WindowRoleFilter.BUTTON));
+        var titleTarget = titleTree.Elements.Single(e => e.Name == "CI_UIA_TITLE_START");
+        var titleClock = Stopwatch.StartNew();
+        var titleResult = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, titleTarget.ElementId, WindowActionKind.INVOKE,
+                null, ExpectedName: "CI_UIA_TITLE_READY", ExpectedChange: WindowExpectedChange.APPEARS,
+                ExpectedKind: WindowExpectedKind.WINDOW_TITLE, ObservationTimeoutMs: 4000)))
+            .WaitAsync(TimeSpan.FromSeconds(6));
+        Check(titleResult.EffectState == WindowEffectState.EFFECT_VERIFIED &&
+            titleResult.ObservationState == WindowObservationState.OBSERVED &&
+            titleClock.ElapsedMilliseconds >= 600 && Volatile.Read(ref titleDispatchCount) == 1 &&
+            WindowAction.WindowTitlePresent(realWindowId, "CI_UIA_TITLE_READY"),
+            "windows.async_title_change_observed_on_target_hwnd_exactly_once");
         var inputTarget = result.Elements.Single(e => e.Role.Contains("Edit", StringComparison.Ordinal));
         var edit = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, inputTarget.ElementId, WindowActionKind.SET_VALUE,
