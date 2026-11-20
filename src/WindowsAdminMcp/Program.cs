@@ -71,7 +71,7 @@ else if (args is ["window-inspect-worker"])
     WindowInspectResult result;
     try
     {
-        char[] chars = new char[2049];
+        char[] chars = new char[8193];
         int length = 0;
         while (length < chars.Length)
         {
@@ -79,12 +79,13 @@ else if (args is ["window-inspect-worker"])
             if (read == 0) break;
             length += read;
         }
-        var req = length <= 2048 ? System.Text.Json.JsonSerializer.Deserialize<WindowInspectRequest>(
+        var req = length <= 8192 ? System.Text.Json.JsonSerializer.Deserialize<WindowInspectRequest>(
             new string(chars, 0, length), PipeWire.Json) : null;
         result = req is null ? new(WindowInspectCode.INVALID_ARGUMENT, []) :
             WindowInspector.InspectInWorker(req.WindowId, req.MaxDepth, req.MaxElements,
                 req.StartPath, req.StartElementId, req.Offset, req.IncludeDetails,
-                req.NameContains, req.RoleFilter, req.WaitMs, req.Scope, req.TabId);
+                req.NameContains, req.RoleFilter, req.WaitMs, req.Scope, req.TabId,
+                req.ExpectedProfile, req.ExpectedOrigin, req.ExpectedUrl);
     }
     catch (System.Text.Json.JsonException)
     { result = new(WindowInspectCode.INVALID_ARGUMENT, []); }

@@ -74,6 +74,27 @@ Check(WindowInspector.ValidArguments(testWindowId, 16, 50,
     WindowInspector.ArgumentError(testWindowId, 16, 11, includeDetails: true)?.Contains(
         "max_elements", StringComparison.Ordinal) == true,
     "windows.typed_chrome_tab_scope_and_precise_invalid_argument");
+Check(WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.TABS, expectedProfile: "Valer",
+        expectedOrigin: "https://example.com") &&
+    WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.TAB, tabId: "0123456789abcdef0123456789abcdef",
+        expectedUrl: "https://example.com/form?a=1") &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.WINDOW, expectedProfile: "Valer") &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.TABS, expectedOrigin: "https://example.com/other") &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.TABS, expectedOrigin: "https://example.com",
+        expectedUrl: "https://other.example/form") &&
+    WindowInspector.ArgumentError(testWindowId, 16, 50, scope: WindowInspectScope.TABS,
+        expectedOrigin: "not an origin")?.StartsWith("expected_origin:") == true &&
+    WindowChromeCdp.MatchesContext("https://example.com/form?a=1#tab", "https://example.com",
+        "https://example.com/form?a=1#tab") &&
+    !WindowChromeCdp.MatchesContext("https://example.com/form?a=2", "https://example.com",
+        "https://example.com/form?a=1") &&
+    !WindowChromeCdp.MatchesContext("https://other.example/form", "https://example.com", null),
+    "chrome.explicit_native_profile_origin_and_full_url_scope");
 Check(WindowInspector.InspectCore(IntPtr.Zero, 1, 20).Status == WindowInspectCode.INVALID_ARGUMENT,
     "windows.inspect_reject_null_hwnd");
 var invalidInspect = await WindowTools.InspectWindow("invalid");
@@ -114,6 +135,20 @@ Check(WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, W
     !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.INVOKE, "unexpected")) &&
     !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.SET_VALUE, new string('x', 4097))),
     "windows.action_bounded_arguments");
+Check(WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId,
+        WindowActionKind.SET_VALUE, "next", ExpectedName: "CI_UIA_INPUT_NAME",
+        ExpectedChange: WindowExpectedChange.APPEARS, ExpectedKind: WindowExpectedKind.UIA_VALUE,
+        ExpectedValue: "next")) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId,
+        WindowActionKind.INVOKE, null, ExpectedKind: WindowExpectedKind.UIA_VALUE,
+        ExpectedValue: "next")) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId,
+        WindowActionKind.INVOKE, null, ExpectedName: "field",
+        ExpectedChange: WindowExpectedChange.APPEARS, ExpectedKind: WindowExpectedKind.UIA_ELEMENT,
+        ExpectedValue: "next")) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId,
+        WindowActionKind.INVOKE, null, ExpectedProfile: "Valer")),
+    "windows.value_postcondition_and_browser_scope_are_typed");
 Check(WindowChromeCdp.ValidTargetId("0123456789abcdef0123456789abcdef") &&
     !WindowChromeCdp.ValidTargetId("https://example.com") &&
     !WindowChromeCdp.ValidTabElementRef("c1:1:bad:1:bad:deadbeef"),
@@ -122,6 +157,16 @@ using (var protectedNode = System.Text.Json.JsonDocument.Parse(
     "{\"properties\":[{\"name\":\"protected\",\"value\":{\"value\":true}}]}"))
     Check(WindowChromeCdp.IsProtectedAx(protectedNode.RootElement),
         "chrome.cdp_protected_fields_are_not_actionable");
+using (var ax = System.Text.Json.JsonDocument.Parse("""
+    {"nodes":[{"name":{"value":"test field"},"value":{"value":"updated"}},
+              {"name":{"value":"hidden"},"value":{"value":"secret"},
+               "properties":[{"name":"protected","value":{"value":true}}]}]}
+    """))
+    Check(WindowChromeCdp.HasAxValue(ax.RootElement, "test field", "updated") &&
+        !WindowChromeCdp.HasAxValue(ax.RootElement, "test field", "wrong") &&
+        !WindowChromeCdp.HasAxValue(ax.RootElement, "hidden", "secret") &&
+        !WindowChromeCdp.HasAxValue(ax.RootElement, "unknown", ""),
+        "chrome.cdp_value_postcondition_is_exact_and_ignores_protected_fields");
 Check(new WindowActionResult(WindowActionCode.COMPLETED).EffectState == WindowEffectState.EFFECT_UNKNOWN &&
     new WindowActionResult(WindowActionCode.COMPLETED, ExpectedStateObserved: true).EffectState ==
         WindowEffectState.EFFECT_VERIFIED &&
@@ -376,12 +421,25 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         var inputTarget = result.Elements.Single(e => e.Role.Contains("Edit", StringComparison.Ordinal));
         var edit = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, inputTarget.ElementId, WindowActionKind.SET_VALUE,
-                "CI_UIA_UPDATED_VALUE"))).WaitAsync(TimeSpan.FromSeconds(5));
+                "CI_UIA_UPDATED_VALUE", ExpectedName: "CI_UIA_INPUT_NAME",
+                ExpectedChange: WindowExpectedChange.APPEARS,
+                ExpectedKind: WindowExpectedKind.UIA_VALUE,
+                ExpectedValue: "CI_UIA_UPDATED_VALUE"))).WaitAsync(TimeSpan.FromSeconds(5));
         var edited = (string)created.Form.Invoke(new Func<string>(() => created.Input.Text));
-        Check(edit.Status == WindowActionCode.COMPLETED && edited == "CI_UIA_UPDATED_VALUE",
-            "windows.action_set_value_occluded_edit");
+        Check(edit.Status == WindowActionCode.COMPLETED && edited == "CI_UIA_UPDATED_VALUE" &&
+            edit.EffectState == WindowEffectState.EFFECT_VERIFIED,
+            "windows.action_set_value_occluded_edit_with_verified_property");
         Check(edit.ForegroundChanged == false && edit.TargetActivated == false,
             "windows.action_set_value_preserves_foreground");
+        var repeatedEdit = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, inputTarget.ElementId, WindowActionKind.SET_VALUE,
+                "CI_UIA_UPDATED_VALUE", ExpectedName: "CI_UIA_INPUT_NAME",
+                ExpectedChange: WindowExpectedChange.APPEARS,
+                ExpectedKind: WindowExpectedKind.UIA_VALUE,
+                ExpectedValue: "CI_UIA_UPDATED_VALUE"))).WaitAsync(TimeSpan.FromSeconds(5));
+        Check(repeatedEdit.Status == WindowActionCode.EXPECTED_STATE_ALREADY_TRUE &&
+            (string)created.Form.Invoke(new Func<string>(() => created.Input.Text)) == "CI_UIA_UPDATED_VALUE",
+            "windows.value_precondition_prevents_repeated_dispatch");
         var checkboxTarget = result.Elements.Single(e => e.Role.Contains("CheckBox", StringComparison.Ordinal));
         var toggle = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, checkboxTarget.ElementId, WindowActionKind.TOGGLE, null)))

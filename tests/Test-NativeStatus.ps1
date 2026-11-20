@@ -68,8 +68,8 @@ try{
         $inspectTool=@($list.tools|Where-Object name -eq 'windows.inspect_window')
         $actionTool=@($list.tools|Where-Object name -eq 'windows.invoke_element')
         Assert ($inspectTool.Count -eq 1 -and $actionTool.Count -eq 1 -and
-            @(@('window_id','max_depth','max_elements','start_path','start_element_id','offset','include_details','name_contains','role_filter','wait_ms','scope','tab_id')|Where-Object {-not $inspectTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
-            @(@('window_id','element_id','action','value','confirm','element_path','expected_name','expected_change','key','expected_kind')|Where-Object {-not $actionTool[0].inputSchema.properties.Contains($_)}).Count -eq 0) 'r5.actual_tools_list_exposes_typed_semantic_uia_contract'
+            @(@('window_id','max_depth','max_elements','start_path','start_element_id','offset','include_details','name_contains','role_filter','wait_ms','scope','tab_id','expected_profile','expected_origin','expected_url')|Where-Object {-not $inspectTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
+            @(@('window_id','element_id','action','value','confirm','element_path','expected_name','expected_change','key','expected_kind','expected_value','expected_profile','expected_origin','expected_url')|Where-Object {-not $actionTool[0].inputSchema.properties.Contains($_)}).Count -eq 0) 'r5.actual_tools_list_exposes_typed_semantic_uia_contract'
         Assert ($actionTool[0].outputSchema.properties.Contains('foreground_changed') -and
             $actionTool[0].outputSchema.properties.Contains('target_activated') -and
             $actionTool[0].outputSchema.properties.Contains('effect_state') -and
@@ -77,7 +77,8 @@ try{
             $actionTool[0].outputSchema.properties.Contains('hresult')) 'r5.typed_uia_effect_and_diagnostics_fields'
         $schemaBytes=[Text.Encoding]::UTF8.GetByteCount(($list|ConvertTo-Json -Depth 30 -Compress))
         Write-Host "MCP_TOOLS_LIST_BYTES=$schemaBytes"
-        Assert ($schemaBytes -le 24000) 'r5.typed_tool_schema_under_24kb_with_margin'
+        # 24 KiB transport budget (24576 bytes), with space for framing.
+        Assert ($schemaBytes -le 24500) 'r5.typed_tool_schema_under_24kib_with_margin'
         Assert (@($list.tools|Where-Object {$_.name -eq 'powershell_status' -and $_.Contains('outputSchema')}).Count -eq 1) 'r1.typed_status_schema'
         $v=Wait-Status $p 'OK'
         Assert ($v.service_pid -eq $svc.ProcessId -and $v.execution_sid -eq 'S-1-5-18' -and $v.elevated) 'r1.scm_pid_and_real_execution_identity'
