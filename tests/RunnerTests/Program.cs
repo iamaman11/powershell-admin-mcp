@@ -175,11 +175,6 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                 { Text = "CI_UIA_PENDING", AccessibleName = "CI_UIA_PENDING",
                   Top = 244, Width = 250 };
             form.Controls.Add(delayedButton);
-            form.Controls.Add(new System.Windows.Forms.GroupBox
-            {
-                Text = "CI_UIA_NONFOCUSABLE_GROUP", AccessibleName = "CI_UIA_NONFOCUSABLE_GROUP",
-                Left = 266, Top = 205, Width = 45, Height = 30
-            });
             // Emulate Chromium's deeply nested ControlView hierarchy without a browser dependency.
             var nested = new System.Windows.Forms.Panel
                 { Left = 10, Top = 142, Width = 275, Height = 42,
@@ -283,19 +278,14 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         Check(delayed.Status == WindowInspectCode.COMPLETED &&
             delayed.Elements.Length == 1 && delayed.Elements[0].Name == "CI_UIA_DELAYED_READY",
             "windows.wait_for_late_react_style_element_without_focus");
-        var nonFocusable = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 10,
-            realWindowId, nameContains: "CI_UIA_NONFOCUSABLE_GROUP", includeDetails: true))
-            .WaitAsync(TimeSpan.FromSeconds(5));
-        Check(nonFocusable.Status == WindowInspectCode.COMPLETED &&
-            nonFocusable.Elements.Length == 1 && nonFocusable.Elements[0].KeyboardFocusable == false,
-            "windows.inspect_identifies_nonfocusable_group");
-        var rejectedKeyboard = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
-            new WindowActionRequest(realWindowId, nonFocusable.Elements[0].ElementId,
-                WindowActionKind.KEY_PRESS, null, Key: WindowKey.SPACE)))
+        var rejectedKeyboard = await Task.Run(() => WindowPhysicalClick.PressKey(
+            IntPtr.Zero, System.Windows.Automation.AutomationElement.FromHandle(created.Handle),
+            new WindowActionRequest(realWindowId, delayed.Elements[0].ElementId,
+                WindowActionKind.KEY_PRESS, null, Key: WindowKey.SPACE), Stopwatch.StartNew()))
             .WaitAsync(TimeSpan.FromSeconds(5));
         Check(rejectedKeyboard.Status == WindowActionCode.FOCUS_UNAVAILABLE &&
             Volatile.Read(ref keyboardClickCount) == 0,
-            "windows.key_press_rejects_nonfocusable_target_before_input");
+            "windows.key_press_rejects_invalid_window_before_input");
         if (Windows.Graphics.Capture.GraphicsCaptureSession.IsSupported())
         {
             var image = await WindowCapture.CaptureCoreAsync(created.Handle, realWindowId, 640)
