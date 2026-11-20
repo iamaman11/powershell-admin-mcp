@@ -266,10 +266,18 @@ function Assert-InstalledRollbackTarget([string]$scriptDirectory,[string]$instal
         }
     }
 }
+function Test-UpdaterPrincipal([string]$userId,[string]$account,[string]$sid=''){
+    if($userId -ieq $account -or ($sid -and $userId -ceq $sid)){return $true}
+    if(-not $sid -or -not $userId){return $false}
+    try{
+        $resolved=([Security.Principal.NTAccount]::new($userId)).Translate([Security.Principal.SecurityIdentifier])
+        return $resolved.Value -ceq $sid
+    }catch{return $false}
+}
 function Test-ScheduledUpdateIdentity($task,[string]$account,[string]$updater,[string]$operation,
                                       [string]$sid='',[string]$pwsh=''){
     return $null -ne $task -and $task.State.ToString() -eq 'Running' -and
-        ($task.Principal.UserId -ieq $account -or ($sid -and $task.Principal.UserId -ceq $sid)) -and
+        (Test-UpdaterPrincipal $task.Principal.UserId $account $sid) -and
         ($pwsh -eq '' -or $task.Actions[0].Execute -ieq $pwsh) -and
         $task.Principal.LogonType.ToString() -eq 'Interactive' -and
         $task.Principal.RunLevel.ToString() -eq 'Highest' -and @($task.Actions).Count -eq 1 -and

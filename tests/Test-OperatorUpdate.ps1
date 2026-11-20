@@ -14,6 +14,13 @@ $task=[pscustomobject]@{State='Running';Principal=[pscustomobject]@{UserId='ACME
 Check (Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript) 'operator.strict_interactive_scheduler_definition'
 Check (Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript $operatorId) 'operator.updater_checks_running_task_and_operation'
 Check (-not(Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript ('b'*32))) 'operator.rejects_foreign_operation'
+$actual=[Security.Principal.WindowsIdentity]::GetCurrent()
+$task.Principal.UserId=$actual.User.Translate([Security.Principal.NTAccount]).Value
+Check (Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript $actual.User.Value) 'operator.scheduler_alias_resolves_exact_sid'
+Check (Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript $operatorId $actual.User.Value) 'operator.updater_scheduler_alias_resolves_exact_sid'
+Check (-not(Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript 'S-1-5-18') -and
+    -not(Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript $operatorId 'S-1-5-18')) 'operator.rejects_foreign_principal_sid'
+$task.Principal.UserId='ACME\Operator'
 $task.Principal.LogonType='Password'
 Check (-not(Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript) -and
     -not(Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript $operatorId)) 'operator.rejects_background_password_task'
