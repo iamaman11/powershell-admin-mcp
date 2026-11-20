@@ -27,10 +27,10 @@ public sealed record WindowElement(
     [property: JsonPropertyName("password")] bool Password,
     [property: JsonPropertyName("patterns")] string[] Patterns,
     [property: JsonPropertyName("element_id")] string ElementId,
-    [property: JsonPropertyName("bounds")] WindowBounds? Bounds = null,
-    [property: JsonPropertyName("keyboard_focusable")] bool? KeyboardFocusable = null,
-    [property: JsonPropertyName("has_keyboard_focus")] bool? HasKeyboardFocus = null,
-    [property: JsonPropertyName("clickable_point")] WindowPoint? ClickablePoint = null);
+    [property: JsonPropertyName("bounds"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] WindowBounds? Bounds = null,
+    [property: JsonPropertyName("keyboard_focusable"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? KeyboardFocusable = null,
+    [property: JsonPropertyName("has_keyboard_focus"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? HasKeyboardFocus = null,
+    [property: JsonPropertyName("clickable_point"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] WindowPoint? ClickablePoint = null);
 
 public sealed record WindowBounds(int X, int Y, int Width, int Height);
 public sealed record WindowPoint(int X, int Y);

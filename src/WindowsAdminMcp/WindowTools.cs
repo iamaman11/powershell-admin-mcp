@@ -33,7 +33,7 @@ public sealed record WindowListResult(
 public sealed class WindowTools
 {
     [McpServerTool(Name = "windows.list_windows", UseStructuredContent = true),
-     Description("List up to 100 top-level USER desktop windows, including occluded ones. Never changes focus or crosses sessions.")]
+     Description("List <=100 USER windows, including occluded; no focus change.")]
     public static async Task<WindowListResult> ListWindows(int max_windows = 50,
         CancellationToken cancellationToken = default)
     {
@@ -59,7 +59,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.inspect_window", UseStructuredContent = true),
-     Description("Read up to 100 UIA elements per page, including background windows. include_details=true (max 10) returns bounds, clickable point and keyboard-focus diagnostics. No focus or input. offset/next_offset paginate; start_path + fresh start_element_id verify a subtree. Isolated 5-second worker.")]
+     Description("Read UIA pages without focus. offset paginates; start_path+start_element_id verify subtree. include_details (max 10): geometry/focus.")]
     public static async Task<WindowInspectResult> InspectWindow(string window_id, int max_depth = 12,
         int max_elements = 100, string? start_path = null, string? start_element_id = null,
         int offset = 0, bool include_details = false, CancellationToken cancellationToken = default)
@@ -88,7 +88,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.capture_window", UseStructuredContent = true),
-     Description("Capture a USER window with Windows Graphics Capture, including occluded windows, without focus. PNG max 2 MB; max_width 256-1920. Minimized/protected may fail; no desktop fallback.")]
+     Description("WGC capture of USER window, even occluded; no focus. PNG <=2 MB; protected/minimized may fail.")]
     public static async Task<ModelContextProtocol.Protocol.CallToolResult> CaptureWindow(string window_id,
         int max_width = 1280, CancellationToken cancellationToken = default)
     {
@@ -112,7 +112,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.invoke_element", UseStructuredContent = true),
-     Description("Typed action on a fresh 30-second element_id, confirm=true. INVOKE/SELECT/TOGGLE/SET_VALUE use background-first UIA without AutoSetFocus. CLICK explicitly activates the window, verifies the live hit target, and injects one physical click. Optional expected_name + expected_change verify an observable UI transition; without them COMPLETED means dispatched, not effect verified. Never retry unknown effects.")]
+     Description("UIA INVOKE/SELECT/TOGGLE/SET_VALUE or guarded CLICK. Fresh element_id, confirm=true. expected_name/expected_change verify change. Never auto-retry unknown.")]
     public static async Task<WindowActionResult> InvokeElement(string window_id, string element_id,
         WindowActionKind action, string? value = null, bool confirm = false,
         string? element_path = null, string? expected_name = null,
