@@ -221,6 +221,7 @@ internal static class WindowChromeCdp
                 out var activeHwnd) != WindowResolveCode.OK || activeHwnd != hwnd ||
                 !element.Current.IsEnabled || element.Current.IsOffscreen)
                 return Rejected(WindowActionCode.STALE_ELEMENT);
+            string providerResponse = "CDP_BACKGROUND";
             if (request.Action == WindowActionKind.CLICK)
             {
                 var box = await cdp.Call("DOM.getBoxModel", new { backendNodeId }, sessionId);
@@ -228,9 +229,9 @@ internal static class WindowChromeCdp
                 if (!TryPoint(box.GetProperty("model").GetProperty("content"),
                     metrics.GetProperty("cssVisualViewport"), out double x, out double y))
                     return Rejected(WindowActionCode.CDP_TARGET_NOT_VISIBLE);
-                // The rectangle alone is insufficient: a popover or overlay may
-                // cover it. Require the actual hit element to be the selected
-                // DOM node or one of its children before dispatching a click.
+                // A different desktop window is irrelevant to CDP. Within the
+                // page, never send pointer input to a covering popup instead
+                // of the requested control: use a targeted DOM click there.
                 var resolvedNode = await cdp.Call("DOM.resolveNode", new { backendNodeId }, sessionId);
                 string objectId = resolvedNode.GetProperty("object").GetProperty("objectId").GetString()!;
                 var hit = await cdp.Call("Runtime.callFunctionOn", new
@@ -241,14 +242,39 @@ internal static class WindowChromeCdp
                     returnByValue = true,
                     silent = true
                 }, sessionId);
-                if (!hit.GetProperty("result").TryGetProperty("value", out var hitVerified) ||
-                    hitVerified.ValueKind != JsonValueKind.True)
-                    return Rejected(WindowActionCode.CDP_TARGET_NOT_VISIBLE);
-                dispatched = true;
-                await cdp.Call("Input.dispatchMouseEvent", new { type = "mousePressed", x, y,
-                    button = "left", clickCount = 1 }, sessionId);
-                await cdp.Call("Input.dispatchMouseEvent", new { type = "mouseReleased", x, y,
-                    button = "left", clickCount = 1 }, sessionId);
+                bool pointerHitsTarget = hit.GetProperty("result").TryGetProperty("value", out var hitVerified) &&
+                    hitVerified.ValueKind == JsonValueKind.True;
+                if (pointerHitsTarget)
+                {
+                    dispatched = true;
+                    await cdp.Call("Input.dispatchMouseEvent", new { type = "mousePressed", x, y,
+                        button = "left", clickCount = 1 }, sessionId);
+                    await cdp.Call("Input.dispatchMouseEvent", new { type = "mouseReleased", x, y,
+                        button = "left", clickCount = 1 }, sessionId);
+                }
+                else
+                {
+                    // No arbitrary script input: the function is fixed and
+                    // its receiver is the single verified backend DOM node.
+                    // Disabled/inert controls still cannot be activated.
+                    dispatched = true;
+                    var semantic = await cdp.Call("Runtime.callFunctionOn", new
+                    {
+                        objectId,
+                        functionDeclaration = "function() { if (!this.isConnected || typeof this.click !== 'function' || this.matches(':disabled') || this.closest('[inert]')) return false; this.click(); return true; }",
+                        returnByValue = true,
+                        silent = true
+                    }, sessionId);
+                    if (semantic.TryGetProperty("exceptionDetails", out _))
+                        throw new InvalidOperationException("CDP_DOM_CLICK_EXCEPTION");
+                    if (!semantic.GetProperty("result").TryGetProperty("value", out var invoked) ||
+                        invoked.ValueKind != JsonValueKind.True)
+                    {
+                        dispatched = false;
+                        return Rejected(WindowActionCode.CDP_TARGET_NOT_VISIBLE);
+                    }
+                    providerResponse = "CDP_DOM_CLICK";
+                }
             }
             else
             {
@@ -270,7 +296,7 @@ internal static class WindowChromeCdp
             return new(WindowActionCode.COMPLETED,
                 ForegroundChanged: foregroundAtEntry != foregroundAtExit,
                 TargetActivated: foregroundAtEntry != hwnd && foregroundAtExit == hwnd,
-                ProviderResponse: "CDP_BACKGROUND", ElapsedMs: clock.ElapsedMilliseconds);
+                ProviderResponse: providerResponse, ElapsedMs: clock.ElapsedMilliseconds);
         }
         catch (Exception e) when (e is WebSocketException or IOException or JsonException or
                                    OperationCanceledException or InvalidOperationException or KeyNotFoundException)
