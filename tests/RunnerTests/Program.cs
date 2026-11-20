@@ -46,6 +46,14 @@ Check(WindowCatalog.ResolveId(staleWindowId, 1, out _) == WindowResolveCode.STAL
 Check(WindowInspector.ValidArguments(testWindowId, 0, 1) &&
     WindowInspector.ValidArguments(testWindowId, 16, 100) &&
     WindowInspector.ValidArguments(testWindowId, 16, 10, includeDetails: true) &&
+    WindowInspector.ValidArguments(testWindowId, 16, 10, nameContains: "status",
+        roleFilter: WindowRoleFilter.BUTTON, waitMs: 1500) &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 10, waitMs: 50) &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 10, nameContains: "x", waitMs: 1501) &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 10, nameContains: " ") &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 10, nameContains: new string('x', 129)) &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 10,
+        roleFilter: (WindowRoleFilter)int.MaxValue) &&
     !WindowInspector.ValidArguments(testWindowId, 16, 100, includeDetails: true) &&
     WindowInspector.ValidArguments(testWindowId, 16, 100, offset: 100) &&
     !WindowInspector.ValidArguments(testWindowId, 16, 1, "0.1", null) &&
@@ -71,6 +79,14 @@ Check(WindowInspector.TryParsePath("0.1.0.25", out var parsedPath) &&
     !WindowInspector.TryParsePath("0.2001", out _), "windows.inspect_strict_path_contract");
 Check(WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.INVOKE, null)) &&
     WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.CLICK, null)) &&
+    WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.KEY_PRESS,
+        null, Key: WindowKey.ENTER)) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.KEY_PRESS,
+        null)) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.KEY_PRESS,
+        null, Key: (WindowKey)99)) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.CLICK,
+        null, Key: WindowKey.SPACE)) &&
     WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.CLICK, null,
         ExpectedName: "CI_UIA_CLICKED", ExpectedChange: WindowExpectedChange.APPEARS)) &&
     !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.CLICK, null,
@@ -87,6 +103,20 @@ Check(new WindowActionResult(WindowActionCode.COMPLETED).EffectState == WindowEf
     new WindowActionResult(WindowActionCode.STALE_ELEMENT).EffectState == WindowEffectState.NO_EFFECT &&
     new WindowActionResult(WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT, EffectUnknown: true).EffectState ==
         WindowEffectState.EFFECT_UNKNOWN, "windows.action_effect_state_never_assumes_success");
+var providerFailed = new WindowActionResult(WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT,
+    EffectUnknown: true, FailureStage: WindowFailureStage.DISPATCH_UIA,
+    HResult: "80040200", ExceptionType: "COMException", ProviderResponse: "FAIL");
+var reconciled = WindowAction.ReconcileObserved(providerFailed, true);
+var unverified = WindowAction.ReconcileObserved(providerFailed, false);
+Check(reconciled.Status == WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT &&
+    reconciled.EffectState == WindowEffectState.EFFECT_VERIFIED && !reconciled.EffectUnknown &&
+    reconciled.ExpectedStateObserved == true &&
+    reconciled.HResult == providerFailed.HResult &&
+    reconciled.FailureStage == WindowFailureStage.DISPATCH_UIA &&
+    reconciled.ProviderResponse == providerFailed.ProviderResponse &&
+    unverified.EffectState == WindowEffectState.EFFECT_UNKNOWN &&
+    unverified.FailureStage == WindowFailureStage.DISPATCH_UIA,
+    "windows.provider_error_reconciles_actual_effect_without_retry_or_losing_diagnostics");
 var invalidAction = await WindowTools.InvokeElement("bad", "bad", WindowActionKind.INVOKE, confirm: true);
 Check(invalidAction.Status == WindowActionCode.INVALID_ARGUMENT, "windows.action_reject_bad_ref_before_ipc");
 var missingConfirmation = await WindowTools.InvokeElement(testWindowId, freshElementId, WindowActionKind.INVOKE);
@@ -101,12 +131,13 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
     int clickCount = 0;
     int deepClickCount = 0;
     int pagedClickCount = 0;
+    int keyboardClickCount = 0;
     System.Windows.Forms.Form? testCover = null;
     var uiThread = new Thread(() =>
     {
         try
         {
-            using var form = new System.Windows.Forms.Form { Text = "CI_UIA_OWNED_WINDOW", Width = 330, Height = 230 };
+            using var form = new System.Windows.Forms.Form { Text = "CI_UIA_OWNED_WINDOW", Width = 330, Height = 300 };
             using var button = new System.Windows.Forms.Button
                 { Text = "CI_UIA_OWNED_BUTTON", AccessibleName = "CI_UIA_OWNED_BUTTON", Width = 250 };
             using var input = new System.Windows.Forms.TextBox
@@ -130,6 +161,16 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             form.Controls.Add(input);
             form.Controls.Add(checkbox);
             form.Controls.Add(radio);
+            var keyboardButton = new System.Windows.Forms.Button
+                { Text = "CI_UIA_KEYBOARD_BUTTON", AccessibleName = "CI_UIA_KEYBOARD_BUTTON",
+                  Top = 205, Width = 250 };
+            keyboardButton.Click += (_, _) =>
+            {
+                Interlocked.Increment(ref keyboardClickCount);
+                keyboardButton.Text = "CI_UIA_KEY_ACCEPTED";
+                keyboardButton.AccessibleName = "CI_UIA_KEY_ACCEPTED";
+            };
+            form.Controls.Add(keyboardButton);
             // Emulate Chromium's deeply nested ControlView hierarchy without a browser dependency.
             var nested = new System.Windows.Forms.Panel
                 { Left = 10, Top = 142, Width = 275, Height = 42,
@@ -203,6 +244,41 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         Check(detailedButton.Bounds is { Width: > 0, Height: > 0 } &&
             detailedButton.KeyboardFocusable == true && !detailedButton.Password,
             "windows.inspect_opt_in_geometry_and_focus_details");
+        var matched = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 10,
+            realWindowId, nameContains: "owned_button", roleFilter: WindowRoleFilter.BUTTON,
+            includeDetails: true)).WaitAsync(TimeSpan.FromSeconds(5));
+        Check(matched.Status == WindowInspectCode.COMPLETED &&
+            matched.Elements.Length == 1 && matched.Elements[0].Name == "CI_UIA_OWNED_BUTTON" &&
+            matched.Elements[0].Bounds is not null && matched.Elements[0].Path.StartsWith("0."),
+            "windows.find_semantic_name_role_and_details_on_occluded_window");
+        var missing = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 10,
+            realWindowId, nameContains: "CI_UIA_DOES_NOT_EXIST", waitMs: 150))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        Check(missing.Status == WindowInspectCode.STATE_NOT_OBSERVED && missing.Elements.Length == 0,
+            "windows.wait_for_missing_state_returns_explicit_timeout");
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(200);
+            created.Form.BeginInvoke(new Action(() => created.Form.Controls.Add(
+                new System.Windows.Forms.Label
+                {
+                    Text = "CI_UIA_DELAYED_READY", AccessibleName = "CI_UIA_DELAYED_READY",
+                    Top = 244, Width = 250, Height = 20
+                })));
+        });
+        var delayed = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 10,
+            realWindowId, nameContains: "CI_UIA_DELAYED_READY", roleFilter: WindowRoleFilter.TEXT,
+            waitMs: 1200)).WaitAsync(TimeSpan.FromSeconds(5));
+        Check(delayed.Status == WindowInspectCode.COMPLETED &&
+            delayed.Elements.Length == 1 && delayed.Elements[0].Name == "CI_UIA_DELAYED_READY",
+            "windows.wait_for_late_react_style_element_without_focus");
+        var rejectedKeyboard = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, delayed.Elements[0].ElementId,
+                WindowActionKind.KEY_PRESS, null, Key: WindowKey.SPACE)))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        Check(rejectedKeyboard.Status == WindowActionCode.FOCUS_UNAVAILABLE &&
+            Volatile.Read(ref keyboardClickCount) == 0,
+            "windows.key_press_rejects_nonfocusable_target_before_input");
         if (Windows.Graphics.Capture.GraphicsCaptureSession.IsSupported())
         {
             var image = await WindowCapture.CaptureCoreAsync(created.Handle, realWindowId, 640)
@@ -343,6 +419,35 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                 physical.EffectState == WindowEffectState.EFFECT_VERIFIED &&
                 physical.TargetVerified && Volatile.Read(ref clickCount) == 2,
                 "windows.click_owned_button_exactly_once_with_verified_effect");
+        var keyboardTree = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 10,
+            realWindowId, nameContains: "CI_UIA_KEYBOARD_BUTTON", roleFilter: WindowRoleFilter.BUTTON))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        Check(keyboardTree.Status == WindowInspectCode.COMPLETED &&
+            keyboardTree.Elements.Length == 1, "windows.key_press_locates_exact_target");
+        var keyTarget = keyboardTree.Elements[0];
+        var staleKey = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, keyTarget.ElementId,
+                WindowActionKind.KEY_PRESS, null, "0.999", Key: WindowKey.SPACE)))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        Check(staleKey.Status == WindowActionCode.STALE_ELEMENT &&
+            Volatile.Read(ref keyboardClickCount) == 0,
+            "windows.key_press_rejects_stale_path_before_focus_or_input");
+        var keyboard = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, keyTarget.ElementId,
+                WindowActionKind.KEY_PRESS, null, keyTarget.Path,
+                "CI_UIA_KEY_ACCEPTED", WindowExpectedChange.APPEARS, WindowKey.SPACE)))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        if (keyboard.Status is WindowActionCode.FOREGROUND_UNAVAILABLE or WindowActionCode.FOCUS_UNAVAILABLE)
+        {
+            Check(Volatile.Read(ref keyboardClickCount) == 0,
+                "windows.key_press_never_sends_when_focus_cannot_be_proven");
+            Console.WriteLine($"NOT_TESTED windows.key_press_owned_button focus={keyboard.Status}");
+        }
+        else
+            Check(keyboard.Status == WindowActionCode.COMPLETED &&
+                keyboard.EffectState == WindowEffectState.EFFECT_VERIFIED &&
+                keyboard.TargetVerified && Volatile.Read(ref keyboardClickCount) == 1,
+                "windows.key_press_owned_button_exactly_once_with_verified_effect");
     }
     finally
     {

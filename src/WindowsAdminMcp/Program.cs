@@ -64,6 +64,32 @@ else if (args is ["window-inspect-worker", var legacyWindowId, var legacyDepth, 
         : new(WindowInspectCode.INVALID_ARGUMENT, []);
     Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, PipeWire.Json));
 }
+else if (args is ["window-inspect-worker"])
+{
+    // New filtered requests use bounded stdin, not command-line parameters
+    // that could expose a page's accessible name in the process list.
+    WindowInspectResult result;
+    try
+    {
+        char[] chars = new char[2049];
+        int length = 0;
+        while (length < chars.Length)
+        {
+            int read = await Console.In.ReadAsync(chars.AsMemory(length));
+            if (read == 0) break;
+            length += read;
+        }
+        var req = length <= 2048 ? System.Text.Json.JsonSerializer.Deserialize<WindowInspectRequest>(
+            new string(chars, 0, length), PipeWire.Json) : null;
+        result = req is null ? new(WindowInspectCode.INVALID_ARGUMENT, []) :
+            WindowInspector.InspectInWorker(req.WindowId, req.MaxDepth, req.MaxElements,
+                req.StartPath, req.StartElementId, req.Offset, req.IncludeDetails,
+                req.NameContains, req.RoleFilter, req.WaitMs);
+    }
+    catch (System.Text.Json.JsonException)
+    { result = new(WindowInspectCode.INVALID_ARGUMENT, []); }
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, PipeWire.Json));
+}
 else if (args is ["window-inspect-worker", var windowId, var depthText, var maxText,
     var pathText, var refText, var offsetText])
 {
