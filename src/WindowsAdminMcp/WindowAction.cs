@@ -8,7 +8,16 @@ using System.Text.Json.Serialization;
 using System.Windows.Automation;
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowActionKind>))]
-public enum WindowActionKind { INVOKE, SET_VALUE, SELECT, TOGGLE }
+public enum WindowActionKind { INVOKE, SET_VALUE, SELECT, TOGGLE, CLICK }
+
+[JsonConverter(typeof(JsonStringEnumConverter<WindowExpectedChange>))]
+public enum WindowExpectedChange { APPEARS, DISAPPEARS }
+
+[JsonConverter(typeof(JsonStringEnumConverter<WindowEffectState>))]
+public enum WindowEffectState { NO_EFFECT, EFFECT_VERIFIED, EFFECT_UNKNOWN }
+
+[JsonConverter(typeof(JsonStringEnumConverter<WindowFailureStage>))]
+public enum WindowFailureStage { RESOLVE_ELEMENT, PREPARE_UIA, DISPATCH_UIA, ACTIVATE_WINDOW, HIT_TEST, DISPATCH_INPUT, VERIFY_EFFECT, WORKER }
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowActionCode>))]
 public enum WindowActionCode
@@ -17,7 +26,9 @@ public enum WindowActionCode
     USER_CONTEXT_UNAVAILABLE, DESKTOP_UNAVAILABLE, STALE_WINDOW, STALE_ELEMENT,
     ACCESS_DENIED, DISABLED, PASSWORD_DENIED, UNSUPPORTED_ACTION,
     UIA_UNAVAILABLE, AUDIT_UNAVAILABLE, AUDIT_RESULT_FAILED,
-    TIMEOUT_UNKNOWN_EFFECT, ACTION_FAILED_UNKNOWN_EFFECT, WORKER_FAILED_UNKNOWN_EFFECT
+    TIMEOUT_UNKNOWN_EFFECT, ACTION_FAILED_UNKNOWN_EFFECT, WORKER_FAILED_UNKNOWN_EFFECT,
+    EXPECTED_STATE_ALREADY_TRUE, WINDOW_NOT_VISIBLE, FOREGROUND_UNAVAILABLE,
+    CLICK_POINT_UNAVAILABLE, TARGET_OCCLUDED, INPUT_FAILED_UNKNOWN_EFFECT
 }
 
 internal sealed record WindowActionRequest(
@@ -25,7 +36,9 @@ internal sealed record WindowActionRequest(
     [property: JsonPropertyName("element_id")] string ElementId,
     [property: JsonPropertyName("action")] WindowActionKind Action,
     [property: JsonPropertyName("value")] string? Value,
-    [property: JsonPropertyName("element_path")] string? ElementPath = null);
+    [property: JsonPropertyName("element_path")] string? ElementPath = null,
+    [property: JsonPropertyName("expected_name")] string? ExpectedName = null,
+    [property: JsonPropertyName("expected_change")] WindowExpectedChange? ExpectedChange = null);
 
 public sealed record WindowActionResult(
     [property: JsonPropertyName("status")] WindowActionCode Status,
@@ -34,7 +47,22 @@ public sealed record WindowActionResult(
     [property: JsonPropertyName("foreground_changed")] bool? ForegroundChanged = null,
     [property: JsonPropertyName("detail")] string? Detail = null,
     [property: JsonPropertyName("elapsed_ms")] long? ElapsedMs = null,
-    [property: JsonPropertyName("target_activated")] bool? TargetActivated = null);
+    [property: JsonPropertyName("target_activated")] bool? TargetActivated = null,
+    [property: JsonPropertyName("target_verified")] bool TargetVerified = false,
+    [property: JsonPropertyName("target_identity")] string? TargetIdentity = null,
+    [property: JsonPropertyName("expected_state_observed")] bool? ExpectedStateObserved = null,
+    [property: JsonPropertyName("failure_stage")] WindowFailureStage? FailureStage = null,
+    [property: JsonPropertyName("exception_type")] string? ExceptionType = null,
+    [property: JsonPropertyName("hresult")] string? HResult = null,
+    [property: JsonPropertyName("provider_response")] string? ProviderResponse = null)
+{
+    // A successful provider call is dispatch acknowledgement, NOT proof that the UI changed.
+    [JsonPropertyName("effect_state")]
+    public WindowEffectState EffectState => ExpectedStateObserved == true
+        ? WindowEffectState.EFFECT_VERIFIED
+        : EffectUnknown || Status == WindowActionCode.COMPLETED
+            ? WindowEffectState.EFFECT_UNKNOWN : WindowEffectState.NO_EFFECT;
+}
 
 // The disposable child uses native UIA2 with AutoSetFocus disabled. An untrusted
 // provider can still change focus on its own; report the observed result.
@@ -45,6 +73,11 @@ internal static class WindowAction
         WindowInspector.TryParseElementRef(request.ElementId, out _) &&
         (request.ElementPath is null || WindowInspector.TryParsePath(request.ElementPath, out _)) &&
         Enum.IsDefined(request.Action) &&
+        (request.ExpectedName is null && request.ExpectedChange is null ||
+         request.ExpectedName is { Length: >= 1 and <= 128 } &&
+         !string.IsNullOrWhiteSpace(request.ExpectedName) &&
+         !request.ExpectedName.Contains('\0') &&
+         request.ExpectedChange is not null && Enum.IsDefined(request.ExpectedChange.Value)) &&
         (request.Action == WindowActionKind.SET_VALUE ?
             request.Value is { Length: <= 4096 } && request.Value?.Contains('\0') == false :
             request.Value is null);
@@ -79,13 +112,52 @@ internal static class WindowAction
                 var current = element.Current;
                 if (current.IsPassword) return new(WindowActionCode.PASSWORD_DENIED);
                 if (!current.IsEnabled) return new(WindowActionCode.DISABLED);
-                if (Pattern(element, current.ControlType, request.Action) is null)
+                if (request.Action != WindowActionKind.CLICK &&
+                    Pattern(element, current.ControlType, request.Action) is null)
                     return new(WindowActionCode.UNSUPPORTED_ACTION);
+                bool? before = null;
+                if (request.ExpectedName is not null)
+                {
+                    before = ExpectedNamePresent(root, request.ExpectedName);
+                    bool desired = request.ExpectedChange == WindowExpectedChange.APPEARS;
+                    if (before == desired)
+                        return new(WindowActionCode.EXPECTED_STATE_ALREADY_TRUE,
+                            ElapsedMs: clock.ElapsedMilliseconds);
+                }
                 bool radioInvoke = request.Action == WindowActionKind.SELECT &&
                     current.ControlType == ControlType.RadioButton &&
                     element.TryGetCurrentPattern(InvokePattern.Pattern, out _);
-                return WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(), request,
-                    clock, radioInvoke);
+                var result = request.Action == WindowActionKind.CLICK
+                    ? WindowPhysicalClick.Click(hwnd, element, request, clock)
+                    : WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(), request,
+                        clock, radioInvoke);
+                result = result with { TargetVerified = true, TargetIdentity = request.ElementId };
+                if (result.Status == WindowActionCode.COMPLETED && request.ExpectedName is not null)
+                {
+                    try
+                    {
+                        bool observed = false;
+                        var verification = Stopwatch.StartNew();
+                        do
+                        {
+                            var afterRoot = AutomationElement.FromHandle(hwnd);
+                            observed = afterRoot is not null &&
+                                ExpectedNamePresent(afterRoot, request.ExpectedName) ==
+                                (request.ExpectedChange == WindowExpectedChange.APPEARS);
+                            if (observed) break;
+                            Thread.Sleep(75);
+                        } while (verification.ElapsedMilliseconds < 1000);
+                        result = result with { ExpectedStateObserved = observed,
+                            FailureStage = observed ? null : WindowFailureStage.VERIFY_EFFECT };
+                    }
+                    catch (Exception e) when (e is COMException or ElementNotAvailableException or InvalidOperationException)
+                    {
+                        result = result with { ExpectedStateObserved = false,
+                            FailureStage = WindowFailureStage.VERIFY_EFFECT,
+                            ExceptionType = e.GetType().Name, HResult = e.HResult.ToString("X8") };
+                    }
+                }
+                return result;
             }
             WindowInspector.TryParseElementRef(request.ElementId, out long snapshotMs);
             if (request.ElementPath is not null)
@@ -134,8 +206,19 @@ internal static class WindowAction
             return new(WindowActionCode.STALE_ELEMENT, ElapsedMs: clock.ElapsedMilliseconds);
         }
         catch (ElementNotAvailableException) { return new(WindowActionCode.STALE_ELEMENT); }
-        catch (COMException e) { return new(WindowActionCode.UIA_UNAVAILABLE, Detail: e.HResult.ToString("X8")); }
-        catch (InvalidOperationException) { return new(WindowActionCode.UIA_UNAVAILABLE); }
+        catch (COMException e) { return new(WindowActionCode.UIA_UNAVAILABLE, Detail: e.HResult.ToString("X8"),
+            FailureStage: WindowFailureStage.RESOLVE_ELEMENT, ExceptionType: e.GetType().Name,
+            HResult: e.HResult.ToString("X8")); }
+        catch (InvalidOperationException e) { return new(WindowActionCode.UIA_UNAVAILABLE,
+            FailureStage: WindowFailureStage.RESOLVE_ELEMENT, ExceptionType: e.GetType().Name,
+            HResult: e.HResult.ToString("X8")); }
+    }
+
+    private static bool ExpectedNamePresent(AutomationElement root, string name)
+    {
+        var condition = new PropertyCondition(AutomationElement.NameProperty, name);
+        var found = root.FindFirst(TreeScope.Descendants, condition);
+        return found is not null && !found.Current.IsOffscreen;
     }
 
     private static object? Pattern(AutomationElement element, ControlType role, WindowActionKind kind)
@@ -165,7 +248,8 @@ internal static class WindowAction
         using var process = new Process();
         var executable = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(executable))
-            result = new(WindowActionCode.WORKER_FAILED_UNKNOWN_EFFECT, EffectUnknown: true);
+            result = new(WindowActionCode.WORKER_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
+                FailureStage: WindowFailureStage.WORKER);
         else
         {
             var start = new ProcessStartInfo(executable)
@@ -192,21 +276,24 @@ internal static class WindowAction
                 string json = await output;
                 if (json.Length > 2048) throw new JsonException("OUTPUT_LIMIT");
                 result = JsonSerializer.Deserialize<WindowActionResult>(json, PipeWire.Json) ??
-                    new(WindowActionCode.WORKER_FAILED_UNKNOWN_EFFECT, EffectUnknown: true);
+                    new(WindowActionCode.WORKER_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
+                        FailureStage: WindowFailureStage.WORKER);
             }
             catch (OperationCanceledException)
             {
                 Stop(process, launched);
-                result = new(WindowActionCode.TIMEOUT_UNKNOWN_EFFECT, EffectUnknown: true);
+                result = new(WindowActionCode.TIMEOUT_UNKNOWN_EFFECT, EffectUnknown: true,
+                    FailureStage: WindowFailureStage.WORKER);
             }
             catch (Exception e) when (e is Win32Exception or IOException or JsonException or InvalidOperationException)
             {
                 Stop(process, launched);
                 result = new(WindowActionCode.WORKER_FAILED_UNKNOWN_EFFECT, EffectUnknown: launched,
-                    Detail: e.GetType().Name);
+                    Detail: e.GetType().Name, FailureStage: WindowFailureStage.WORKER,
+                    ExceptionType: e.GetType().Name, HResult: e.HResult.ToString("X8"));
             }
         }
-        if (!WriteAudit(auditId, "RESULT", request, result.Status))
+        if (!WriteAudit(auditId, "RESULT", request, result))
             return new(WindowActionCode.AUDIT_RESULT_FAILED, AuditId: auditId, EffectUnknown: true);
         return result with { AuditId = auditId };
     }
@@ -220,7 +307,7 @@ internal static class WindowAction
 
     // Two Windows Application event records, never the supplied field value.
     // Audit failure before dispatch blocks action. No new log service or DB.
-    private static bool WriteAudit(string id, string phase, WindowActionRequest req, WindowActionCode? status)
+    private static bool WriteAudit(string id, string phase, WindowActionRequest req, WindowActionResult? result)
     {
         try
         {
@@ -230,7 +317,9 @@ internal static class WindowAction
             {
                 component = "WindowsAdminMCP.window_action", audit_id = id, phase,
                 window_hash = windowHash, element_id = req.ElementId,
-                action = req.Action.ToString(), result = status?.ToString(),
+                action = req.Action.ToString(), result = result?.Status.ToString(),
+                effect_state = result?.EffectState.ToString(),
+                failure_stage = result?.FailureStage?.ToString(), hresult = result?.HResult,
                 utc = DateTimeOffset.UtcNow
             }, PipeWire.Json);
             EventLog.WriteEntry("WindowsAdminMCP", record, EventLogEntryType.Information, 8101);

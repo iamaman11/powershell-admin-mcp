@@ -45,6 +45,8 @@ Check(WindowCatalog.ResolveId(staleWindowId, 1, out _) == WindowResolveCode.STAL
     "windows.reject_stale_hwnd");
 Check(WindowInspector.ValidArguments(testWindowId, 0, 1) &&
     WindowInspector.ValidArguments(testWindowId, 16, 100) &&
+    WindowInspector.ValidArguments(testWindowId, 16, 10, includeDetails: true) &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 100, includeDetails: true) &&
     WindowInspector.ValidArguments(testWindowId, 16, 100, offset: 100) &&
     !WindowInspector.ValidArguments(testWindowId, 16, 1, "0.1", null) &&
     !WindowInspector.ValidArguments(testWindowId, 16, 100, offset: 1950) &&
@@ -68,11 +70,23 @@ Check(WindowInspector.TryParsePath("0.1.0.25", out var parsedPath) &&
     !WindowInspector.TryParsePath("1.0", out _) &&
     !WindowInspector.TryParsePath("0.2001", out _), "windows.inspect_strict_path_contract");
 Check(WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.INVOKE, null)) &&
+    WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.CLICK, null)) &&
+    WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.CLICK, null,
+        ExpectedName: "CI_UIA_CLICKED", ExpectedChange: WindowExpectedChange.APPEARS)) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.CLICK, null,
+        ExpectedName: "CI_UIA_CLICKED")) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.CLICK, "unexpected")) &&
     WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.INVOKE, null, "0.1")) &&
     !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.INVOKE, null, "0..1")) &&
     !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.INVOKE, "unexpected")) &&
     !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.SET_VALUE, new string('x', 4097))),
     "windows.action_bounded_arguments");
+Check(new WindowActionResult(WindowActionCode.COMPLETED).EffectState == WindowEffectState.EFFECT_UNKNOWN &&
+    new WindowActionResult(WindowActionCode.COMPLETED, ExpectedStateObserved: true).EffectState ==
+        WindowEffectState.EFFECT_VERIFIED &&
+    new WindowActionResult(WindowActionCode.STALE_ELEMENT).EffectState == WindowEffectState.NO_EFFECT &&
+    new WindowActionResult(WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT, EffectUnknown: true).EffectState ==
+        WindowEffectState.EFFECT_UNKNOWN, "windows.action_effect_state_never_assumes_success");
 var invalidAction = await WindowTools.InvokeElement("bad", "bad", WindowActionKind.INVOKE, confirm: true);
 Check(invalidAction.Status == WindowActionCode.INVALID_ARGUMENT, "windows.action_reject_bad_ref_before_ipc");
 var missingConfirmation = await WindowTools.InvokeElement(testWindowId, freshElementId, WindowActionKind.INVOKE);
@@ -87,6 +101,7 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
     int clickCount = 0;
     int deepClickCount = 0;
     int pagedClickCount = 0;
+    System.Windows.Forms.Form? testCover = null;
     var uiThread = new Thread(() =>
     {
         try
@@ -103,7 +118,14 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             using var cover = new System.Windows.Forms.Form
                 { Text = "CI_UIA_COVER", FormBorderStyle = System.Windows.Forms.FormBorderStyle.None,
                   TopMost = true, ShowInTaskbar = false };
-            button.Click += (_, _) => Interlocked.Increment(ref clickCount);
+            button.Click += (_, _) =>
+            {
+                if (Interlocked.Increment(ref clickCount) == 2)
+                {
+                    button.Text = "CI_UIA_CLICKED";
+                    button.AccessibleName = "CI_UIA_CLICKED";
+                }
+            };
             form.Controls.Add(button);
             form.Controls.Add(input);
             form.Controls.Add(checkbox);
@@ -144,6 +166,7 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             }
             form.Shown += (_, _) =>
             {
+                testCover = cover;
                 cover.BackColor = System.Drawing.Color.Magenta;
                 cover.Bounds = form.Bounds;
                 cover.Show();
@@ -174,6 +197,12 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         Check(result.ElementRefExpiresUtc > DateTimeOffset.UtcNow &&
             result.Elements.All(e => WindowInspector.TryParseElementRef(e.ElementId, out _)),
             "windows.action_inspection_returns_fresh_selectors");
+        var detailed = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 10,
+            realWindowId, includeDetails: true)).WaitAsync(TimeSpan.FromSeconds(5));
+        var detailedButton = detailed.Elements.Single(e => e.Name == "CI_UIA_OWNED_BUTTON");
+        Check(detailedButton.Bounds is { Width: > 0, Height: > 0 } &&
+            detailedButton.KeyboardFocusable == true && !detailedButton.Password,
+            "windows.inspect_opt_in_geometry_and_focus_details");
         if (Windows.Graphics.Capture.GraphicsCaptureSession.IsSupported())
         {
             var image = await WindowCapture.CaptureCoreAsync(created.Handle, realWindowId, 640)
@@ -290,6 +319,30 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                 null, parent.Path))).WaitAsync(TimeSpan.FromSeconds(5));
         Check(stalePath.Status == WindowActionCode.STALE_ELEMENT && Volatile.Read(ref pagedClickCount) == 1,
             "windows.action_reject_mismatched_exact_path");
+        var freshClickTree = await Task.Run(() => WindowInspector.InspectCore(
+            created.Handle, 3, 40, realWindowId)).WaitAsync(TimeSpan.FromSeconds(5));
+        var freshButton = freshClickTree.Elements.Single(e => e.Name == "CI_UIA_OWNED_BUTTON");
+        var blocked = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, freshButton.ElementId, WindowActionKind.CLICK, null)))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        Check(blocked.Status is WindowActionCode.TARGET_OCCLUDED or
+            WindowActionCode.CLICK_POINT_UNAVAILABLE or WindowActionCode.FOREGROUND_UNAVAILABLE &&
+            Volatile.Read(ref clickCount) == 1, "windows.click_rejects_occluded_target_before_input");
+        created.Form.Invoke(new Action(() => testCover!.Hide()));
+        var uncoveredTree = await Task.Run(() => WindowInspector.InspectCore(
+            created.Handle, 3, 40, realWindowId)).WaitAsync(TimeSpan.FromSeconds(5));
+        var uncoveredButton = uncoveredTree.Elements.Single(e => e.Name == "CI_UIA_OWNED_BUTTON");
+        var physical = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, uncoveredButton.ElementId, WindowActionKind.CLICK,
+                null, ExpectedName: "CI_UIA_CLICKED", ExpectedChange: WindowExpectedChange.APPEARS)))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        if (physical.Status == WindowActionCode.FOREGROUND_UNAVAILABLE)
+            Console.WriteLine("NOT_TESTED windows.click_owned_button_foreground_denied_by_ci_desktop");
+        else
+            Check(physical.Status == WindowActionCode.COMPLETED &&
+                physical.EffectState == WindowEffectState.EFFECT_VERIFIED &&
+                physical.TargetVerified && Volatile.Read(ref clickCount) == 2,
+                "windows.click_owned_button_exactly_once_with_verified_effect");
     }
     finally
     {

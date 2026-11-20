@@ -75,6 +75,18 @@ else if (args is ["window-inspect-worker", var windowId, var depthText, var maxT
         : new(WindowInspectCode.INVALID_ARGUMENT, []);
     Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, PipeWire.Json));
 }
+else if (args is ["window-inspect-worker", var detailedWindowId, var detailedDepth,
+    var detailedMax, var detailedPath, var detailedRef, var detailedOffset, var includeDetailsText])
+{
+    WindowInspectResult result = int.TryParse(detailedDepth, out int depth) &&
+        int.TryParse(detailedMax, out int maxElements) &&
+        int.TryParse(detailedOffset, out int offset) && includeDetailsText is "0" or "1"
+        ? WindowInspector.InspectInWorker(detailedWindowId, depth, maxElements,
+            detailedPath == "-" ? null : detailedPath, detailedRef == "-" ? null : detailedRef,
+            offset, includeDetailsText == "1")
+        : new(WindowInspectCode.INVALID_ARGUMENT, []);
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, PipeWire.Json));
+}
 else if (args is ["window-capture-worker", var captureId, var widthText])
 {
     // Runs only on the authorized USER desktop; WGC never calls desktop CopyFromScreen.

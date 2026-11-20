@@ -64,7 +64,7 @@ public sealed class AdminTools
     internal static Task<AdminResponse> Diagnostics(CancellationToken ct) => Call(new(AdminOperation.Diagnostics),ct);
 
     [McpServerTool(Name="powershell_status",UseStructuredContent=true),
-        Description("Read actual Windows service status and command execution identity, separately from the local MCP frontend identity/session. A user-owned frontend does not imply commands run in that user context.")]
+        Description("Service status and actual execution identity (not frontend identity).")]
     public static async Task<AdminStatus> Status(CancellationToken cancellationToken)
     {
         var reply=await Call(new(AdminOperation.Status),cancellationToken);
@@ -81,15 +81,15 @@ public sealed class AdminTools
     }
 
     [McpServerTool(Name="powershell_job",UseStructuredContent=true),
-        Description("Durable script or 1-8 ordered steps. Submit needs a stable operation_key; retry only the same key/payload. USER runs in its bound logon; SYSTEM is explicit, never a fallback. Typed actions: status, list (paged), logs, cancel, resume, reconcile, prune. A reboot step never reboots Windows; continue only after verified full boot. Manual pause is not reboot evidence. Interrupted steps never replay. Reconcile uncertain effects only with recorded evidence; prune terminal histories only, never unresolved jobs.")]
+        Description("Durable 1-8 steps: submit/status/list/logs/cancel/resume/reconcile/prune. Stable operation_key; no replay of interrupted steps. Verify full reboot.")]
     public static async Task<JobReply> Job(JobAction action,string? operation_key=null,string? job_id=null,
         string? command=null,int timeout_seconds=30,string? working_directory=null,JobStep[]? steps=null,
-        [Description("One-based step number, 1..total_steps; logs only.")] int? step_index=null,int? expected_completed_steps=null,
+        [Description("Logs only; step number is 1-based.")] int? step_index=null,int? expected_completed_steps=null,
         JobState? state_filter=null,int? page_size=null,long? before_seq=null,
         ReconciliationDecision? decision=null,string? evidence=null,int? retain_days=null,
-        [Description("Submit only: USER (default for non-SYSTEM clients) runs in the same authenticated interactive logon; SYSTEM explicitly requests service context.")] CommandContext? execution_context=null,
-        [Description("Logs only, unresolved interrupted step. May contain sensitive original script; request only with explicit operator authorization.")] bool include_interrupted_command=false,
-        [Description("Submit only: equal resource_key values serialize active steps, * requests global exclusive execution. Omit for independent work.")] string? resource_key=null,
+        [Description("Submit: USER bound logon default; SYSTEM explicit.")] CommandContext? execution_context=null,
+        [Description("Logs: sensitive source; explicit operator authorization only.")] bool include_interrupted_command=false,
+        [Description("Submit: resource_key serializes; * exclusive.")] string? resource_key=null,
         CancellationToken cancellationToken=default)
     {
         var reply=await Call(new(AdminOperation.Job,action,operation_key,job_id,command,timeout_seconds,working_directory,steps,step_index,expected_completed_steps,state_filter,page_size,before_seq,decision,evidence,retain_days,
@@ -98,7 +98,7 @@ public sealed class AdminTools
     }
 
     [McpServerTool(Name="powershell_screenshot"),
-        Description("Capture the current authorized interactive physical console desktop. Returns PNG directly; never unlocks or switches sessions. Screen may contain sensitive data.")]
+        Description("PNG of authorized physical desktop. Never unlock/switch sessions; sensitive pixels.")]
     public static async Task<CallToolResult> Screenshot(int monitor=0,int x=0,int y=0,int? width=null,int? height=null,
         int max_width=1280,CancellationToken cancellationToken=default)
     {
@@ -119,7 +119,7 @@ public sealed class AdminTools
     internal static TimeSpan ExecWaitBudget(int executionSeconds) => TimeSpan.FromSeconds(Math.Min(executionSeconds + 5, 90));
 
     [McpServerTool(Name="powershell_exec",UseStructuredContent=true),
-        Description("Run one PowerShell step in the durable queue. USER by default, SYSTEM only when requested; no fallback. timeout_seconds 1-120; synchronous wait at most 90 seconds. PENDING returns job_id: inspect, never replay under another key. audit_persisted means durable output. Disconnect never cancels an admitted job.")]
+        Description("Durable PowerShell step; USER default, SYSTEM explicit. Timeout 1-120s, wait <=90s. PENDING: inspect job_id, no replay.")]
     public static async Task<ExecutionResult> Exec(string command,int timeout_seconds=30,
         string? working_directory=null,string? operation_key=null,CommandContext? execution_context=null,string? resource_key=null,CancellationToken cancellationToken=default)
     {

@@ -68,10 +68,13 @@ try{
         $inspectTool=@($list.tools|Where-Object name -eq 'windows.inspect_window')
         $actionTool=@($list.tools|Where-Object name -eq 'windows.invoke_element')
         Assert ($inspectTool.Count -eq 1 -and $actionTool.Count -eq 1 -and
-            @(@('window_id','max_depth','max_elements','start_path','start_element_id','offset')|Where-Object {-not $inspectTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
-            @(@('window_id','element_id','action','value','confirm','element_path')|Where-Object {-not $actionTool[0].inputSchema.properties.Contains($_)}).Count -eq 0) 'r5.actual_tools_list_exposes_paged_uia_contract'
+            @(@('window_id','max_depth','max_elements','start_path','start_element_id','offset','include_details')|Where-Object {-not $inspectTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
+            @(@('window_id','element_id','action','value','confirm','element_path','expected_name','expected_change')|Where-Object {-not $actionTool[0].inputSchema.properties.Contains($_)}).Count -eq 0) 'r5.actual_tools_list_exposes_paged_uia_contract'
         Assert ($actionTool[0].outputSchema.properties.Contains('foreground_changed') -and
-            $actionTool[0].outputSchema.properties.Contains('target_activated')) 'r5.typed_uia_focus_observation_fields'
+            $actionTool[0].outputSchema.properties.Contains('target_activated') -and
+            $actionTool[0].outputSchema.properties.Contains('effect_state') -and
+            $actionTool[0].outputSchema.properties.Contains('failure_stage') -and
+            $actionTool[0].outputSchema.properties.Contains('hresult')) 'r5.typed_uia_effect_and_diagnostics_fields'
         $schemaBytes=[Text.Encoding]::UTF8.GetByteCount(($list|ConvertTo-Json -Depth 30 -Compress))
         Write-Host "MCP_TOOLS_LIST_BYTES=$schemaBytes"
         Assert ($schemaBytes -le 24000) 'r5.typed_tool_schema_under_24kb_with_margin'

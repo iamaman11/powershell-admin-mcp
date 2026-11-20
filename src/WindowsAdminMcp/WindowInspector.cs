@@ -26,7 +26,14 @@ public sealed record WindowElement(
     [property: JsonPropertyName("offscreen")] bool Offscreen,
     [property: JsonPropertyName("password")] bool Password,
     [property: JsonPropertyName("patterns")] string[] Patterns,
-    [property: JsonPropertyName("element_id")] string ElementId);
+    [property: JsonPropertyName("element_id")] string ElementId,
+    [property: JsonPropertyName("bounds"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] WindowBounds? Bounds = null,
+    [property: JsonPropertyName("keyboard_focusable"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? KeyboardFocusable = null,
+    [property: JsonPropertyName("has_keyboard_focus"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? HasKeyboardFocus = null,
+    [property: JsonPropertyName("clickable_point"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] WindowPoint? ClickablePoint = null);
+
+public sealed record WindowBounds(int X, int Y, int Width, int Height);
+public sealed record WindowPoint(int X, int Y);
 
 public sealed record WindowInspectResult(
     [property: JsonPropertyName("status")] WindowInspectCode Status,
@@ -93,18 +100,21 @@ internal static class WindowInspector
     }
 
     internal static bool ValidArguments(string? windowId, int maxDepth, int maxElements,
-        string? startPath = null, string? startElementId = null, int offset = 0) =>
+        string? startPath = null, string? startElementId = null, int offset = 0,
+        bool includeDetails = false) =>
         WindowCatalog.TryParseId(windowId, out _) && maxDepth is >= 0 and <= MaxDepth &&
-        maxElements is >= 1 and <= 100 && offset >= 0 && offset + maxElements <= MaxTraversal &&
+        maxElements is >= 1 and <= 100 && (!includeDetails || maxElements <= 10) &&
+        offset >= 0 && offset + maxElements <= MaxTraversal &&
         (startPath is null && startElementId is null ||
          startPath is not null && startElementId is not null &&
          TryParsePath(startPath, out var indices) && indices.Length <= maxDepth &&
          TryParseElementRef(startElementId, out _));
 
     internal static WindowInspectResult InspectInWorker(string windowId, int maxDepth, int maxElements,
-        string? startPath = null, string? startElementId = null, int offset = 0)
+        string? startPath = null, string? startElementId = null, int offset = 0,
+        bool includeDetails = false)
     {
-        if (!ValidArguments(windowId, maxDepth, maxElements, startPath, startElementId, offset))
+        if (!ValidArguments(windowId, maxDepth, maxElements, startPath, startElementId, offset, includeDetails))
             return new(WindowInspectCode.INVALID_ARGUMENT, []);
         using var self = Process.GetCurrentProcess();
         var desktop = DesktopCapture.ObserveDesktop(self.SessionId);
@@ -115,7 +125,7 @@ internal static class WindowInspector
             return new(resolved == WindowResolveCode.ACCESS_DENIED ? WindowInspectCode.ACCESS_DENIED :
                 resolved == WindowResolveCode.WRONG_SESSION ? WindowInspectCode.USER_CONTEXT_UNAVAILABLE :
                 WindowInspectCode.STALE_WINDOW, [], Detail: resolved.ToString());
-        return InspectCore(hwnd, maxDepth, maxElements, windowId, startPath, startElementId, offset);
+        return InspectCore(hwnd, maxDepth, maxElements, windowId, startPath, startElementId, offset, includeDetails);
     }
 
     // Paths are never authority on their own. Callers must also provide the
@@ -136,14 +146,15 @@ internal static class WindowInspector
     }
 
     internal static WindowInspectResult InspectCore(IntPtr hwnd, int maxDepth, int maxElements,
-        string? windowId = null, string? startPath = null, string? startElementId = null, int offset = 0)
+        string? windowId = null, string? startPath = null, string? startElementId = null,
+        int offset = 0, bool includeDetails = false)
     {
         var clock = Stopwatch.StartNew();
         if (hwnd == IntPtr.Zero || maxDepth is < 0 or > MaxDepth || maxElements is < 1 or > 100 ||
-            offset < 0 || offset + maxElements > MaxTraversal ||
+            (includeDetails && maxElements > 10) || offset < 0 || offset + maxElements > MaxTraversal ||
             (startPath is not null || startElementId is not null) &&
             (windowId is null || !ValidArguments(windowId, maxDepth, maxElements,
-                startPath, startElementId, offset)))
+                startPath, startElementId, offset, includeDetails)))
             return new(WindowInspectCode.INVALID_ARGUMENT, [], ElapsedMs: clock.ElapsedMilliseconds);
         try
         {
@@ -198,8 +209,31 @@ internal static class WindowInspector
                     int? parentIndex = item.ParentPath is not null &&
                         indices.TryGetValue(item.ParentPath, out int found) ? found : null;
                     indices[item.Path] = nodes.Count;
+                    WindowBounds? bounds = null;
+                    WindowPoint? clickable = null;
+                    bool? focusable = null, focused = null;
+                    if (includeDetails)
+                    {
+                        try
+                        {
+                            var rect = current.BoundingRectangle;
+                            if (!rect.IsEmpty && double.IsFinite(rect.X) && double.IsFinite(rect.Y) &&
+                                double.IsFinite(rect.Width) && double.IsFinite(rect.Height) &&
+                                Math.Abs(rect.X) < 1_000_000 && Math.Abs(rect.Y) < 1_000_000 &&
+                                rect.Width is >= 0 and < 1_000_000 && rect.Height is >= 0 and < 1_000_000)
+                                bounds = new((int)Math.Round(rect.X), (int)Math.Round(rect.Y),
+                                    (int)Math.Round(rect.Width), (int)Math.Round(rect.Height));
+                            focusable = current.IsKeyboardFocusable;
+                            focused = current.HasKeyboardFocus;
+                            if (!current.IsOffscreen && item.Element.TryGetClickablePoint(out var point))
+                                clickable = new((int)Math.Round(point.X), (int)Math.Round(point.Y));
+                        }
+                        catch (Exception e) when (e is ElementNotAvailableException or COMException or InvalidOperationException)
+                        { /* Geometry is optional; the element reference remains useful. */ }
+                    }
                     nodes.Add(new(item.Path, parentIndex, item.Depth, role, name, automationId,
-                        current.IsEnabled, current.IsOffscreen, password, patterns, elementId));
+                        current.IsEnabled, current.IsOffscreen, password, patterns, elementId,
+                        bounds, focusable, focused, clickable));
                 }
                 if (item.Depth >= maxDepth) continue;
 
@@ -233,9 +267,10 @@ internal static class WindowInspector
     }
 
     internal static async Task<WindowInspectResult> RunIsolatedAsync(string windowId, int maxDepth, int maxElements,
-        CancellationToken cancellationToken, string? startPath = null, string? startElementId = null, int offset = 0)
+        CancellationToken cancellationToken, string? startPath = null, string? startElementId = null,
+        int offset = 0, bool includeDetails = false)
     {
-        if (!ValidArguments(windowId, maxDepth, maxElements, startPath, startElementId, offset))
+        if (!ValidArguments(windowId, maxDepth, maxElements, startPath, startElementId, offset, includeDetails))
             return new(WindowInspectCode.INVALID_ARGUMENT, []);
         var executable = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(executable)) return new(WindowInspectCode.WORKER_FAILED, []);
@@ -251,6 +286,7 @@ internal static class WindowInspector
         start.ArgumentList.Add(startPath ?? "-");
         start.ArgumentList.Add(startElementId ?? "-");
         start.ArgumentList.Add(offset.ToString(CultureInfo.InvariantCulture));
+        start.ArgumentList.Add(includeDetails ? "1" : "0");
         start.Environment.Remove("CONTROL_PLANE_API_KEY");
         start.Environment.Remove("OPENAI_API_KEY");
         using var process = new Process { StartInfo = start };
