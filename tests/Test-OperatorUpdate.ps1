@@ -4,6 +4,15 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot '../installer/Update-OperatorTask.ps1')
 function Check($ok,$name){if(-not $ok){throw "FAIL $name"};Write-Host "PASS $name"}
 function Reject([scriptblock]$body,[string]$prefix){try{& $body;return $false}catch{return $_.Exception.Message.StartsWith($prefix,[StringComparison]::Ordinal)}}
+$tokens=$null;$parseErrors=$null
+$helperAst=[Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $PSScriptRoot '../installer/Update-OperatorTask.ps1'),[ref]$tokens,[ref]$parseErrors)
+$shadowedAction=@($helperAst.FindAll({param($node)
+    $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+    $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+    $node.Left.VariablePath.UserPath -ieq 'Action'
+},$true))
+Check ($parseErrors.Count -eq 0 -and $shadowedAction.Count -eq 0) 'operator.no_case_insensitive_validated_action_parameter_shadow'
 $operatorExe='C:\Program Files\PowerShell\7\pwsh.exe'
 $operatorScript='C:\Program Files\WindowsAdminMCP\native\installer\Update-Native.ps1'
 $operatorId='a'*32

@@ -67,10 +67,12 @@ if($Action -eq 'Start'){
         Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
     }
     $args='-NoProfile -NonInteractive -File "'+$updater+'" -Action update -ScheduledOperator -OperationId '+$OperationId
-    $action=New-ScheduledTaskAction -Execute $pwsh -Argument $args
+    # PowerShell variable names are case-insensitive: $action would overwrite
+    # the validated -Action Start|Status parameter and fail before registration.
+    $taskAction=New-ScheduledTaskAction -Execute $pwsh -Argument $args
     $user=New-ScheduledTaskPrincipal -UserId $identity.Name -LogonType Interactive -RunLevel Highest
     $settings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::FromMinutes(15)) -MultipleInstances IgnoreNew
-    Register-ScheduledTask -TaskName $taskName -Action $action -Principal $user -Settings $settings|Out-Null
+    Register-ScheduledTask -TaskName $taskName -Action $taskAction -Principal $user -Settings $settings|Out-Null
     $task=Get-ScheduledTask -TaskName $taskName
     if(-not(Test-OperatorDefinition $task $identity.Name $pwsh $updater $identity.User.Value)){throw 'UPDATE_OPERATOR_READBACK_FAILED'}
     # The receipt is created only by the independently scheduled updater.
