@@ -9,6 +9,8 @@ internal static class WindowPhysicalClick
     private const uint InputMouse = 0;
     private const uint LeftDown = 0x0002;
     private const uint LeftUp = 0x0004;
+    private const uint InputKeyboard = 1;
+    private const uint KeyUp = 0x0002;
     private const uint RootAncestor = 2;
 
     internal static WindowActionResult Click(IntPtr hwnd, AutomationElement target,
@@ -98,6 +100,96 @@ internal static class WindowPhysicalClick
         }
     }
 
+    // A key is addressed to an exact, freshly verified UIA element. In particular,
+    // never send Enter to the global foreground when Chrome denies SetFocus.
+    internal static WindowActionResult PressKey(IntPtr hwnd, AutomationElement target,
+        WindowActionRequest request, Stopwatch clock)
+    {
+        bool dispatched = false;
+        var foregroundAtEntry = GetForegroundWindow();
+        WindowFailureStage stage = WindowFailureStage.PREPARE_FOCUS;
+        try
+        {
+            if (request.Key is null || !target.Current.IsKeyboardFocusable ||
+                target.Current.IsOffscreen || IsIconic(hwnd) || !IsWindowVisible(hwnd))
+                return new(WindowActionCode.FOCUS_UNAVAILABLE, FailureStage: stage,
+                    ElapsedMs: clock.ElapsedMilliseconds);
+
+            if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd))
+                return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
+                    FailureStage: WindowFailureStage.ACTIVATE_WINDOW,
+                    ElapsedMs: clock.ElapsedMilliseconds);
+            if (GetForegroundWindow() != hwnd)
+                return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
+                    FailureStage: WindowFailureStage.ACTIVATE_WINDOW,
+                    ElapsedMs: clock.ElapsedMilliseconds);
+
+            if (!target.Current.HasKeyboardFocus) target.SetFocus();
+            // UIA providers can update focus asynchronously. Allow one short
+            // observation interval, but never inject a key on an unverified focus.
+            bool focused = false;
+            for (int attempt = 0; attempt < 4 && GetForegroundWindow() == hwnd; attempt++)
+            {
+                var actual = AutomationElement.FocusedElement;
+                focused = target.Current.HasKeyboardFocus && actual is not null &&
+                    actual.GetRuntimeId().SequenceEqual(target.GetRuntimeId());
+                if (focused) break;
+                Thread.Sleep(25);
+            }
+            if (!focused || GetForegroundWindow() != hwnd ||
+                !WindowInspector.TryParseElementRef(request.ElementId, out long snapshot) ||
+                WindowCatalog.ResolveId(request.WindowId, Process.GetCurrentProcess().SessionId,
+                    out var resolved) != WindowResolveCode.OK || resolved != hwnd ||
+                !string.Equals(WindowInspector.ElementRef(target, request.WindowId, snapshot),
+                    request.ElementId, StringComparison.Ordinal))
+                return new(WindowActionCode.FOCUS_UNAVAILABLE,
+                    ForegroundChanged: foregroundAtEntry != GetForegroundWindow(),
+                    FailureStage: stage, ElapsedMs: clock.ElapsedMilliseconds);
+
+            ushort virtualKey = request.Key.Value switch
+            {
+                WindowKey.ENTER => 0x0D,
+                WindowKey.SPACE => 0x20,
+                WindowKey.ESCAPE => 0x1B,
+                _ => (ushort)0
+            };
+            if (virtualKey == 0) return new(WindowActionCode.INVALID_ARGUMENT);
+            stage = WindowFailureStage.DISPATCH_INPUT;
+            var inputs = new[]
+            {
+                new KeyboardEventInput { Type = InputKeyboard, VirtualKey = virtualKey },
+                new KeyboardEventInput { Type = InputKeyboard, VirtualKey = virtualKey, Flags = KeyUp }
+            };
+            var finalFocus = AutomationElement.FocusedElement;
+            if (GetForegroundWindow() != hwnd || !target.Current.HasKeyboardFocus ||
+                finalFocus is null ||
+                !finalFocus.GetRuntimeId().SequenceEqual(target.GetRuntimeId()) ||
+                WindowCatalog.ResolveId(request.WindowId, Process.GetCurrentProcess().SessionId,
+                    out var finalHwnd) != WindowResolveCode.OK || finalHwnd != hwnd)
+                return new(WindowActionCode.FOCUS_UNAVAILABLE, FailureStage: stage,
+                    ElapsedMs: clock.ElapsedMilliseconds);
+            dispatched = true;
+            uint inserted = SendKeyboardInput((uint)inputs.Length, inputs, Marshal.SizeOf<KeyboardEventInput>());
+            bool changed = foregroundAtEntry != GetForegroundWindow();
+            bool activated = foregroundAtEntry != hwnd && GetForegroundWindow() == hwnd;
+            return inserted == inputs.Length
+                ? new(WindowActionCode.COMPLETED, ForegroundChanged: changed,
+                    TargetActivated: activated, ElapsedMs: clock.ElapsedMilliseconds)
+                : new(WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
+                    ForegroundChanged: changed, TargetActivated: activated,
+                    FailureStage: stage, ElapsedMs: clock.ElapsedMilliseconds,
+                    Detail: $"KEY_INPUTS_INSERTED_{inserted}:WIN32_{Marshal.GetLastPInvokeError()}");
+        }
+        catch (Exception e) when (e is COMException or ElementNotAvailableException or InvalidOperationException)
+        {
+            return new(dispatched ? WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT :
+                WindowActionCode.FOCUS_UNAVAILABLE, EffectUnknown: dispatched,
+                ForegroundChanged: foregroundAtEntry != GetForegroundWindow(),
+                FailureStage: stage, ExceptionType: e.GetType().Name,
+                HResult: e.HResult.ToString("X8"), ElapsedMs: clock.ElapsedMilliseconds);
+        }
+    }
+
     private static bool HitsTarget(IntPtr hwnd, AutomationElement target, Point pixel)
     {
         var hitWindow = WindowFromPoint(pixel);
@@ -136,6 +228,17 @@ internal static class WindowPhysicalClick
         public MouseInput Mouse;
     }
 
+    // Native INPUT is 40 bytes on our pinned win-x64 build; KEYBDINPUT sits
+    // at offset 8 and is padded to the same union size as MOUSEINPUT.
+    [StructLayout(LayoutKind.Sequential, Size = 40)]
+    private struct KeyboardEventInput
+    {
+        public uint Type, Padding;
+        public ushort VirtualKey, Scan;
+        public uint Flags, Time;
+        public IntPtr ExtraInfo;
+    }
+
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")]
@@ -159,4 +262,6 @@ internal static class WindowPhysicalClick
     private static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint inputs, [In] Input[] input, int size);
+    [DllImport("user32.dll", EntryPoint = "SendInput", SetLastError = true)]
+    private static extern uint SendKeyboardInput(uint inputs, [In] KeyboardEventInput[] input, int size);
 }

@@ -8,7 +8,10 @@ using System.Text.Json.Serialization;
 using System.Windows.Automation;
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowActionKind>))]
-public enum WindowActionKind { INVOKE, SET_VALUE, SELECT, TOGGLE, CLICK }
+public enum WindowActionKind { INVOKE, SET_VALUE, SELECT, TOGGLE, CLICK, KEY_PRESS }
+
+[JsonConverter(typeof(JsonStringEnumConverter<WindowKey>))]
+public enum WindowKey { ENTER, SPACE, ESCAPE }
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowExpectedChange>))]
 public enum WindowExpectedChange { APPEARS, DISAPPEARS }
@@ -17,7 +20,7 @@ public enum WindowExpectedChange { APPEARS, DISAPPEARS }
 public enum WindowEffectState { NO_EFFECT, EFFECT_VERIFIED, EFFECT_UNKNOWN }
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowFailureStage>))]
-public enum WindowFailureStage { RESOLVE_ELEMENT, PREPARE_UIA, DISPATCH_UIA, ACTIVATE_WINDOW, HIT_TEST, DISPATCH_INPUT, VERIFY_EFFECT, WORKER }
+public enum WindowFailureStage { RESOLVE_ELEMENT, PREPARE_UIA, DISPATCH_UIA, ACTIVATE_WINDOW, PREPARE_FOCUS, HIT_TEST, DISPATCH_INPUT, VERIFY_EFFECT, WORKER }
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowActionCode>))]
 public enum WindowActionCode
@@ -28,7 +31,8 @@ public enum WindowActionCode
     UIA_UNAVAILABLE, AUDIT_UNAVAILABLE, AUDIT_RESULT_FAILED,
     TIMEOUT_UNKNOWN_EFFECT, ACTION_FAILED_UNKNOWN_EFFECT, WORKER_FAILED_UNKNOWN_EFFECT,
     EXPECTED_STATE_ALREADY_TRUE, WINDOW_NOT_VISIBLE, FOREGROUND_UNAVAILABLE,
-    CLICK_POINT_UNAVAILABLE, TARGET_OCCLUDED, INPUT_FAILED_UNKNOWN_EFFECT
+    CLICK_POINT_UNAVAILABLE, TARGET_OCCLUDED, INPUT_FAILED_UNKNOWN_EFFECT,
+    FOCUS_UNAVAILABLE
 }
 
 internal sealed record WindowActionRequest(
@@ -38,7 +42,8 @@ internal sealed record WindowActionRequest(
     [property: JsonPropertyName("value")] string? Value,
     [property: JsonPropertyName("element_path")] string? ElementPath = null,
     [property: JsonPropertyName("expected_name")] string? ExpectedName = null,
-    [property: JsonPropertyName("expected_change")] WindowExpectedChange? ExpectedChange = null);
+    [property: JsonPropertyName("expected_change")] WindowExpectedChange? ExpectedChange = null,
+    [property: JsonPropertyName("key")] WindowKey? Key = null);
 
 public sealed record WindowActionResult(
     [property: JsonPropertyName("status")] WindowActionCode Status,
@@ -78,6 +83,8 @@ internal static class WindowAction
          !string.IsNullOrWhiteSpace(request.ExpectedName) &&
          !request.ExpectedName.Contains('\0') &&
          request.ExpectedChange is not null && Enum.IsDefined(request.ExpectedChange.Value)) &&
+        (request.Action == WindowActionKind.KEY_PRESS ?
+            request.Key is not null && Enum.IsDefined(request.Key.Value) : request.Key is null) &&
         (request.Action == WindowActionKind.SET_VALUE ?
             request.Value is { Length: <= 4096 } && request.Value?.Contains('\0') == false :
             request.Value is null);
@@ -112,7 +119,7 @@ internal static class WindowAction
                 var current = element.Current;
                 if (current.IsPassword) return new(WindowActionCode.PASSWORD_DENIED);
                 if (!current.IsEnabled) return new(WindowActionCode.DISABLED);
-                if (request.Action != WindowActionKind.CLICK &&
+                if (request.Action is not (WindowActionKind.CLICK or WindowActionKind.KEY_PRESS) &&
                     Pattern(element, current.ControlType, request.Action) is null)
                     return new(WindowActionCode.UNSUPPORTED_ACTION);
                 bool? before = null;
@@ -129,10 +136,15 @@ internal static class WindowAction
                     element.TryGetCurrentPattern(InvokePattern.Pattern, out _);
                 var result = request.Action == WindowActionKind.CLICK
                     ? WindowPhysicalClick.Click(hwnd, element, request, clock)
+                    : request.Action == WindowActionKind.KEY_PRESS
+                    ? WindowPhysicalClick.PressKey(hwnd, element, request, clock)
                     : WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(), request,
                         clock, radioInvoke);
                 result = result with { TargetVerified = true, TargetIdentity = request.ElementId };
-                if (result.Status == WindowActionCode.COMPLETED && request.ExpectedName is not null)
+                // Providers may report a failed Invoke *after* the UI changed.
+                // Reconcile by observation without re-dispatching the action.
+                if ((result.Status == WindowActionCode.COMPLETED || result.EffectUnknown) &&
+                    request.ExpectedName is not null)
                 {
                     try
                     {
@@ -147,14 +159,14 @@ internal static class WindowAction
                             if (observed) break;
                             Thread.Sleep(75);
                         } while (verification.ElapsedMilliseconds < 1000);
-                        result = result with { ExpectedStateObserved = observed,
-                            FailureStage = observed ? null : WindowFailureStage.VERIFY_EFFECT };
+                        result = ReconcileObserved(result, observed);
                     }
                     catch (Exception e) when (e is COMException or ElementNotAvailableException or InvalidOperationException)
                     {
                         result = result with { ExpectedStateObserved = false,
-                            FailureStage = WindowFailureStage.VERIFY_EFFECT,
-                            ExceptionType = e.GetType().Name, HResult = e.HResult.ToString("X8") };
+                            FailureStage = result.FailureStage ?? WindowFailureStage.VERIFY_EFFECT,
+                            ExceptionType = result.ExceptionType ?? e.GetType().Name,
+                            HResult = result.HResult ?? e.HResult.ToString("X8") };
                     }
                 }
                 return result;
@@ -220,6 +232,14 @@ internal static class WindowAction
         var found = root.FindFirst(TreeScope.Descendants, condition);
         return found is not null && !found.Current.IsOffscreen;
     }
+
+    // Preserve the original provider code and diagnostics even when the
+    // requested transition is observed after a reported dispatch failure.
+    internal static WindowActionResult ReconcileObserved(WindowActionResult result, bool observed) =>
+        result with { ExpectedStateObserved = observed,
+            EffectUnknown = result.EffectUnknown && !observed,
+            FailureStage = observed ? result.FailureStage :
+                result.FailureStage ?? WindowFailureStage.VERIFY_EFFECT };
 
     private static object? Pattern(AutomationElement element, ControlType role, WindowActionKind kind)
     {

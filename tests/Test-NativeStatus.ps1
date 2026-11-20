@@ -68,8 +68,8 @@ try{
         $inspectTool=@($list.tools|Where-Object name -eq 'windows.inspect_window')
         $actionTool=@($list.tools|Where-Object name -eq 'windows.invoke_element')
         Assert ($inspectTool.Count -eq 1 -and $actionTool.Count -eq 1 -and
-            @(@('window_id','max_depth','max_elements','start_path','start_element_id','offset','include_details')|Where-Object {-not $inspectTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
-            @(@('window_id','element_id','action','value','confirm','element_path','expected_name','expected_change')|Where-Object {-not $actionTool[0].inputSchema.properties.Contains($_)}).Count -eq 0) 'r5.actual_tools_list_exposes_paged_uia_contract'
+            @(@('window_id','max_depth','max_elements','start_path','start_element_id','offset','include_details','name_contains','role_filter','wait_ms')|Where-Object {-not $inspectTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
+            @(@('window_id','element_id','action','value','confirm','element_path','expected_name','expected_change','key')|Where-Object {-not $actionTool[0].inputSchema.properties.Contains($_)}).Count -eq 0) 'r5.actual_tools_list_exposes_typed_semantic_uia_contract'
         Assert ($actionTool[0].outputSchema.properties.Contains('foreground_changed') -and
             $actionTool[0].outputSchema.properties.Contains('target_activated') -and
             $actionTool[0].outputSchema.properties.Contains('effect_state') -and
@@ -95,6 +95,9 @@ try{
     Send $a 33 'tools/call' @{name='windows.inspect_window';arguments=@{window_id='bad';max_depth=3};_meta=$meta}
     $badInspect=(Receive $a 33).structuredContent
     Assert ($badInspect.status -eq 'INVALID_ARGUMENT' -and @($badInspect.elements).Count -eq 0) 'windows.mcp_invalid_inspect_id'
+    Send $a 35 'tools/call' @{name='windows.inspect_window';arguments=@{window_id='bad';name_contains='button';role_filter='BUTTON';wait_ms=1500};_meta=$meta}
+    $badFiltered=(Receive $a 35).structuredContent
+    Assert ($badFiltered.status -eq 'INVALID_ARGUMENT') 'windows.mcp_typed_filtered_inspection'
     Send $a 34 'tools/call' @{name='windows.inspect_window';arguments=@{window_id='w1:7fffffffffffffff:1092:1dbaf8d88b62800:1';max_depth=3};_meta=$meta}
     $restrictedInspect=(Receive $a 34).structuredContent
     Assert ($restrictedInspect.status -eq 'USER_CONTEXT_UNAVAILABLE' -and @($restrictedInspect.elements).Count -eq 0) 'windows.inspect_reject_unbound_ci_frontend'
