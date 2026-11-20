@@ -13,15 +13,25 @@ public enum WindowInspectCode
 {
     COMPLETED, INVALID_ARGUMENT, SERVICE_UNAVAILABLE, USER_CONTEXT_UNAVAILABLE, DESKTOP_UNAVAILABLE,
     STALE_WINDOW, STALE_ELEMENT, ACCESS_DENIED, UIA_UNAVAILABLE, TIMEOUT, WORKER_FAILED,
-    STATE_NOT_OBSERVED
+    STATE_NOT_OBSERVED, CDP_UNAVAILABLE, CDP_TARGET_NOT_FOUND, CDP_TARGET_AMBIGUOUS
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowRoleFilter>))]
 public enum WindowRoleFilter
 {
-    BUTTON, TEXT, EDIT, CHECK_BOX, RADIO_BUTTON, TAB_ITEM, LIST_ITEM,
+    BUTTON, TEXT, EDIT, COMBO_BOX, CHECK_BOX, RADIO_BUTTON, TAB_ITEM, LIST_ITEM,
     HYPERLINK, MENU_ITEM, PANE, GROUP, WINDOW, DOCUMENT, CUSTOM
 }
+
+[JsonConverter(typeof(JsonStringEnumConverter<WindowInspectScope>))]
+public enum WindowInspectScope { WINDOW, TABS, TAB }
+
+public sealed record WindowTab(
+    [property: JsonPropertyName("tab_id")] string TabId,
+    [property: JsonPropertyName("title")] string Title,
+    [property: JsonPropertyName("url")] string Url,
+    [property: JsonPropertyName("origin")] string Origin,
+    [property: JsonPropertyName("active_title_match")] bool ActiveTitleMatch);
 
 public sealed record WindowElement(
     [property: JsonPropertyName("path")] string Path,
@@ -50,12 +60,14 @@ public sealed record WindowInspectResult(
     [property: JsonPropertyName("detail")] string? Detail = null,
     [property: JsonPropertyName("elapsed_ms")] long? ElapsedMs = null,
     [property: JsonPropertyName("element_ref_expires_utc")] DateTimeOffset? ElementRefExpiresUtc = null,
-    [property: JsonPropertyName("next_offset")] int? NextOffset = null);
+    [property: JsonPropertyName("next_offset")] int? NextOffset = null,
+    [property: JsonPropertyName("tabs"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] WindowTab[]? Tabs = null);
 
 internal sealed record WindowInspectRequest(
     string WindowId, int MaxDepth, int MaxElements,
     string? StartPath, string? StartElementId, int Offset, bool IncludeDetails,
-    string? NameContains, WindowRoleFilter? RoleFilter, int WaitMs);
+    string? NameContains, WindowRoleFilter? RoleFilter, int WaitMs,
+    WindowInspectScope Scope = WindowInspectScope.WINDOW, string? TabId = null);
 
 // UI Automation can block inside a third-party provider. Run it in a bounded,
 // on-demand copy of this executable, never on the MCP request/USER worker thread.
@@ -115,27 +127,64 @@ internal static class WindowInspector
     internal static bool ValidArguments(string? windowId, int maxDepth, int maxElements,
         string? startPath = null, string? startElementId = null, int offset = 0,
         bool includeDetails = false, string? nameContains = null,
-        WindowRoleFilter? roleFilter = null, int waitMs = 0) =>
-        WindowCatalog.TryParseId(windowId, out _) && maxDepth is >= 0 and <= MaxDepth &&
-        maxElements is >= 1 and <= 100 && (!includeDetails || maxElements <= 10) &&
-        offset >= 0 && offset + maxElements <= MaxTraversal &&
-        (nameContains is null || nameContains is { Length: >= 1 and <= 128 } &&
-            !string.IsNullOrWhiteSpace(nameContains) && !nameContains.Contains('\0')) &&
-        (roleFilter is null || Enum.IsDefined(roleFilter.Value)) &&
-        waitMs is >= 0 and <= 1500 && (waitMs == 0 || nameContains is not null || roleFilter is not null) &&
-        (startPath is null && startElementId is null ||
-         startPath is not null && startElementId is not null &&
-         TryParsePath(startPath, out var indices) && indices.Length <= maxDepth &&
-         TryParseElementRef(startElementId, out _));
+        WindowRoleFilter? roleFilter = null, int waitMs = 0,
+        WindowInspectScope scope = WindowInspectScope.WINDOW, string? tabId = null) =>
+        ArgumentError(windowId, maxDepth, maxElements, startPath, startElementId,
+            offset, includeDetails, nameContains, roleFilter, waitMs, scope, tabId) is null;
+
+    // Report the offending typed field without exposing browser contents.
+    internal static string? ArgumentError(string? windowId, int maxDepth, int maxElements,
+        string? startPath = null, string? startElementId = null, int offset = 0,
+        bool includeDetails = false, string? nameContains = null,
+        WindowRoleFilter? roleFilter = null, int waitMs = 0,
+        WindowInspectScope scope = WindowInspectScope.WINDOW, string? tabId = null)
+    {
+        if (!WindowCatalog.TryParseId(windowId, out _)) return "window_id: invalid or missing window reference";
+        if (!Enum.IsDefined(scope)) return "scope: expected WINDOW, TABS or TAB";
+        if (scope == WindowInspectScope.WINDOW && tabId is not null)
+            return "tab_id: only valid with scope=TAB";
+        if (scope == WindowInspectScope.TABS && tabId is not null)
+            return "tab_id: omit for scope=TABS";
+        if (scope == WindowInspectScope.TAB && !WindowChromeCdp.ValidTargetId(tabId))
+            return "tab_id: expected a target ID from scope=TABS";
+        if (scope != WindowInspectScope.WINDOW && (startPath is not null || startElementId is not null || waitMs != 0))
+            return "scope: TAB/TABS cannot use UIA subtree or wait arguments";
+        if (scope != WindowInspectScope.WINDOW && includeDetails)
+            return "include_details: available only with scope=WINDOW";
+        if (maxDepth is < 0 or > MaxDepth) return $"max_depth: expected 0..{MaxDepth}";
+        if (maxElements is < 1 or > 100) return "max_elements: expected 1..100";
+        if (includeDetails && maxElements > 10)
+            return "max_elements: include_details=true requires max_elements<=10";
+        if (offset < 0 || (long)offset + maxElements > MaxTraversal)
+            return $"offset: expected offset>=0 and offset+max_elements<={MaxTraversal}";
+        if (nameContains is not null && (nameContains.Length is < 1 or > 128 ||
+            string.IsNullOrWhiteSpace(nameContains) || nameContains.Contains('\0')))
+            return "name_contains: expected 1..128 non-whitespace characters without NUL";
+        if (roleFilter is not null && !Enum.IsDefined(roleFilter.Value))
+            return "role_filter: unsupported value";
+        if (waitMs is < 0 or > 1500) return "wait_ms: expected 0..1500";
+        if (waitMs > 0 && nameContains is null && roleFilter is null)
+            return "wait_ms: requires name_contains or role_filter";
+        if ((startPath is null) != (startElementId is null))
+            return "start_path/start_element_id: both are required for subtree inspection";
+        if (startPath is not null && (!TryParsePath(startPath, out var indices) || indices.Length > maxDepth))
+            return "start_path: invalid path or exceeds max_depth";
+        if (startElementId is not null && !TryParseElementRef(startElementId, out _))
+            return "start_element_id: invalid or expired reference";
+        return null;
+    }
 
     internal static WindowInspectResult InspectInWorker(string windowId, int maxDepth, int maxElements,
         string? startPath = null, string? startElementId = null, int offset = 0,
         bool includeDetails = false, string? nameContains = null,
-        WindowRoleFilter? roleFilter = null, int waitMs = 0)
+        WindowRoleFilter? roleFilter = null, int waitMs = 0,
+        WindowInspectScope scope = WindowInspectScope.WINDOW, string? tabId = null)
     {
         if (!ValidArguments(windowId, maxDepth, maxElements, startPath, startElementId,
-            offset, includeDetails, nameContains, roleFilter, waitMs))
-            return new(WindowInspectCode.INVALID_ARGUMENT, []);
+            offset, includeDetails, nameContains, roleFilter, waitMs, scope, tabId))
+            return new(WindowInspectCode.INVALID_ARGUMENT, [], Detail: ArgumentError(windowId, maxDepth,
+                maxElements, startPath, startElementId, offset, includeDetails, nameContains,
+                roleFilter, waitMs, scope, tabId));
         using var self = Process.GetCurrentProcess();
         var desktop = DesktopCapture.ObserveDesktop(self.SessionId);
         if (desktop.Code != CaptureCode.COMPLETED)
@@ -145,8 +194,11 @@ internal static class WindowInspector
             return new(resolved == WindowResolveCode.ACCESS_DENIED ? WindowInspectCode.ACCESS_DENIED :
                 resolved == WindowResolveCode.WRONG_SESSION ? WindowInspectCode.USER_CONTEXT_UNAVAILABLE :
                 WindowInspectCode.STALE_WINDOW, [], Detail: resolved.ToString());
-        return InspectCore(hwnd, maxDepth, maxElements, windowId, startPath, startElementId,
-            offset, includeDetails, nameContains, roleFilter, waitMs);
+        return scope == WindowInspectScope.WINDOW
+            ? InspectCore(hwnd, maxDepth, maxElements, windowId, startPath, startElementId,
+                offset, includeDetails, nameContains, roleFilter, waitMs)
+            : WindowChromeCdp.InspectTab(hwnd, windowId, scope, tabId, maxElements,
+                offset, nameContains, roleFilter);
     }
 
     // Paths are never authority on their own. Callers must also provide the
@@ -319,6 +371,7 @@ internal static class WindowInspector
         WindowRoleFilter.BUTTON => control == ControlType.Button,
         WindowRoleFilter.TEXT => control == ControlType.Text,
         WindowRoleFilter.EDIT => control == ControlType.Edit,
+        WindowRoleFilter.COMBO_BOX => control == ControlType.ComboBox,
         WindowRoleFilter.CHECK_BOX => control == ControlType.CheckBox,
         WindowRoleFilter.RADIO_BUTTON => control == ControlType.RadioButton,
         WindowRoleFilter.TAB_ITEM => control == ControlType.TabItem,
@@ -336,11 +389,14 @@ internal static class WindowInspector
     internal static async Task<WindowInspectResult> RunIsolatedAsync(string windowId, int maxDepth, int maxElements,
         CancellationToken cancellationToken, string? startPath = null, string? startElementId = null,
         int offset = 0, bool includeDetails = false, string? nameContains = null,
-        WindowRoleFilter? roleFilter = null, int waitMs = 0)
+        WindowRoleFilter? roleFilter = null, int waitMs = 0,
+        WindowInspectScope scope = WindowInspectScope.WINDOW, string? tabId = null)
     {
         if (!ValidArguments(windowId, maxDepth, maxElements, startPath, startElementId,
-            offset, includeDetails, nameContains, roleFilter, waitMs))
-            return new(WindowInspectCode.INVALID_ARGUMENT, []);
+            offset, includeDetails, nameContains, roleFilter, waitMs, scope, tabId))
+            return new(WindowInspectCode.INVALID_ARGUMENT, [], Detail: ArgumentError(windowId, maxDepth,
+                maxElements, startPath, startElementId, offset, includeDetails, nameContains,
+                roleFilter, waitMs, scope, tabId));
         var executable = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(executable)) return new(WindowInspectCode.WORKER_FAILED, []);
         var start = new ProcessStartInfo(executable)
@@ -361,7 +417,7 @@ internal static class WindowInspector
             if (!process.Start()) return new(WindowInspectCode.WORKER_FAILED, []);
             launched = true;
             var request = new WindowInspectRequest(windowId, maxDepth, maxElements, startPath,
-                startElementId, offset, includeDetails, nameContains, roleFilter, waitMs);
+                startElementId, offset, includeDetails, nameContains, roleFilter, waitMs, scope, tabId);
             string payload = JsonSerializer.Serialize(request, PipeWire.Json);
             await process.StandardInput.WriteAsync(payload.AsMemory(), deadline.Token);
             await process.StandardInput.FlushAsync(deadline.Token);

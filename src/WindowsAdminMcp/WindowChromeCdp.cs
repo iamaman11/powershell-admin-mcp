@@ -11,7 +11,7 @@ using System.Windows.Automation;
 // An opt-in background path for web content in the user's existing Chrome.
 // Chrome itself owns the permission prompt and DevToolsActivePort. Never start
 // Chrome, alter its flags, read browser credentials, or select a tab by URL alone.
-internal static class WindowChromeCdp
+internal static partial class WindowChromeCdp
 {
     private const int MaxMessageBytes = 1_048_576;
     private const int BoundsTolerance = 40;
@@ -81,7 +81,7 @@ internal static class WindowChromeCdp
     internal static WindowActionResult? TryDispatch(IntPtr hwnd, AutomationElement target,
         WindowActionRequest request, Stopwatch clock)
     {
-        if (request.Action is not (WindowActionKind.CLICK or WindowActionKind.KEY_PRESS) ||
+        if (request.Action is not (WindowActionKind.CLICK or WindowActionKind.KEY_PRESS or WindowActionKind.TYPE_TEXT) ||
             !TryWebRole(target, out string? role, out string? name) ||
             !GetWindowRect(hwnd, out var rect)) return null;
         WindowCatalog.TryParseId(request.WindowId, out var identity);
@@ -126,6 +126,8 @@ internal static class WindowChromeCdp
             string.IsNullOrWhiteSpace(current.Name) || current.Name.Length > 128)
             return false;
         role = current.ControlType == ControlType.Button ? "button" :
+            current.ControlType == ControlType.Edit ? "textbox" :
+            current.ControlType == ControlType.ComboBox ? "combobox" :
             current.ControlType == ControlType.Hyperlink ? "link" :
             current.ControlType == ControlType.CheckBox ? "checkbox" :
             current.ControlType == ControlType.RadioButton ? "radio" :
@@ -230,8 +232,8 @@ internal static class WindowChromeCdp
                     metrics.GetProperty("cssVisualViewport"), out double x, out double y))
                     return Rejected(WindowActionCode.CDP_TARGET_NOT_VISIBLE);
                 // A different desktop window is irrelevant to CDP. Within the
-                // page, never send pointer input to a covering popup instead
-                // of the requested control: use a targeted DOM click there.
+                // page, a popup may be a deliberate confirmation gate: never
+                // bypass it with HTMLElement.click().
                 var resolvedNode = await cdp.Call("DOM.resolveNode", new { backendNodeId }, sessionId);
                 string objectId = resolvedNode.GetProperty("object").GetProperty("objectId").GetString()!;
                 var hit = await cdp.Call("Runtime.callFunctionOn", new
@@ -252,29 +254,13 @@ internal static class WindowChromeCdp
                     await cdp.Call("Input.dispatchMouseEvent", new { type = "mouseReleased", x, y,
                         button = "left", clickCount = 1 }, sessionId);
                 }
-                else
-                {
-                    // No arbitrary script input: the function is fixed and
-                    // its receiver is the single verified backend DOM node.
-                    // Disabled/inert controls still cannot be activated.
-                    dispatched = true;
-                    var semantic = await cdp.Call("Runtime.callFunctionOn", new
-                    {
-                        objectId,
-                        functionDeclaration = "function() { if (!this.isConnected || typeof this.click !== 'function' || this.matches(':disabled') || this.closest('[inert]')) return false; this.click(); return true; }",
-                        returnByValue = true,
-                        silent = true
-                    }, sessionId);
-                    if (semantic.TryGetProperty("exceptionDetails", out _))
-                        throw new InvalidOperationException("CDP_DOM_CLICK_EXCEPTION");
-                    if (!semantic.GetProperty("result").TryGetProperty("value", out var invoked) ||
-                        invoked.ValueKind != JsonValueKind.True)
-                    {
-                        dispatched = false;
-                        return Rejected(WindowActionCode.CDP_TARGET_NOT_VISIBLE);
-                    }
-                    providerResponse = "CDP_DOM_CLICK";
-                }
+                else return Rejected(WindowActionCode.TARGET_OCCLUDED);
+            }
+            else if (request.Action == WindowActionKind.TYPE_TEXT)
+            {
+                await cdp.Call("DOM.focus", new { backendNodeId }, sessionId);
+                dispatched = true;
+                await cdp.Call("Input.insertText", new { text = request.Value! }, sessionId);
             }
             else
             {

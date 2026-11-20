@@ -84,7 +84,7 @@ else if (args is ["window-inspect-worker"])
         result = req is null ? new(WindowInspectCode.INVALID_ARGUMENT, []) :
             WindowInspector.InspectInWorker(req.WindowId, req.MaxDepth, req.MaxElements,
                 req.StartPath, req.StartElementId, req.Offset, req.IncludeDetails,
-                req.NameContains, req.RoleFilter, req.WaitMs);
+                req.NameContains, req.RoleFilter, req.WaitMs, req.Scope, req.TabId);
     }
     catch (System.Text.Json.JsonException)
     { result = new(WindowInspectCode.INVALID_ARGUMENT, []); }
