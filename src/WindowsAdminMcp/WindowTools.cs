@@ -216,6 +216,21 @@ internal static class WindowCatalog
         return WindowResolveCode.OK;
     }
 
+    // Poll the title of the *same* verified HWND without enumerating unrelated
+    // windows. A tab switch must not be confirmed by another browser window.
+    internal static bool TryReadTitle(string windowId, int session, out string title)
+    {
+        title = string.Empty;
+        if (ResolveId(windowId, session, out var hwnd) != WindowResolveCode.OK)
+            return false;
+        int length = GetWindowTextLengthW(hwnd);
+        if (length <= 0) return false;
+        var buffer = new StringBuilder(Math.Min(length + 1, 1024));
+        if (GetWindowTextW(hwnd, buffer, buffer.Capacity) <= 0) return false;
+        title = buffer.ToString();
+        return true;
+    }
+
     internal static WindowListResult List(int limit, int session)
     {
         var clock = Stopwatch.StartNew();

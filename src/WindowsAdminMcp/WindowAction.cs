@@ -317,8 +317,8 @@ internal static class WindowAction
         {
             WindowExpectedKind.UIA_ELEMENT => ExpectedNamePresent(root, name),
             WindowExpectedKind.UIA_VALUE => ExpectedValuePresent(root, name, request.ExpectedValue!),
-            WindowExpectedKind.WINDOW_TITLE or WindowExpectedKind.PROCESS_NAME =>
-                ExternalStatePresent(request.ExpectedKind, name),
+            WindowExpectedKind.WINDOW_TITLE => WindowTitlePresent(request.WindowId, name),
+            WindowExpectedKind.PROCESS_NAME => ExternalStatePresent(request.ExpectedKind, name),
             _ => false
         };
     }
@@ -333,11 +333,22 @@ internal static class WindowAction
             selected is SelectionItemPattern item && item.Current.IsSelected;
     }
 
+    internal static bool WindowTitleMatches(string actual, string expected) =>
+        string.Equals(actual, expected, StringComparison.Ordinal) ||
+        // Native browser titles append a separator and browser name after the
+        // page title. Match the whole prefix, not an arbitrary substring.
+        actual.StartsWith(expected + " — ", StringComparison.Ordinal) ||
+        actual.StartsWith(expected + " - ", StringComparison.Ordinal);
+
+    internal static bool WindowTitlePresent(string windowId, string expected)
+    {
+        using var current = Process.GetCurrentProcess();
+        return WindowCatalog.TryReadTitle(windowId, current.SessionId, out var title) &&
+            WindowTitleMatches(title, expected);
+    }
+
     internal static bool ExternalStatePresent(WindowExpectedKind kind, string name)
     {
-        if (kind == WindowExpectedKind.WINDOW_TITLE)
-            return WindowCatalog.List(100, Process.GetCurrentProcess().SessionId).Windows.Any(w =>
-                string.Equals(w.Title, name, StringComparison.Ordinal));
         if (kind != WindowExpectedKind.PROCESS_NAME) return false;
         using var current = Process.GetCurrentProcess();
         var matches = Process.GetProcessesByName(

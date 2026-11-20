@@ -26,7 +26,9 @@ internal static class WindowEffectObserver
                 ? ProcessIdentities(request.ExpectedName!) : WindowIdentities(request.ExpectedName!);
             return current.Except(baseline.Identities, StringComparer.Ordinal).Any();
         }
-        if (request.ExpectedKind is WindowExpectedKind.WINDOW_TITLE or WindowExpectedKind.PROCESS_NAME)
+        if (request.ExpectedKind == WindowExpectedKind.WINDOW_TITLE)
+            return WindowAction.WindowTitlePresent(request.WindowId, request.ExpectedName!);
+        if (request.ExpectedKind == WindowExpectedKind.PROCESS_NAME)
             return WindowAction.ExternalStatePresent(request.ExpectedKind, request.ExpectedName!);
         using var currentProcess = Process.GetCurrentProcess();
         if (WindowCatalog.ResolveId(request.WindowId, currentProcess.SessionId, out var hwnd) != WindowResolveCode.OK)
