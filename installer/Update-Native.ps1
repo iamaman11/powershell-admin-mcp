@@ -30,12 +30,13 @@ function Select-UpdateArtifact($artifacts,[string]$runId,[string]$commit){
 }
 function Copy-UpdateDownloadStream([IO.Stream]$source,[IO.Stream]$destination,
     [Threading.CancellationToken]$deadline,[long]$expectedBytes,[int]$stallSeconds=30,
-    [long]$maxBytes=268435456){
-    if($stallSeconds -lt 1 -or $maxBytes -le 0 -or $expectedBytes -gt $maxBytes){
+    [long]$maxBytes=268435456,[long]$startingBytes=0){
+    if($stallSeconds -lt 1 -or $maxBytes -le 0 -or $expectedBytes -gt $maxBytes -or
+        $startingBytes -lt 0 -or ($expectedBytes -gt 0 -and $startingBytes -ge $expectedBytes)){
         throw 'UPDATE_DOWNLOAD_LIMIT_INVALID'
     }
     $buffer=[byte[]]::new(65536)
-    $total=[long]0
+    $total=$startingBytes
     $clock=[Diagnostics.Stopwatch]::StartNew()
     $lastReport=[long]0
     while($true){
@@ -61,53 +62,86 @@ function Copy-UpdateDownloadStream([IO.Stream]$source,[IO.Stream]$destination,
     Write-Progress -Activity 'WindowsAdminMCP update' -Completed
     Write-Host ("UPDATE_DOWNLOAD_COMPLETE bytes=$total elapsed_seconds=$([int]$clock.Elapsed.TotalSeconds)")
 }
+function Confirm-UpdateDownloadResponse([Net.Http.HttpResponseMessage]$response,
+    [long]$offset,[long]$expectedTotal){
+    if($offset -eq 0){
+        if([int]$response.StatusCode -ne 200){throw 'UPDATE_DOWNLOAD_FULL_RESPONSE_INVALID'}
+        $total=[long]($response.Content.Headers.ContentLength ?? 0)
+        if($total -le 0 -or $total -gt 268435456){throw 'UPDATE_DOWNLOAD_LENGTH_UNCONFIRMED'}
+        return $total
+    }
+    $range=$response.Content.Headers.ContentRange
+    if([int]$response.StatusCode -ne 206 -or $null -eq $range -or
+        -not $range.HasRange -or -not $range.HasLength -or
+        $range.From -ne $offset -or $range.To -ne ($expectedTotal-1) -or
+        $range.Length -ne $expectedTotal -or
+        $response.Content.Headers.ContentLength -ne ($expectedTotal-$offset)){
+        throw 'UPDATE_DOWNLOAD_RESUME_UNCONFIRMED'
+    }
+    return $expectedTotal
+}
 function Save-UpdateArtifact([string]$uri,[string]$token,[string]$output){
-    for($attempt=1;$attempt -le 2;$attempt++){
-        $client=$null;$request=$null;$response=$null;$inputStream=$null;$outputStream=$null;$deadline=$null
-        $retryable=$true;$complete=$false
-        try{
-            Write-Host "UPDATE_DOWNLOAD_START attempt=$attempt max_seconds=240 stall_seconds=30"
-            $client=[Net.Http.HttpClient]::new()
-            $client.Timeout=[TimeSpan]::FromSeconds(240)
-            $request=[Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get,[uri]$uri)
-            $request.Headers.Authorization=[Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer',$token)
-            $request.Headers.UserAgent.ParseAdd('WindowsAdminMCP-Updater')
-            $request.Headers.Accept.ParseAdd('application/vnd.github+json')
-            $deadline=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(240))
-            $response=$client.SendAsync($request,[Net.Http.HttpCompletionOption]::ResponseHeadersRead,$deadline.Token).GetAwaiter().GetResult()
-            if(-not $response.IsSuccessStatusCode){
-                $retryable=[int]$response.StatusCode -eq 429 -or [int]$response.StatusCode -ge 500
-                throw "UPDATE_ARTIFACT_HTTP_$([int]$response.StatusCode)"
+    $deadline=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(240))
+    $expected=[long]0
+    $complete=$false
+    try{
+        for($attempt=1;$attempt -le 8;$attempt++){
+            $client=$null;$request=$null;$response=$null;$inputStream=$null;$outputStream=$null
+            $retryable=$true
+            $offset=if(Test-Path -LiteralPath $output){(Get-Item -LiteralPath $output).Length}else{[long]0}
+            try{
+                if($deadline.IsCancellationRequested){throw 'UPDATE_DOWNLOAD_TOTAL_TIMEOUT'}
+                Write-Host "UPDATE_DOWNLOAD_START attempt=$attempt offset=$offset max_seconds=240 stall_seconds=15"
+                $client=[Net.Http.HttpClient]::new()
+                $client.Timeout=[Threading.Timeout]::InfiniteTimeSpan
+                $request=[Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get,[uri]$uri)
+                $request.Headers.Authorization=[Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer',$token)
+                $request.Headers.UserAgent.ParseAdd('WindowsAdminMCP-Updater')
+                $request.Headers.Accept.ParseAdd('application/vnd.github+json')
+                if($offset -gt 0){$request.Headers.Range=[Net.Http.Headers.RangeHeaderValue]::new($offset,$null)}
+                $response=$client.SendAsync($request,[Net.Http.HttpCompletionOption]::ResponseHeadersRead,$deadline.Token).GetAwaiter().GetResult()
+                if(-not $response.IsSuccessStatusCode){
+                    $retryable=[int]$response.StatusCode -eq 429 -or [int]$response.StatusCode -ge 500
+                    throw "UPDATE_ARTIFACT_HTTP_$([int]$response.StatusCode)"
+                }
+                $expected=Confirm-UpdateDownloadResponse $response $offset $expected
+                $inputStream=$response.Content.ReadAsStreamAsync($deadline.Token).GetAwaiter().GetResult()
+                $mode=if($offset -eq 0){[IO.FileMode]::CreateNew}else{[IO.FileMode]::Open}
+                $outputStream=[IO.File]::Open($output,$mode,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                if($offset -gt 0){[void]$outputStream.Seek(0,[IO.SeekOrigin]::End)}
+                Copy-UpdateDownloadStream $inputStream $outputStream $deadline.Token $expected 15 268435456 $offset
+                $outputStream.Flush()
+                $complete=$true
+                return
+            }catch{
+                $saved=if(Test-Path -LiteralPath $output){(Get-Item -LiteralPath $output).Length}else{[long]0}
+                $reason=if($_.Exception.Message -match '^UPDATE_[A-Z0-9_]+$'){
+                    $_.Exception.Message
+                }else{
+                    $cause=$_.Exception
+                    while($cause.InnerException){$cause=$cause.InnerException}
+                    $cause.GetType().Name
+                }
+                if($reason -match '^UPDATE_DOWNLOAD_(SIZE_LIMIT|LIMIT_INVALID|LENGTH_UNCONFIRMED|RESUME_UNCONFIRMED|FULL_RESPONSE_INVALID)$'){$retryable=$false}
+                if(-not $retryable -or $attempt -eq 8 -or $deadline.IsCancellationRequested){
+                    throw "UPDATE_ARTIFACT_DOWNLOAD_FAILED attempt=$attempt bytes=$saved reason=$reason"
+                }
+                Write-Warning "UPDATE_DOWNLOAD_RETRY attempt=$attempt bytes=$saved reason=$reason"
+            }finally{
+                if($outputStream){$outputStream.Dispose()}
+                if($inputStream){$inputStream.Dispose()}
+                if($response){$response.Dispose()}
+                if($request){$request.Dispose()}
+                if($client){$client.Dispose()}
             }
-            $expected=[long]($response.Content.Headers.ContentLength ?? 0)
-            if($expected -gt 268435456){$retryable=$false;throw 'UPDATE_DOWNLOAD_SIZE_LIMIT'}
-            $inputStream=$response.Content.ReadAsStreamAsync($deadline.Token).GetAwaiter().GetResult()
-            $outputStream=[IO.File]::Open($output,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
-            Copy-UpdateDownloadStream $inputStream $outputStream $deadline.Token $expected
-            $outputStream.Flush()
-            $complete=$true
-            return
-        }catch{
-            $reason=if($_.Exception.Message -match '^UPDATE_[A-Z0-9_]+$'){
-                $_.Exception.Message
-            }else{$_.Exception.GetType().Name}
-            if($reason -match '^UPDATE_DOWNLOAD_(SIZE_LIMIT|LIMIT_INVALID)$'){$retryable=$false}
-            if(-not $retryable -or $attempt -eq 2){throw "UPDATE_ARTIFACT_DOWNLOAD_FAILED attempt=$attempt reason=$reason"}
-            Write-Warning "UPDATE_DOWNLOAD_RETRY attempt=$attempt reason=$reason"
-        }finally{
-            if($outputStream){$outputStream.Dispose()}
-            if($inputStream){$inputStream.Dispose()}
-            if($response){$response.Dispose()}
-            if($request){$request.Dispose()}
-            if($client){$client.Dispose()}
-            if($deadline){$deadline.Dispose()}
-            # The caller extracts only a completed transfer. No partial bytes
-            # survive a retry or an exhausted download attempt.
-            if(-not $complete -and (Test-Path -LiteralPath $output)){
-                Remove-Item -LiteralPath $output -Force
-            }
+            Start-Sleep -Seconds 1
         }
-        Start-Sleep -Seconds 3
+    }finally{
+        $deadline.Dispose()
+        # Partial bytes are only useful inside this one verified artifact fetch.
+        if(-not $complete -and (Test-Path -LiteralPath $output)){
+            Remove-Item -LiteralPath $output -Force
+        }
     }
 }
 function Expand-UpdateArtifact([string]$archivePath,[string]$destination){
