@@ -146,8 +146,8 @@ internal static class WindowInspector
         if (!WindowCatalog.TryParseId(windowId, out _)) return "window_id: invalid or missing window reference";
         if (!Enum.IsDefined(scope)) return "scope: expected WINDOW, TABS or TAB";
         if (scope == WindowInspectScope.WINDOW &&
-            (expectedProfile is not null || expectedOrigin is not null || expectedUrl is not null))
-            return "scope: expected_profile/origin/url require TABS or TAB";
+            (expectedOrigin is not null || expectedUrl is not null))
+            return "scope: expected_origin/url require TABS or TAB";
         string? contextError = WindowChromeCdp.ContextArgumentError(expectedProfile, expectedOrigin, expectedUrl);
         if (contextError is not null) return contextError;
         if (scope == WindowInspectScope.WINDOW && tabId is not null)
@@ -205,6 +205,9 @@ internal static class WindowInspector
             return new(resolved == WindowResolveCode.ACCESS_DENIED ? WindowInspectCode.ACCESS_DENIED :
                 resolved == WindowResolveCode.WRONG_SESSION ? WindowInspectCode.USER_CONTEXT_UNAVAILABLE :
                 WindowInspectCode.STALE_WINDOW, [], Detail: resolved.ToString());
+        if (scope == WindowInspectScope.WINDOW && expectedProfile is not null &&
+            !WindowChromeCdp.VerifiedChromeProfile(hwnd, expectedProfile))
+            return new(WindowInspectCode.CDP_CONTEXT_MISMATCH, [], Detail: "PROFILE_NOT_VERIFIED");
         return scope == WindowInspectScope.WINDOW
             ? InspectCore(hwnd, maxDepth, maxElements, windowId, startPath, startElementId,
                 offset, includeDetails, nameContains, roleFilter, waitMs)

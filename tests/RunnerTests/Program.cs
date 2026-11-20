@@ -80,8 +80,10 @@ Check(WindowInspector.ValidArguments(testWindowId, 16, 50,
     WindowInspector.ValidArguments(testWindowId, 16, 50,
         scope: WindowInspectScope.TAB, tabId: "0123456789abcdef0123456789abcdef",
         expectedUrl: "https://example.com/form?a=1") &&
-    !WindowInspector.ValidArguments(testWindowId, 16, 50,
+    WindowInspector.ValidArguments(testWindowId, 16, 50,
         scope: WindowInspectScope.WINDOW, expectedProfile: "Valer") &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.WINDOW, expectedOrigin: "https://example.com") &&
     !WindowInspector.ValidArguments(testWindowId, 16, 50,
         scope: WindowInspectScope.TABS, expectedOrigin: "https://example.com/other") &&
     !WindowInspector.ValidArguments(testWindowId, 16, 50,
@@ -146,9 +148,27 @@ Check(WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId,
         WindowActionKind.INVOKE, null, ExpectedName: "field",
         ExpectedChange: WindowExpectedChange.APPEARS, ExpectedKind: WindowExpectedKind.UIA_ELEMENT,
         ExpectedValue: "next")) &&
+    WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId,
+        WindowActionKind.INVOKE, null, ExpectedProfile: "Valer")) &&
     !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId,
-        WindowActionKind.INVOKE, null, ExpectedProfile: "Valer")),
+        WindowActionKind.INVOKE, null, ExpectedUrl: "https://example.com")) &&
+    WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId,
+        WindowActionKind.INVOKE, null, ExpectedKind: WindowExpectedKind.PROCESS_STARTED,
+        ExpectedName: "camoufox", ExpectedChange: WindowExpectedChange.APPEARS,
+        ObservationTimeoutMs: 12000)) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId,
+        WindowActionKind.INVOKE, null, ExpectedKind: WindowExpectedKind.PROCESS_STARTED,
+        ExpectedName: "camoufox", ExpectedChange: WindowExpectedChange.DISAPPEARS)) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId,
+        WindowActionKind.INVOKE, null, ObservationTimeoutMs: 16000)),
     "windows.value_postcondition_and_browser_scope_are_typed");
+Check(WindowChromeCdp.ProfileLabelMatches("Valer", "Valer") &&
+    WindowChromeCdp.ProfileLabelMatches("Valer (signed in)", "Valer") &&
+    WindowChromeCdp.ProfileLabelMatches("Profile: Valer, signed in", "Valer") &&
+    !WindowChromeCdp.ProfileLabelMatches("Valery (signed in)", "Valer") &&
+    !WindowChromeCdp.ProfileLabelMatches("Another Valer", "Valer") &&
+    !WindowChromeCdp.ProfileLabelMatches("Valer test profile", "Valer"),
+    "chrome.profile_delimiters_are_unambiguous");
 Check(WindowChromeCdp.ValidTargetId("0123456789abcdef0123456789abcdef") &&
     !WindowChromeCdp.ValidTargetId("https://example.com") &&
     !WindowChromeCdp.ValidTabElementRef("c1:1:bad:1:bad:deadbeef"),
@@ -232,6 +252,7 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
     int deepClickCount = 0;
     int pagedClickCount = 0;
     int keyboardClickCount = 0;
+    int asyncDispatchCount = 0;
     System.Windows.Forms.Form? testCover = null;
     var uiThread = new Thread(() =>
     {
@@ -275,6 +296,23 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                 { Text = "CI_UIA_PENDING", AccessibleName = "CI_UIA_PENDING",
                   Top = 244, Width = 250 };
             form.Controls.Add(delayedButton);
+            var asyncButton = new System.Windows.Forms.Button
+                { Text = "CI_UIA_ASYNC_START", AccessibleName = "CI_UIA_ASYNC_START",
+                  Top = 280, Width = 250 };
+            asyncButton.Click += (_, _) =>
+            {
+                Interlocked.Increment(ref asyncDispatchCount);
+                var timer = new System.Windows.Forms.Timer { Interval = 1700 };
+                timer.Tick += (_, _) =>
+                {
+                    timer.Stop();
+                    asyncButton.Text = "CI_UIA_ASYNC_DONE";
+                    asyncButton.AccessibleName = "CI_UIA_ASYNC_DONE";
+                    timer.Dispose();
+                };
+                timer.Start();
+            };
+            form.Controls.Add(asyncButton);
             // Emulate Chromium's deeply nested ControlView hierarchy without a browser dependency.
             var nested = new System.Windows.Forms.Panel
                 { Left = 10, Top = 142, Width = 275, Height = 42,
@@ -418,6 +456,18 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             Volatile.Read(ref clickCount) == 1, "windows.action_invoke_occluded_button");
         Check(click.ForegroundChanged == false && click.TargetActivated == false,
             "windows.action_invoke_preserves_foreground");
+        var asyncTree = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 2, 50,
+            realWindowId, nameContains: "CI_UIA_ASYNC_START", roleFilter: WindowRoleFilter.BUTTON));
+        var asyncTarget = asyncTree.Elements.Single(e => e.Name == "CI_UIA_ASYNC_START");
+        var asyncClock = Stopwatch.StartNew();
+        var asyncResult = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, asyncTarget.ElementId, WindowActionKind.INVOKE,
+                null, ExpectedName: "CI_UIA_ASYNC_DONE", ExpectedChange: WindowExpectedChange.APPEARS,
+                ObservationTimeoutMs: 5000))).WaitAsync(TimeSpan.FromSeconds(7));
+        Check(asyncResult.EffectState == WindowEffectState.EFFECT_VERIFIED &&
+            asyncResult.ObservationState == WindowObservationState.OBSERVED &&
+            asyncClock.ElapsedMilliseconds >= 1300 && Volatile.Read(ref asyncDispatchCount) == 1,
+            "windows.async_provider_effect_observed_after_one_second_without_redispach");
         var inputTarget = result.Elements.Single(e => e.Role.Contains("Edit", StringComparison.Ordinal));
         var edit = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, inputTarget.ElementId, WindowActionKind.SET_VALUE,

@@ -50,23 +50,46 @@ internal static partial class WindowChromeCdp
 
     // Verify the *native Chrome toolbar* profile button, never page content or
     // an inferred profile from a tab title. A missing/ambiguous button fails closed.
-    private static bool ChromeProfileMatches(IntPtr hwnd, string expected)
+    // Chrome's native accessibility label often appends account details. A
+    // delimited exact profile name is acceptable; a substring or prefix of
+    // another profile (Valer vs Valery) is not.
+    internal static bool ProfileLabelMatches(string label, string expected)
+    {
+        if (string.Equals(label, expected, StringComparison.OrdinalIgnoreCase)) return true;
+        foreach (string prefix in new[] { "", "Profile: ", "Profile " })
+        {
+            if (!label.StartsWith(prefix + expected, StringComparison.OrdinalIgnoreCase)) continue;
+            string rest = label[(prefix.Length + expected.Length)..].TrimStart(' ');
+            if (rest.Length > 0 && rest[0] is ',' or ';' or '(' or '\n' or '\r') return true;
+        }
+        return false;
+    }
+
+    internal static bool VerifiedChromeProfile(IntPtr hwnd, string expected)
     {
         try
         {
+            if (!GetWindowRect(hwnd, out _)) return false;
+            GetWindowThreadProcessId(hwnd, out uint ownerPid);
+            if (ownerPid == 0) return false;
+            using var owner = Process.GetProcessById(checked((int)ownerPid));
+            if (!owner.ProcessName.Equals("chrome", StringComparison.OrdinalIgnoreCase)) return false;
             var root = AutomationElement.FromHandle(hwnd);
             if (root is null) return false;
-            var buttons = root.FindAll(TreeScope.Descendants, new AndCondition(
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
-                new PropertyCondition(AutomationElement.NameProperty, expected)));
+            var buttons = root.FindAll(TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button));
             int matches = 0;
             foreach (AutomationElement button in buttons)
-                if (!IsInsideDocument(button) && ++matches > 1) return false;
+                if (!IsInsideDocument(button) && ProfileLabelMatches(button.Current.Name, expected) &&
+                    ++matches > 1) return false;
             return matches == 1;
         }
         catch (Exception e) when (e is COMException or ElementNotAvailableException or
-            InvalidOperationException) { return false; }
+            InvalidOperationException or ArgumentException or Win32Exception or OverflowException) { return false; }
     }
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
 
     private static bool TryParseTabElementRef(string? token, out TabElementRef? result)
     {
@@ -184,7 +207,7 @@ internal static partial class WindowChromeCdp
             using var owner = Process.GetProcessById(identity.ProcessId);
             if (!owner.ProcessName.Equals("chrome", StringComparison.OrdinalIgnoreCase))
                 return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: "NOT_CHROME");
-            if (expectedProfile is not null && !ChromeProfileMatches(hwnd, expectedProfile))
+            if (expectedProfile is not null && !VerifiedChromeProfile(hwnd, expectedProfile))
                 return new(WindowInspectCode.CDP_CONTEXT_MISMATCH, [], Detail: "PROFILE_NOT_VERIFIED");
             return InspectTabAsync(endpoint!, hwnd, windowId, scope, tabId, maxElements,
                 offset, nameFilter, roleFilter, expectedProfile, expectedOrigin, expectedUrl)
@@ -410,7 +433,7 @@ internal static partial class WindowChromeCdp
             var selected = tabs.SingleOrDefault(t => t.Id == target.TargetId);
             if (selected is null) return Rejected(WindowActionCode.CDP_TARGET_AMBIGUOUS);
             if (!MatchesContext(selected.Url, request.ExpectedOrigin, request.ExpectedUrl) ||
-                request.ExpectedProfile is not null && !ChromeProfileMatches(hwnd, request.ExpectedProfile))
+                request.ExpectedProfile is not null && !VerifiedChromeProfile(hwnd, request.ExpectedProfile))
                 return Rejected(WindowActionCode.CDP_CONTEXT_MISMATCH);
             string sessionId = await Attach(cdp, selected.Id);
             string loader = await Loader(cdp, sessionId);

@@ -22,7 +22,7 @@ try{
     # Hash these scripts in manifest.json like all other deployed files.
     $helpers=Join-Path $native 'installer'
     [void][IO.Directory]::CreateDirectory($helpers)
-    foreach($name in @('Install-Native.ps1','Update-Native.ps1','NativeFileSwap.ps1')){
+    foreach($name in @('Install-Native.ps1','Update-Native.ps1','Update-OperatorTask.ps1','NativeFileSwap.ps1')){
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $helpers
     }
     Invoke-WebRequest -Uri 'https://github.com/openai/tunnel-client/releases/download/v0.0.21/tunnel-client-runtime-v0.0.21-windows-amd64.zip' -OutFile $zip

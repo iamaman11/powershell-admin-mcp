@@ -1,8 +1,22 @@
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot '../installer/Update-Native.ps1')
+. (Join-Path $PSScriptRoot '../installer/Update-OperatorTask.ps1')
 function Check($ok,$name){if(-not $ok){throw "FAIL $name"};Write-Host "PASS $name"}
 function Reject([scriptblock]$body,[string]$prefix){try{& $body;return $false}catch{return $_.Exception.Message.StartsWith($prefix,[StringComparison]::Ordinal)}}
+$operatorExe='C:\Program Files\PowerShell\7\pwsh.exe'
+$operatorScript='C:\Program Files\WindowsAdminMCP\native\installer\Update-Native.ps1'
+$operatorId='a'*32
+$action=[pscustomobject]@{Execute=$operatorExe;
+    Arguments=('-NoProfile -NonInteractive -File "'+$operatorScript+'" -Action update -ScheduledOperator -OperationId '+$operatorId)}
+$task=[pscustomobject]@{State='Running';Principal=[pscustomobject]@{UserId='ACME\Operator';LogonType='Interactive';RunLevel='Highest'};
+    Actions=@($action)}
+Check (Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript) 'operator.strict_interactive_scheduler_definition'
+Check (Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript $operatorId) 'operator.updater_checks_running_task_and_operation'
+Check (-not(Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript ('b'*32))) 'operator.rejects_foreign_operation'
+$task.Principal.LogonType='Password'
+Check (-not(Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript) -and
+    -not(Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript $operatorId)) 'operator.rejects_background_password_task'
 $sha='a'*40
 $base=[pscustomobject]@{id=12;head_sha=$sha;head_branch='main';event='push';status='completed';conclusion='success'}
 $runs=@($base,[pscustomobject]@{id=13;head_sha=$sha;head_branch='main';event='pull_request';status='completed';conclusion='success'},

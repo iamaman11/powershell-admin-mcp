@@ -17,7 +17,10 @@ public enum WindowKey { ENTER, SPACE, ESCAPE }
 public enum WindowExpectedChange { APPEARS, DISAPPEARS }
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowExpectedKind>))]
-public enum WindowExpectedKind { UIA_ELEMENT, UIA_VALUE, WINDOW_TITLE, PROCESS_NAME }
+public enum WindowExpectedKind { UIA_ELEMENT, UIA_VALUE, WINDOW_TITLE, PROCESS_NAME, WINDOW_CREATED, PROCESS_STARTED }
+
+[JsonConverter(typeof(JsonStringEnumConverter<WindowObservationState>))]
+public enum WindowObservationState { NOT_REQUESTED, OBSERVED, NOT_OBSERVED, UNKNOWN }
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowEffectState>))]
 public enum WindowEffectState { NO_EFFECT, EFFECT_VERIFIED, EFFECT_UNKNOWN }
@@ -52,7 +55,8 @@ internal sealed record WindowActionRequest(
     [property: JsonPropertyName("expected_value")] string? ExpectedValue = null,
     [property: JsonPropertyName("expected_profile")] string? ExpectedProfile = null,
     [property: JsonPropertyName("expected_origin")] string? ExpectedOrigin = null,
-    [property: JsonPropertyName("expected_url")] string? ExpectedUrl = null);
+    [property: JsonPropertyName("expected_url")] string? ExpectedUrl = null,
+    [property: JsonPropertyName("observation_timeout_ms")] int ObservationTimeoutMs = 8000);
 
 public sealed record WindowActionResult(
     [property: JsonPropertyName("status")] WindowActionCode Status,
@@ -68,7 +72,8 @@ public sealed record WindowActionResult(
     [property: JsonPropertyName("failure_stage")] WindowFailureStage? FailureStage = null,
     [property: JsonPropertyName("exception_type")] string? ExceptionType = null,
     [property: JsonPropertyName("hresult")] string? HResult = null,
-    [property: JsonPropertyName("provider_response")] string? ProviderResponse = null)
+    [property: JsonPropertyName("provider_response")] string? ProviderResponse = null,
+    [property: JsonPropertyName("observation_state")] WindowObservationState ObservationState = WindowObservationState.NOT_REQUESTED)
 {
     // A successful provider call is dispatch acknowledgement, NOT proof that the UI changed.
     [JsonPropertyName("effect_state")]
@@ -87,13 +92,16 @@ internal static class WindowAction
         WindowChromeCdp.ContextArgumentError(request.ExpectedProfile, request.ExpectedOrigin,
             request.ExpectedUrl) is null &&
         (WindowChromeCdp.ValidTabElementRef(request.ElementId) ||
-            request.ExpectedProfile is null && request.ExpectedOrigin is null && request.ExpectedUrl is null) &&
+            request.ExpectedOrigin is null && request.ExpectedUrl is null) &&
         (WindowInspector.TryParseElementRef(request.ElementId, out _) ||
          WindowChromeCdp.ValidTabElementRef(request.ElementId)) &&
         (request.ElementPath is null || WindowInspector.TryParseElementRef(request.ElementId, out _) &&
          WindowInspector.TryParsePath(request.ElementPath, out _)) &&
         Enum.IsDefined(request.Action) &&
         Enum.IsDefined(request.ExpectedKind) &&
+        request.ObservationTimeoutMs is >= 100 and <= 15000 &&
+        (request.ExpectedKind is not (WindowExpectedKind.WINDOW_CREATED or WindowExpectedKind.PROCESS_STARTED) ||
+            request.ExpectedName is not null && request.ExpectedChange == WindowExpectedChange.APPEARS) &&
         (request.ExpectedKind == WindowExpectedKind.UIA_VALUE ?
             request.ExpectedValue is { Length: <= 4096 } &&
             !request.ExpectedValue.Contains('\0') && request.ExpectedName is not null :
@@ -132,6 +140,9 @@ internal static class WindowAction
             return new(WindowActionCode.INVALID_ARGUMENT, ElapsedMs: clock.ElapsedMilliseconds);
         if (WindowChromeCdp.ValidTabElementRef(request.ElementId))
             return WindowChromeCdp.InvokeTab(hwnd, request, clock);
+        if (request.ExpectedProfile is not null &&
+            !WindowChromeCdp.VerifiedChromeProfile(hwnd, request.ExpectedProfile))
+            return new(WindowActionCode.CDP_CONTEXT_MISMATCH, Detail: "PROFILE_NOT_VERIFIED");
         try
         {
             var root = AutomationElement.FromHandle(hwnd);
@@ -145,10 +156,20 @@ internal static class WindowAction
                 if (request.Action is not (WindowActionKind.CLICK or WindowActionKind.KEY_PRESS or WindowActionKind.TYPE_TEXT) &&
                     Pattern(element, current.ControlType, request.Action) is null)
                     return new(WindowActionCode.UNSUPPORTED_ACTION);
-                bool? before = null;
-                if (request.ExpectedName is not null)
+                // Creation checks compare identities, not a boolean "process exists":
+                // another Camoufox instance may already be running.
+                WindowEffectBaseline baseline;
+                try { baseline = WindowEffectObserver.Capture(request); }
+                catch (Exception e) when (e is Win32Exception or InvalidOperationException or
+                                          UnauthorizedAccessException or System.Security.SecurityException)
                 {
-                    before = ExpectedStatePresent(root, request);
+                    return new(WindowActionCode.UIA_UNAVAILABLE,
+                        FailureStage: WindowFailureStage.VERIFY_EFFECT, ExceptionType: e.GetType().Name);
+                }
+                if (request.ExpectedName is not null &&
+                    request.ExpectedKind is not (WindowExpectedKind.PROCESS_STARTED or WindowExpectedKind.WINDOW_CREATED))
+                {
+                    bool before = ExpectedStatePresent(root, request);
                     bool desired = request.ExpectedChange == WindowExpectedChange.APPEARS;
                     if (before == desired)
                         return new(WindowActionCode.EXPECTED_STATE_ALREADY_TRUE,
@@ -157,6 +178,8 @@ internal static class WindowAction
                 bool radioInvoke = request.Action == WindowActionKind.SELECT &&
                     current.ControlType == ControlType.RadioButton &&
                     element.TryGetCurrentPattern(InvokePattern.Pattern, out _);
+                bool selectionObservable = request.Action == WindowActionKind.SELECT &&
+                    element.TryGetCurrentPattern(SelectionItemPattern.Pattern, out _);
                 var result = request.Action == WindowActionKind.CLICK
                     ? WindowPhysicalClick.Click(hwnd, element, request, clock)
                     : request.Action == WindowActionKind.KEY_PRESS
@@ -182,7 +205,7 @@ internal static class WindowAction
                 // Providers may report a failed Invoke *after* the UI changed.
                 // Reconcile by observation without re-dispatching the action.
                 if ((result.Status == WindowActionCode.COMPLETED || result.EffectUnknown) &&
-                    request.ExpectedName is not null)
+                    (request.ExpectedName is not null || selectionObservable))
                 {
                     try
                     {
@@ -190,19 +213,22 @@ internal static class WindowAction
                         var verification = Stopwatch.StartNew();
                         do
                         {
-                            var afterRoot = request.ExpectedKind is WindowExpectedKind.UIA_ELEMENT or WindowExpectedKind.UIA_VALUE
-                                ? AutomationElement.FromHandle(hwnd) : root;
-                            observed = afterRoot is not null &&
-                                ExpectedStatePresent(afterRoot, request) ==
-                                (request.ExpectedChange == WindowExpectedChange.APPEARS);
+                            observed = request.ExpectedName is not null
+                                ? WindowEffectObserver.Check(request, baseline) ==
+                                    (request.ExpectedChange == WindowExpectedChange.APPEARS)
+                                : TargetSelected(hwnd, path, element.GetRuntimeId());
                             if (observed) break;
-                            Thread.Sleep(75);
-                        } while (verification.ElapsedMilliseconds < 1000);
-                        result = ReconcileObserved(result, observed);
+                            Thread.Sleep(100);
+                        } while (verification.ElapsedMilliseconds < request.ObservationTimeoutMs);
+                        result = ReconcileObserved(result, observed) with
+                        { ObservationState = observed ? WindowObservationState.OBSERVED : WindowObservationState.NOT_OBSERVED };
                     }
-                    catch (Exception e) when (e is COMException or ElementNotAvailableException or InvalidOperationException)
+                    catch (Exception e) when (e is COMException or ElementNotAvailableException or
+                                              InvalidOperationException or Win32Exception or
+                                              UnauthorizedAccessException or System.Security.SecurityException)
                     {
-                        result = result with { ExpectedStateObserved = false,
+                        result = result with { ExpectedStateObserved = null,
+                            ObservationState = WindowObservationState.UNKNOWN,
                             FailureStage = result.FailureStage ?? WindowFailureStage.VERIFY_EFFECT,
                             ExceptionType = result.ExceptionType ?? e.GetType().Name,
                             HResult = result.HResult ?? e.HResult.ToString("X8") };
@@ -284,7 +310,7 @@ internal static class WindowAction
             string.Equals(valuePattern.Current.Value, value, StringComparison.Ordinal);
     }
 
-    private static bool ExpectedStatePresent(AutomationElement root, WindowActionRequest request)
+    internal static bool ExpectedStatePresent(AutomationElement root, WindowActionRequest request)
     {
         string name = request.ExpectedName!;
         return request.ExpectedKind switch
@@ -295,6 +321,16 @@ internal static class WindowAction
                 ExternalStatePresent(request.ExpectedKind, name),
             _ => false
         };
+    }
+
+    private static bool TargetSelected(IntPtr hwnd, int[] path, int[] runtimeId)
+    {
+        var root = AutomationElement.FromHandle(hwnd);
+        if (root is null) return false;
+        var element = WindowInspector.ResolvePath(root, TreeWalker.ControlViewWalker, path);
+        return element is not null && element.GetRuntimeId().SequenceEqual(runtimeId) &&
+            element.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var selected) &&
+            selected is SelectionItemPattern item && item.Current.IsSelected;
     }
 
     internal static bool ExternalStatePresent(WindowExpectedKind kind, string name)
@@ -314,6 +350,7 @@ internal static class WindowAction
     // requested transition is observed after a reported dispatch failure.
     internal static WindowActionResult ReconcileObserved(WindowActionResult result, bool observed) =>
         result with { ExpectedStateObserved = observed,
+            ObservationState = observed ? WindowObservationState.OBSERVED : WindowObservationState.NOT_OBSERVED,
             EffectUnknown = result.EffectUnknown && !observed,
             FailureStage = observed ? result.FailureStage :
                 result.FailureStage ?? WindowFailureStage.VERIFY_EFFECT };
@@ -359,7 +396,7 @@ internal static class WindowAction
             start.Environment.Remove("OPENAI_API_KEY");
             process.StartInfo = start;
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            deadline.CancelAfter(TimeSpan.FromSeconds(5));
+            deadline.CancelAfter(TimeSpan.FromMilliseconds(request.ObservationTimeoutMs + 6000));
             try
             {
                 if (!process.Start()) throw new Win32Exception("Worker launch failed");
@@ -416,6 +453,7 @@ internal static class WindowAction
                 window_hash = windowHash, element_id = req.ElementId,
                 action = req.Action.ToString(), result = result?.Status.ToString(),
                 effect_state = result?.EffectState.ToString(),
+                observation_state = result?.ObservationState.ToString(),
                 failure_stage = result?.FailureStage?.ToString(), hresult = result?.HResult,
                 utc = DateTimeOffset.UtcNow
             }, PipeWire.Json);

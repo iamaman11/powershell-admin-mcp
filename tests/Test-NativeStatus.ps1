@@ -65,13 +65,17 @@ try{
         Send $p 1 'tools/list' @{_meta=$meta}
         $list=Receive $p 1
         $names=@($list.tools|ForEach-Object {$_.name})
-        $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element')
+        $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element','powershell_update')
         Assert (@($required|Where-Object {$_ -notin $names}).Count -eq 0 -and $names.Count -eq @($names|Select-Object -Unique).Count) 'r5.required_window_tools_without_duplicates'
         $inspectTool=@($list.tools|Where-Object name -eq 'windows.inspect_window')
         $actionTool=@($list.tools|Where-Object name -eq 'windows.invoke_element')
         Assert ($inspectTool.Count -eq 1 -and $actionTool.Count -eq 1 -and
             @(@('window_id','max_depth','max_elements','start_path','start_element_id','offset','include_details','name_contains','role_filter','wait_ms','scope','tab_id','expected_profile','expected_origin','expected_url')|Where-Object {-not $inspectTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
-            @(@('window_id','element_id','action','value','confirm','element_path','expected_name','expected_change','key','expected_kind','expected_value','expected_profile','expected_origin','expected_url')|Where-Object {-not $actionTool[0].inputSchema.properties.Contains($_)}).Count -eq 0) 'r5.actual_tools_list_exposes_typed_semantic_uia_contract'
+            @(@('window_id','element_id','action','value','confirm','element_path','expected_name','expected_change','key','expected_kind','expected_value','expected_profile','expected_origin','expected_url','observation_timeout_ms')|Where-Object {-not $actionTool[0].inputSchema.properties.Contains($_)}).Count -eq 0) 'r5.actual_tools_list_exposes_typed_semantic_uia_contract'
+        $updateTool=@($list.tools|Where-Object name -eq 'powershell_update')
+        Assert ($updateTool.Count -eq 1 -and $updateTool[0].inputSchema.properties.Contains('action') -and
+            $updateTool[0].outputSchema.properties.Contains('operation_id') -and
+            $updateTool[0].outputSchema.properties.Contains('installed_commit')) 'r5.typed_independent_operator_update_contract'
         Assert ($actionTool[0].outputSchema.properties.Contains('foreground_changed') -and
             $actionTool[0].outputSchema.properties.Contains('target_activated') -and
             $actionTool[0].outputSchema.properties.Contains('effect_state') -and
@@ -397,6 +401,8 @@ try{
     Assert ($doctor.schemaVersion -eq 1 -and $doctor.status -eq 'DEGRADED' -and $doctorExit -eq 1) 'r6.doctor_reports_isolated_install_degraded'
     Assert ($doctor.service.service_pid -eq (Get-CimInstance Win32_Service -Filter "Name='$name'").ProcessId -and $doctor.store.schemaVersion -eq 4) 'r6.doctor_authoritative_service_store'
     Assert ($doctor.store.total -gt 0 -and $doctor.store.waitingForReboot -eq 0 -and $doctor.store.needsReconciliation -ge 1) 'r6.doctor_total_state_counts'
+    Assert ($doctor.localOperationalReady -and $doctor.reconciliationCount -ge 1 -and
+        $doctor.externalAcceptanceStatus -eq 'NOT_TESTED') 'r6.doctor_operational_ready_despite_historical_reconciliation'
     Assert (@($doctor.checks|Where-Object {$_.component -eq 'Remote' -and $_.status -eq 'NOT_TESTED'}).Count -eq 1) 'r6.doctor_no_false_remote_acceptance'
     if($Performance){
         $performance=& (Join-Path $PSScriptRoot 'Test-NativePerformance.ps1') -Exe $Exe -DurationSeconds 12 -ExerciseJobs|ConvertFrom-Json

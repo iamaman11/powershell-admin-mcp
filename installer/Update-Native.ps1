@@ -2,7 +2,9 @@
 # protected file swaps and rollback. SCM/Task Scheduler own process lifetime.
 [CmdletBinding()]
 param([ValidateSet('update','rollback','accept')][string]$Action='update',
-      [switch]$RemoteAcceptanceConfirmed)
+      [switch]$RemoteAcceptanceConfirmed,
+      [switch]$ScheduledOperator,
+      [ValidatePattern('^[a-f0-9]{32}$')][string]$OperationId)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 function Select-UpdateRun($runs,[string]$commit){
@@ -264,13 +266,32 @@ function Assert-InstalledRollbackTarget([string]$scriptDirectory,[string]$instal
         }
     }
 }
+function Test-ScheduledUpdateIdentity($task,[string]$account,[string]$updater,[string]$operation,
+                                      [string]$sid='',[string]$pwsh=''){
+    return $null -ne $task -and $task.State.ToString() -eq 'Running' -and
+        ($task.Principal.UserId -ieq $account -or ($sid -and $task.Principal.UserId -ceq $sid)) -and
+        ($pwsh -eq '' -or $task.Actions[0].Execute -ieq $pwsh) -and
+        $task.Principal.LogonType.ToString() -eq 'Interactive' -and
+        $task.Principal.RunLevel.ToString() -eq 'Highest' -and @($task.Actions).Count -eq 1 -and
+        $task.Actions[0].Arguments.Contains(('"'+$updater+'"')) -and
+        $task.Actions[0].Arguments.EndsWith(('-ScheduledOperator -OperationId '+$operation),[StringComparison]::Ordinal)
+}
 # Dot-sourcing exposes only the pure checks for isolated CI, not a way around
 # the public local-console guard.
 if($MyInvocation.InvocationName -eq '.'){return}
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
-if([Console]::IsInputRedirected -or -not [Environment]::UserInteractive -or
-    [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or $identity.IsSystem -or
-    -not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
+if(-not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0 -or
+    $identity.IsSystem -or -not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
+    throw 'UPDATE_LOCAL_INTERACTIVE_ADMIN_REQUIRED'
+}
+if($ScheduledOperator){
+    if($Action -ne 'update' -or -not $OperationId){throw 'UPDATE_SCHEDULED_OPERATION_INVALID'}
+    $operatorTask=Get-ScheduledTask -TaskName 'WindowsAdminMCP-OperatorUpdate' -ErrorAction SilentlyContinue
+    if(-not(Test-ScheduledUpdateIdentity $operatorTask $identity.Name $PSCommandPath $OperationId
+        $identity.User.Value (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'))){
+        throw 'UPDATE_SCHEDULED_TASK_NOT_CONFIRMED'
+    }
+}elseif([Console]::IsInputRedirected -or $OperationId){
     throw 'UPDATE_LOCAL_INTERACTIVE_ADMIN_REQUIRED'
 }
 $root=Join-Path $env:ProgramFiles 'WindowsAdminMCP'
@@ -290,6 +311,19 @@ $drainTool=$null
 $drainRequested=$false
 $cancelledQueued=0
 $cancelRequested=0
+$current=$null
+$installed=$null
+function Write-OperatorStage([string]$state,[string]$reason=''){
+    if(-not $ScheduledOperator){return}
+    $target=Join-Path $root '.operator-update.json'
+    $temp=Join-Path $root ('.operator-update-'+$OperationId+'.tmp')
+    $commit=if($null -ne $current){$current.commit}elseif($null -ne $installed){$installed.commit}else{$null}
+    $status=[ordered]@{schema=1;operation_id=$OperationId;state=$state;stage=$stage;
+        commit=$commit;reason=$reason;rollback_pending=(Test-Path -LiteralPath (Join-Path $root '.rollback\journal.json'));
+        updated_utc=[DateTimeOffset]::UtcNow.ToString('o')}
+    [IO.File]::WriteAllText($temp,($status|ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
+    [IO.File]::Move($temp,$target,$true)
+}
 function Read-InstalledDoctor {
     # doctor deliberately returns nonzero for NOT_TESTED remote evidence.
     $PSNativeCommandUseErrorActionPreference=$false
@@ -393,6 +427,7 @@ function Invoke-GhJson([string]$endpoint){
     return ($raw|ConvertFrom-Json)
 }
 try{
+    Write-OperatorStage 'RUNNING'
     $installed=Read-Manifest
     if($Action -eq 'accept'){
         if(-not $RemoteAcceptanceConfirmed){throw 'REMOTE_ACCEPTANCE_REQUIRED'}
@@ -410,6 +445,7 @@ try{
         $main=(Invoke-GhJson "repos/$repo/commits/main").sha
         if($main -cnotmatch '^[a-f0-9]{40}$'){throw 'UPDATE_MAIN_IDENTITY'}
         if($main -ceq $installed.commit){
+            Write-OperatorStage 'NO_UPDATE'
             [pscustomobject]@{status='NO_UPDATE';commit=$main;startup_ready=$before.startup_ready}|ConvertTo-Json -Compress
             return
         }
@@ -537,6 +573,8 @@ try{
         if(-not $ready){$after=Read-InstalledDoctor}
     }
     $trialStatus=if($ready){'TRIAL_LOCAL_READY'}elseif($after.tun -ne 'READY'){'TRIAL_WAITING_FOR_TUN'}else{'TRIAL_NOT_READY'}
+    $stage=$trialStatus.ToLowerInvariant()
+    Write-OperatorStage 'COMPLETED'
     [pscustomobject]@{status=$trialStatus;commit=$current.commit;tun=$after.tun;local_ready=$ready;
         startup_ready=$startupState.startup_ready;remote_accepted=$false;
         closed_local_clients=$closedClients;closed_blocking_launchers=$closedLaunchers;
@@ -544,6 +582,8 @@ try{
         needs_reconciliation=$after.store.needsReconciliation;
         next_action='verify eight MCP tools externally, then use -Action accept -RemoteAcceptanceConfirmed'}|ConvertTo-Json -Compress
 }catch{
+    $reason=if($_.Exception.Message -match '^UPDATE_[A-Z0-9_]+$'){$_.Exception.Message}else{$_.Exception.GetType().Name}
+    try{Write-OperatorStage 'FAILED' $reason}catch{Write-Warning 'UPDATE_OPERATOR_RECEIPT_WRITE_FAILED'}
     # Restore transport only when no maintenance/swap was attempted. Once
     # offline maintenance begins the installer journals are the source of truth;
     # do not auto-accept, erase history or guess a rollback after interruption.

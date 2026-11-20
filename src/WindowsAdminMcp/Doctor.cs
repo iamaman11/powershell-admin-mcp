@@ -26,7 +26,9 @@ internal sealed record DoctorReport(int SchemaVersion,DoctorState Status,string 
     AdminStatus? Service,StoreSummary? Store,BootObservation Boot,TunReadiness Tun,
     int? TunnelPid,string? VendorSha256,int SessionId,bool UserInteractive,
     PackageObservation Package,StartupObservation? Startup,VersionIdentity Versions,string RequiredTunAdapter,string RequiredDataplanePath,
-    EvidenceObservation RemoteEvidence,DateTimeOffset? TunnelStartedUtc,int? TunnelSessionId);
+    EvidenceObservation RemoteEvidence,DateTimeOffset? TunnelStartedUtc,int? TunnelSessionId,
+    bool LocalOperationalReady = false,bool UserWorkerReady = false,long? ReconciliationCount = null,
+    DoctorState ExternalAcceptanceStatus = DoctorState.NOT_TESTED,string? InstalledCommit = null);
 
 internal static class Doctor
 {
@@ -129,12 +131,18 @@ internal static class Doctor
             evidence.DesktopReceiptMatched?DoctorReason.EXTERNAL_RECEIPT_MATCHED:DoctorReason.DESKTOP_NOT_TESTED,
             evidence.DesktopReceiptMatched?DoctorAction.NONE:DoctorAction.VERIFY_INTERACTIVE_DESKTOP);
         using var self=Process.GetCurrentProcess();
+        // Historical reconciliation is still a DEGRADED store check, but
+        // never conflated with current admission capacity or service liveness.
+        bool localReady=service && store is not null && store.Detailed < store.TotalLimit;
         return new(1,checks.Any(c=>c.Status==DoctorState.DEGRADED)?DoctorState.DEGRADED:
             checks.Any(c=>c.Status==DoctorState.NOT_TESTED)?DoctorState.NOT_TESTED:DoctorState.OK,
             Guid.NewGuid().ToString("N"),DateTimeOffset.UtcNow,clock.ElapsedMilliseconds,checks.ToArray(),
             RuntimeInformation.FrameworkDescription,Environment.ProcessPath,PowerShellRunner.Executable,
             response.Info,store,boot,tun,tunnelPid,vendorHash,self.SessionId,Environment.UserInteractive,package,startup,
-            BuildIdentity.Observe(),TunDependency.AdapterName,TunDependency.DataplanePath,evidence,tunnelStarted,tunnelSession);
+            BuildIdentity.Observe(),TunDependency.AdapterName,TunDependency.DataplanePath,evidence,tunnelStarted,tunnelSession,
+            localReady,service && response.Info?.UserContextAvailable==true,store?.NeedsReconciliation,
+            evidence.RemoteReceiptMatched?DoctorState.OK:DoctorState.NOT_TESTED,
+            package.Status==PackageCode.VERIFIED?package.Commit:null);
     }
 
     private static async Task<StartupObservation?> ReadStartupAsync(string root)

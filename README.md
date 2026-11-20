@@ -27,6 +27,14 @@ Stop disconnects the interactive tunnel but does not stop the durable system ser
 
 ## Install, update, trial and rollback
 
+### Agent workflow (new installed version)
+
+- `powershell_status` identifies SCM, the USER worker and the current context. `powershell_exec` is for one short command; `powershell_job` provides durable steps, logs, cancellation, resource serialization and reconciliation. Never resubmit an unknown effect automatically.
+- `windows.list_windows` returns HWND/PID/start/session identities. Inspect a specific window using `windows.inspect_window(scope=WINDOW, expected_profile=...)`, then act on its fresh element reference. Native Chrome toolbar labels may contain extra delimited account details; ambiguous profile matches are rejected. UI Automation needs no CDP.
+- For a delayed UI effect, supply `expected_kind=PROCESS_STARTED` and `expected_name=camoufox`, or `expected_kind=WINDOW_CREATED` and the exact new window title, plus `expected_change=APPEARS`. `observation_timeout_ms` is 100–15000 (default 8000). The worker observes a **new identity** after a single dispatch. For `SELECT`, it also observes the element's selected state. Read `observation_state` and the original `audit_id`; `UNKNOWN` or `NOT_OBSERVED` never authorizes automatic repeat.
+- `powershell_update(action=REQUEST)` creates an independent on-demand Scheduler operator in the existing elevated USER session. Save the returned `operation_id`; the connection may drop. After reconnect, use `powershell_update(action=STATUS)`, `powershell_status`, then `doctor` to check the exact installed commit, trial readiness and retained rollback. Do not request a second update while the first outcome remains unknown. No second permanent service or Job Object workaround is involved.
+- The previous installed release does not yet contain this MCP update entry point. Its first upgrade to this version still uses the documented independent operator; later upgrades are autonomous.
+
 For an existing installation **that contains the updater helpers** (included in native packages from this change onward), the standard command from **any PowerShell directory**, using an interactive elevated PowerShell 7 console, is:
 
 ```powershell
