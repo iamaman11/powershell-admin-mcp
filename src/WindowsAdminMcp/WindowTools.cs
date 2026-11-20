@@ -33,7 +33,7 @@ public sealed record WindowListResult(
 public sealed class WindowTools
 {
     [McpServerTool(Name = "windows.list_windows", UseStructuredContent = true),
-     Description("List <=100 USER windows, including occluded; no focus change.")]
+     Description("List up to 100 USER windows without focus change.")]
     public static async Task<WindowListResult> ListWindows(int max_windows = 50,
         CancellationToken cancellationToken = default)
     {
@@ -59,7 +59,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.inspect_window", UseStructuredContent = true),
-     Description("Read UIA without focus. Filter name/role, wait <=1500ms, page or inspect verified subtree. Details <=10.")]
+     Description("Read UIA tree; filter name/role, wait <=1500ms, page or inspect subtree. Details <=10.")]
     public static async Task<WindowInspectResult> InspectWindow(string window_id, int max_depth = 12,
         int max_elements = 100, string? start_path = null, string? start_element_id = null,
         int offset = 0, bool include_details = false, string? name_contains = null,
@@ -92,7 +92,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.capture_window", UseStructuredContent = true),
-     Description("WGC capture of USER window, even occluded; no focus. PNG <=2 MB; protected/minimized may fail.")]
+     Description("WGC capture of selected USER window. PNG <=2 MB; no focus change.")]
     public static async Task<ModelContextProtocol.Protocol.CallToolResult> CaptureWindow(string window_id,
         int max_width = 1280, CancellationToken cancellationToken = default)
     {
@@ -116,7 +116,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.invoke_element", UseStructuredContent = true),
-     Description("UIA action, guarded CLICK or focus-verified KEY_PRESS. Fresh element_id, confirm=true; optional expected change. Never auto-retry.")]
+     Description("UIA, guarded CLICK or focus-verified KEY_PRESS. Fresh element_id, confirm=true; verify effects; no retry.")]
     public static async Task<WindowActionResult> InvokeElement(string window_id, string element_id,
         WindowActionKind action, string? value = null, bool confirm = false,
         string? element_path = null, string? expected_name = null,

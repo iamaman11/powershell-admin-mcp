@@ -81,7 +81,7 @@ public sealed class AdminTools
     }
 
     [McpServerTool(Name="powershell_job",UseStructuredContent=true),
-        Description("Durable 1-8 steps: submit/status/list/logs/cancel/resume/reconcile/prune. Stable operation_key; no replay of interrupted steps. Verify full reboot.")]
+        Description("Durable steps: submit/status/list/logs/cancel/resume/reconcile/prune. No replay of uncertain steps.")]
     public static async Task<JobReply> Job(JobAction action,string? operation_key=null,string? job_id=null,
         string? command=null,int timeout_seconds=30,string? working_directory=null,JobStep[]? steps=null,
         [Description("Logs only; step number is 1-based.")] int? step_index=null,int? expected_completed_steps=null,
@@ -119,7 +119,7 @@ public sealed class AdminTools
     internal static TimeSpan ExecWaitBudget(int executionSeconds) => TimeSpan.FromSeconds(Math.Min(executionSeconds + 5, 90));
 
     [McpServerTool(Name="powershell_exec",UseStructuredContent=true),
-        Description("Durable PowerShell step; USER default, SYSTEM explicit. Timeout 1-120s, wait <=90s. PENDING: inspect job_id, no replay.")]
+        Description("Durable PowerShell step; USER default. Timeout 1-120s; PENDING: inspect job_id, no replay.")]
     public static async Task<ExecutionResult> Exec(string command,int timeout_seconds=30,
         string? working_directory=null,string? operation_key=null,CommandContext? execution_context=null,string? resource_key=null,CancellationToken cancellationToken=default)
     {
