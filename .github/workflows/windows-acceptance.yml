@@ -13,7 +13,9 @@ concurrency:
 jobs:
   windows:
     runs-on: windows-2025
-    timeout-minutes: 8
+    timeout-minutes: 18
+    env:
+      FULL_ACCEPTANCE: ${{ github.event_name == 'push' || !github.event.pull_request.draft }}
     steps:
       - uses: actions/checkout@v4
       - name: Parse PowerShell sources before expensive tests
@@ -58,32 +60,26 @@ jobs:
           $plan=./installer/NativeStartup.ps1 -Action Plan | ConvertFrom-Json
           if($plan.mutated -or $plan.service_start -ne 'Automatic' -or $plan.trigger -ne 'MSFT_TaskLogonTrigger' -or $plan.logon -ne 'Interactive' -or $plan.run_level -ne 'Highest' -or $plan.arguments -ne 'tunnel' -or $plan.multiple_instances -ne 'IgnoreNew' -or $plan.restart_count -ne 3){throw 'NATIVE_STARTUP_PLAN_INVALID'}
           Write-Host 'R6_STARTUP_DEFINITION=PASS (plan only; no task registered)'
-  release:
-    # Full native package acceptance on main, or once a PR leaves draft.
-    # Iterative draft PRs keep the fast native-contract gate only.
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && !github.event.pull_request.draft)
-    needs: windows
-    runs-on: windows-2025
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '10.0.x'
+      # This is a fixed historical upgrade fixture. Cache its tested ZIP,
+      # not mutable compiler outputs or the current commit's release binary.
       - uses: actions/cache@v4
+        if: env.FULL_ACCEPTANCE == 'true'
         with:
-          path: ~/.nuget/packages
-          key: nuget-${{ runner.os }}-${{ hashFiles('src/**/*.csproj', 'research/**/*.csproj', 'tests/**/*.csproj') }}
+          path: |
+            ${{ runner.temp }}/wmcp-legacy-fed40dc07d9a6f6651430e54b0c48529b80f0327.zip
+            ${{ runner.temp }}/wmcp-legacy-fed40dc07d9a6f6651430e54b0c48529b80f0327.sha256
+          key: wmcp-legacy-v1-${{ runner.os }}-win-x64-fed40dc07d9a6f6651430e54b0c48529b80f0327
       - name: Exercise SCM, SQLite, Job Objects and shared MCP queue
+        if: env.FULL_ACCEPTANCE == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          dotnet build research/R0SdkProbe/R0SdkProbe.csproj -c Release
-          if ($LASTEXITCODE -ne 0) { throw 'SDK_BUILD_FAILED' }
+          # R0SdkProbe was already built and wire-tested above on this runner.
           dotnet publish research/R0NativeProbe/R0NativeProbe.csproj -c Release -r win-x64 --self-contained true -o "${{ runner.temp }}/R0NativeProbe"
           if ($LASTEXITCODE -ne 0) { throw 'PUBLISH_FAILED' }
           ./research/R0NativeProbe/Test-Native.ps1 -Exe "${{ runner.temp }}/R0NativeProbe/R0NativeProbe.exe" -SdkDll research/R0SdkProbe/bin/Release/net10.0/R0SdkProbe.dll
       - name: Publish and verify actual native application R1 status
+        if: env.FULL_ACCEPTANCE == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -91,6 +87,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'R1_PUBLISH_FAILED' }
           ./tests/Test-NativeStatus.ps1 -Exe "${{ runner.temp }}/WindowsAdminMcpCandidate/WindowsAdminMCP.exe"
       - name: Build and test offline native installation package
+        if: env.FULL_ACCEPTANCE == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -101,7 +98,7 @@ jobs:
           $updateReceipt=[ordered]@{schema=1;commit=$env:GITHUB_SHA;run_id=$env:GITHUB_RUN_ID;sha256=$receipt.sha256}
           [IO.File]::WriteAllText((Join-Path "${{ runner.temp }}" 'WindowsAdminMCP-update.json'),($updateReceipt|ConvertTo-Json -Compress))
       - uses: actions/upload-artifact@v4
-        if: success()
+        if: success() && env.FULL_ACCEPTANCE == 'true'
         with:
           name: WindowsAdminMCP-offline-package
           path: |
@@ -111,16 +108,41 @@ jobs:
             installer/NativeFileSwap.ps1
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
-        if: success()
+        if: success() && env.FULL_ACCEPTANCE == 'true'
         with:
           name: WindowsAdminMcp-candidate-win-x64
           path: "${{ runner.temp }}/WindowsAdminMcpCandidate/"
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && env.FULL_ACCEPTANCE == 'true'
         with:
           name: r0-package-locks
           path: |
             research/**/packages.lock.json
             src/**/packages.lock.json
           if-no-files-found: warn
+  release:
+    # Preserve the release status check and verify the published bytes.
+    # No second Windows VM, source checkout, restore or compilation.
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && !github.event.pull_request.draft)
+    needs: windows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: WindowsAdminMCP-offline-package
+          path: package
+      - name: Verify released package digest and source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t packages < <(find package -type f -name 'WindowsAdminMCP-win-x64.zip')
+          mapfile -t receipts < <(find package -type f -name 'WindowsAdminMCP-update.json')
+          [[ ${#packages[@]} -eq 1 && ${#receipts[@]} -eq 1 ]] || exit 1
+          actual=$(sha256sum "${packages[0]}" | cut -d ' ' -f 1)
+          expected=$(jq -er '.sha256' "${receipts[0]}")
+          [[ "${actual,,}" == "${expected,,}" ]] || exit 1
+          [[ "$(jq -er '.commit' "${receipts[0]}")" == "$GITHUB_SHA" ]] || exit 1
+          [[ "$(jq -er '.run_id | tostring' "${receipts[0]}")" == "$GITHUB_RUN_ID" ]] || exit 1
+          echo "RELEASE_ARTIFACT_VERIFIED=$actual"
