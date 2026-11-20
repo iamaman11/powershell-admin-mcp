@@ -55,6 +55,7 @@ internal static class WindowActionNoFocus
         IntPtr unknown = IntPtr.Zero, automation = IntPtr.Zero, walker = IntPtr.Zero;
         IntPtr element = IntPtr.Zero, pattern = IntPtr.Zero;
         bool dispatched = false;
+        WindowFailureStage stage = WindowFailureStage.PREPARE_UIA;
         IntPtr foregroundAtEntry = GetForegroundWindow();
         try
         {
@@ -73,6 +74,7 @@ internal static class WindowActionNoFocus
                     ElapsedMs: clock.ElapsedMilliseconds);
             Check(Method<ElementFromHandle>(automation, ElementFromHandleSlot)(
                 automation, hwnd, out element));
+            stage = WindowFailureStage.RESOLVE_ELEMENT;
             if (element == IntPtr.Zero)
                 return new(WindowActionCode.STALE_ELEMENT, ElapsedMs: clock.ElapsedMilliseconds);
 
@@ -126,6 +128,7 @@ internal static class WindowActionNoFocus
                 return new(WindowActionCode.UNSUPPORTED_ACTION, ElapsedMs: clock.ElapsedMilliseconds);
 
             IntPtr foregroundBefore = GetForegroundWindow();
+            stage = WindowFailureStage.DISPATCH_UIA;
             dispatched = true;
             int result = request.Action == WindowActionKind.SET_VALUE
                 ? Method<SetValueAction>(pattern, PatternActionSlot)(pattern, request.Value!)
@@ -145,7 +148,9 @@ internal static class WindowActionNoFocus
                 ? new(WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
                     ForegroundChanged: changed, Detail: result.ToString("X8") +
                         (focusDetail is null ? "" : ":" + focusDetail),
-                    ElapsedMs: clock.ElapsedMilliseconds, TargetActivated: targetActivated)
+                    ElapsedMs: clock.ElapsedMilliseconds, TargetActivated: targetActivated,
+                    FailureStage: stage, HResult: result.ToString("X8"),
+                    ProviderResponse: result.ToString("X8"))
                 : new(WindowActionCode.COMPLETED, ForegroundChanged: changed,
                     Detail: focusDetail,
                     ElapsedMs: clock.ElapsedMilliseconds, TargetActivated: targetActivated);
@@ -155,7 +160,8 @@ internal static class WindowActionNoFocus
         {
             return new(dispatched ? WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT : WindowActionCode.UIA_UNAVAILABLE,
                 EffectUnknown: dispatched, Detail: error.HResult.ToString("X8"),
-                ElapsedMs: clock.ElapsedMilliseconds);
+                ElapsedMs: clock.ElapsedMilliseconds, FailureStage: stage,
+                ExceptionType: error.GetType().Name, HResult: error.HResult.ToString("X8"));
         }
         finally
         {
