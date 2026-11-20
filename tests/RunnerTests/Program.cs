@@ -260,24 +260,20 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             .WaitAsync(TimeSpan.FromSeconds(5));
         Check(missing.Status == WindowInspectCode.STATE_NOT_OBSERVED && missing.Elements.Length == 0,
             "windows.wait_for_missing_state_returns_explicit_timeout");
-        _ = Task.Run(async () =>
+        created.Form.Invoke(new Action(() =>
         {
-            await Task.Delay(200);
-            created.Form.BeginInvoke(new Action(() =>
-            {
-                var target = created.Form.Controls.OfType<System.Windows.Forms.Button>()
-                    .Single(b => b.AccessibleName == "CI_UIA_PENDING");
-                target.Text = "CI_UIA_DELAYED_READY";
-                target.AccessibleName = "CI_UIA_DELAYED_READY";
-            }));
-        });
+            var target = created.Form.Controls.OfType<System.Windows.Forms.Button>()
+                .Single(b => b.AccessibleName == "CI_UIA_PENDING");
+            target.Text = "CI_UIA_DELAYED_READY";
+            target.AccessibleName = "CI_UIA_DELAYED_READY";
+        }));
         var delayed = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 10,
             realWindowId, nameContains: "CI_UIA_DELAYED_READY", roleFilter: WindowRoleFilter.BUTTON,
             waitMs: 1200)).WaitAsync(TimeSpan.FromSeconds(5));
         Console.WriteLine($"DELAYED_SEARCH status={delayed.Status} nodes={delayed.Elements.Length}");
         Check(delayed.Status == WindowInspectCode.COMPLETED &&
             delayed.Elements.Length == 1 && delayed.Elements[0].Name == "CI_UIA_DELAYED_READY",
-            "windows.wait_for_late_react_style_element_without_focus");
+            "windows.wait_for_changed_react_style_element_without_focus");
         var rejectedKeyboard = await Task.Run(() => WindowPhysicalClick.PressKey(
             IntPtr.Zero, System.Windows.Automation.AutomationElement.FromHandle(created.Handle),
             new WindowActionRequest(realWindowId, delayed.Elements[0].ElementId,
