@@ -18,11 +18,33 @@ Check (Reject {Select-UpdateArtifact @($artifact) '12' ('b'*40)} 'UPDATE_ARTIFAC
 Check (Reject {Select-UpdateArtifact @($artifact,$artifact) '12' $sha} 'UPDATE_ARTIFACT_IDENTITY_UNCONFIRMED') 'h5.no_ambiguous_artifact'
 Check (Reject {Select-UpdateArtifact @([pscustomobject]@{id=123;name=$artifact.name;expired=$true;
     size_in_bytes=100000000;workflow_run=$artifact.workflow_run}) '12' $sha} 'UPDATE_ARTIFACT_IDENTITY_UNCONFIRMED') 'h5.no_expired_artifact'
+$response=[Net.Http.HttpResponseMessage]::new([Net.HttpStatusCode]::OK)
+try{
+    $response.Content=[Net.Http.ByteArrayContent]::new([byte[]](1,2,3,4,5,6,7,8))
+    Check ((Confirm-UpdateDownloadResponse $response 0 0) -eq 8) 'h5.full_download_length_verified'
+    Check (Reject {Confirm-UpdateDownloadResponse $response 4 8} 'UPDATE_DOWNLOAD_RESUME_UNCONFIRMED') 'h5.resume_refuses_unbounded_200_response'
+}finally{$response.Dispose()}
+$response=[Net.Http.HttpResponseMessage]::new([Net.HttpStatusCode]::PartialContent)
+try{
+    $response.Content=[Net.Http.ByteArrayContent]::new([byte[]](5,6,7,8))
+    $response.Content.Headers.ContentRange=[Net.Http.Headers.ContentRangeHeaderValue]::new(4,7,8)
+    Check ((Confirm-UpdateDownloadResponse $response 4 8) -eq 8) 'h5.resume_verifies_exact_http_206_range'
+    Check (Reject {Confirm-UpdateDownloadResponse $response 5 8} 'UPDATE_DOWNLOAD_RESUME_UNCONFIRMED') 'h5.resume_rejects_wrong_offset'
+    $response.Content.Headers.ContentRange=[Net.Http.Headers.ContentRangeHeaderValue]::new(4,7,9)
+    Check (Reject {Confirm-UpdateDownloadResponse $response 4 8} 'UPDATE_DOWNLOAD_RESUME_UNCONFIRMED') 'h5.resume_rejects_wrong_artifact_length'
+}finally{$response.Dispose()}
 $source=[IO.MemoryStream]::new([byte[]](1,2,3,4,5,6,7,8))
 $destination=[IO.MemoryStream]::new()
 try{
     Copy-UpdateDownloadStream $source $destination ([Threading.CancellationToken]::None) 8 1 8
     Check (([Convert]::ToHexString($destination.ToArray())) -ceq '0102030405060708') 'h5.stream_download_exact_bytes'
+}finally{$source.Dispose();$destination.Dispose()}
+$source=[IO.MemoryStream]::new([byte[]](5,6,7,8))
+$destination=[IO.MemoryStream]::new()
+try{
+    $destination.Write([byte[]](1,2,3,4),0,4)
+    Copy-UpdateDownloadStream $source $destination ([Threading.CancellationToken]::None) 8 1 8 4
+    Check (([Convert]::ToHexString($destination.ToArray())) -ceq '0102030405060708') 'h5.resume_preserves_exact_prefix'
 }finally{$source.Dispose();$destination.Dispose()}
 $source=[IO.MemoryStream]::new([byte[]](1,2,3,4))
 $destination=[IO.MemoryStream]::new()
