@@ -131,11 +131,12 @@ public sealed class WindowTools
         WindowExpectedKind expected_kind = WindowExpectedKind.UIA_ELEMENT,
         string? expected_value = null, string? expected_profile = null,
         string? expected_origin = null, string? expected_url = null,
+        int observation_timeout_ms = 8000,
         CancellationToken cancellationToken = default)
     {
         var request = new WindowActionRequest(window_id, element_id, action, value,
             element_path, expected_name, expected_change, key, expected_kind,
-            expected_value, expected_profile, expected_origin, expected_url);
+            expected_value, expected_profile, expected_origin, expected_url, observation_timeout_ms);
         if (!WindowAction.Valid(request)) return new(WindowActionCode.INVALID_ARGUMENT);
         if (!confirm) return new(WindowActionCode.CONFIRMATION_REQUIRED);
 

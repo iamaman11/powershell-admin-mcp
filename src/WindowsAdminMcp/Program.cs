@@ -160,7 +160,7 @@ else if (args is ["stdio"])
     builder.Services.AddMcpServer(options =>
     {
         options.ServerInfo = new() { Name = "windows-admin-mcp", Version = BuildIdentity.McpVersion };
-    }).WithStdioServerTransport().WithTools<AdminTools>().WithTools<WindowTools>();
+    }).WithStdioServerTransport().WithTools<AdminTools>().WithTools<WindowTools>().WithTools<UpdateTools>();
     await builder.Build().RunAsync();
 }
 else

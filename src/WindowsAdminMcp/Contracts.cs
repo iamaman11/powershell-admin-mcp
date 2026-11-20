@@ -52,6 +52,7 @@ public sealed record AdminStatus(
     [property: JsonPropertyName("command_context")] CommandContext? ExecutionContext = null,
     [property: JsonPropertyName("user_context_available")] bool? UserContextAvailable = null,
     [property:JsonPropertyName("versions")] VersionIdentity? Versions = null,
+    [property:JsonPropertyName("admission_open")] bool? AdmissionOpen = null,
     [property:JsonPropertyName("timing")] ToolTiming? Timing = null);
 
 

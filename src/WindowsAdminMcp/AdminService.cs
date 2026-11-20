@@ -172,7 +172,8 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                         using var actual = WindowsIdentity.GetCurrent();
                         var status = new AdminStatus(StatusCode.OK, correlation, Environment.ProcessId, Environment.MachineName,
                             actual.Name, actual.User?.Value, actual.IsSystem, started,
-                            UserContextAvailable:jobs.UserAvailable(user),Versions:BuildIdentity.Observe());
+                            UserContextAvailable:jobs.UserAvailable(user),Versions:BuildIdentity.Observe(),
+                            AdmissionOpen:jobs.AdmissionOpen);
                         try
                         {
                             response = new(StatusCode.OK, correlation, Info: status,
