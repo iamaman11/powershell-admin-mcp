@@ -61,6 +61,19 @@ Check(WindowInspector.ValidArguments(testWindowId, 0, 1) &&
     !WindowInspector.ValidArguments(testWindowId, 17, 50) &&
     !WindowInspector.ValidArguments(testWindowId, 3, 101) &&
     !WindowInspector.ValidArguments("invalid", 3, 60), "windows.inspect_bounded_arguments");
+Check(WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.TABS) &&
+    WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.TAB, tabId: "0123456789abcdef0123456789abcdef") &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.TAB, tabId: "invalid") &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.TABS, tabId: "0123456789abcdef0123456789abcdef") &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.WINDOW, tabId: "0123456789abcdef0123456789abcdef") &&
+    WindowInspector.ArgumentError(testWindowId, 16, 11, includeDetails: true)?.Contains(
+        "max_elements", StringComparison.Ordinal) == true,
+    "windows.typed_chrome_tab_scope_and_precise_invalid_argument");
 Check(WindowInspector.InspectCore(IntPtr.Zero, 1, 20).Status == WindowInspectCode.INVALID_ARGUMENT,
     "windows.inspect_reject_null_hwnd");
 var invalidInspect = await WindowTools.InspectWindow("invalid");
@@ -79,6 +92,10 @@ Check(WindowInspector.TryParsePath("0.1.0.25", out var parsedPath) &&
     !WindowInspector.TryParsePath("0.2001", out _), "windows.inspect_strict_path_contract");
 Check(WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.INVOKE, null)) &&
     WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.CLICK, null)) &&
+    WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.TYPE_TEXT,
+        "https://example.com/")) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.TYPE_TEXT,
+        null)) &&
     WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.KEY_PRESS,
         null, Key: WindowKey.ENTER)) &&
     !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.KEY_PRESS,
@@ -97,12 +114,49 @@ Check(WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, W
     !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.INVOKE, "unexpected")) &&
     !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.SET_VALUE, new string('x', 4097))),
     "windows.action_bounded_arguments");
+Check(WindowChromeCdp.ValidTargetId("0123456789abcdef0123456789abcdef") &&
+    !WindowChromeCdp.ValidTargetId("https://example.com") &&
+    !WindowChromeCdp.ValidTabElementRef("c1:1:bad:1:bad:deadbeef"),
+    "chrome.cdp_target_and_element_reference_boundaries");
+using (var protectedNode = System.Text.Json.JsonDocument.Parse(
+    "{\"properties\":[{\"name\":\"protected\",\"value\":{\"value\":true}}]}"))
+    Check(WindowChromeCdp.IsProtectedAx(protectedNode.RootElement),
+        "chrome.cdp_protected_fields_are_not_actionable");
 Check(new WindowActionResult(WindowActionCode.COMPLETED).EffectState == WindowEffectState.EFFECT_UNKNOWN &&
     new WindowActionResult(WindowActionCode.COMPLETED, ExpectedStateObserved: true).EffectState ==
         WindowEffectState.EFFECT_VERIFIED &&
     new WindowActionResult(WindowActionCode.STALE_ELEMENT).EffectState == WindowEffectState.NO_EFFECT &&
     new WindowActionResult(WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT, EffectUnknown: true).EffectState ==
         WindowEffectState.EFFECT_UNKNOWN, "windows.action_effect_state_never_assumes_success");
+Check(WindowChromeCdp.TryReadEndpoint(
+        "9222\n/devtools/browser/01234567-89ab-cdef-0123-456789abcdef\n", out var chromeEndpoint) &&
+    chromeEndpoint?.Host == "127.0.0.1" && chromeEndpoint.Port == 9222 &&
+    !WindowChromeCdp.TryReadEndpoint(
+        "9222\nhttp://example.com/steal", out _) &&
+    !WindowChromeCdp.TryReadEndpoint(
+        "0\n/devtools/browser/01234567-89ab-cdef-0123-456789abcdef", out _) &&
+    !WindowChromeCdp.TryReadEndpoint(
+        "99999\n/devtools/browser/01234567-89ab-cdef-0123-456789abcdef", out _),
+    "chrome.cdp_local_opt_in_endpoint_only");
+Check(WindowChromeCdp.MatchesWindow("Profile Control Plane - Google Chrome (Valer)",
+        "Profile Control Plane", new WindowBounds(100, 80, 1200, 800),
+        new WindowBounds(80, 64, 960, 640), 1.25) &&
+    !WindowChromeCdp.MatchesWindow("Unrelated - Google Chrome (Valer)",
+        "Profile Control Plane", new WindowBounds(100, 80, 1200, 800),
+        new WindowBounds(80, 64, 960, 640), 1.25) &&
+    !WindowChromeCdp.MatchesWindow("Profile Control Plane - Google Chrome (Valer)",
+        "Profile Control Plane", new WindowBounds(900, 80, 1200, 800),
+        new WindowBounds(80, 64, 960, 640), 1.25),
+    "chrome.cdp_exact_window_title_and_bounds");
+using (var model = System.Text.Json.JsonDocument.Parse("{\"quad\":[10,20,30,20,30,40,10,40],\"viewport\":{\"clientWidth\":100,\"clientHeight\":100}}"))
+{
+    var root = model.RootElement;
+    Check(WindowChromeCdp.TryPoint(root.GetProperty("quad"), root.GetProperty("viewport"),
+            out var cx, out var cy) && cx == 20 && cy == 30 &&
+        !WindowChromeCdp.TryPoint(root.GetProperty("quad"),
+            System.Text.Json.JsonDocument.Parse("{\"clientWidth\":15,\"clientHeight\":100}").RootElement,
+            out _, out _), "chrome.cdp_reject_off_viewport_click");
+}
 var providerFailed = new WindowActionResult(WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT,
     EffectUnknown: true, FailureStage: WindowFailureStage.DISPATCH_UIA,
     HResult: "80040200", ExceptionType: "COMException", ProviderResponse: "FAIL");
@@ -119,9 +173,10 @@ Check(reconciled.Status == WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT &&
     "windows.provider_error_reconciles_actual_effect_without_retry_or_losing_diagnostics");
 var invalidAction = await WindowTools.InvokeElement("bad", "bad", WindowActionKind.INVOKE, confirm: true);
 Check(invalidAction.Status == WindowActionCode.INVALID_ARGUMENT, "windows.action_reject_bad_ref_before_ipc");
-var missingConfirmation = await WindowTools.InvokeElement(testWindowId, freshElementId, WindowActionKind.INVOKE);
+var missingConfirmation = await WindowTools.InvokeElement(testWindowId, freshElementId,
+    WindowActionKind.INVOKE, confirm: false);
 Check(missingConfirmation.Status == WindowActionCode.CONFIRMATION_REQUIRED,
-    "windows.action_requires_explicit_confirmation");
+    "windows.action_supports_explicit_confirmation_opt_out");
 // This is an owned throwaway fixture. No real user window or screen pixels are read.
 var uiaDesktop = DesktopCapture.ObserveDesktop(Process.GetCurrentProcess().SessionId);
 if (uiaDesktop.Code == CaptureCode.COMPLETED)
@@ -282,6 +337,13 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         Check(rejectedKeyboard.Status == WindowActionCode.FOCUS_UNAVAILABLE &&
             Volatile.Read(ref keyboardClickCount) == 0,
             "windows.key_press_rejects_invalid_window_before_input");
+        var rejectedText = await Task.Run(() => WindowPhysicalClick.TypeText(
+            IntPtr.Zero, System.Windows.Automation.AutomationElement.FromHandle(created.Handle),
+            new WindowActionRequest(realWindowId, delayed.Elements[0].ElementId,
+                WindowActionKind.TYPE_TEXT, "test"), Stopwatch.StartNew()))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        Check(rejectedText.Status == WindowActionCode.UNSUPPORTED_ACTION,
+            "windows.type_text_rejects_unrelated_control_without_input");
         if (Windows.Graphics.Capture.GraphicsCaptureSession.IsSupported())
         {
             var image = await WindowCapture.CaptureCoreAsync(created.Handle, realWindowId, 640)

@@ -4,22 +4,16 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
 permissions:
   contents: read
+concurrency:
+  group: windows-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   windows:
-    needs: r0
     runs-on: windows-2025
-    if: always()
-    steps:
-      - name: Require canonical native acceptance
-        shell: pwsh
-        run: |
-          if ('${{ needs.r0.result }}' -ne 'success') { throw 'NATIVE_ACCEPTANCE_FAILED' }
-          Write-Host 'NATIVE_ACCEPTANCE=PASS'
-  r0:
-    runs-on: windows-2025
-    timeout-minutes: 15
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - name: Parse PowerShell sources before expensive tests
@@ -39,6 +33,10 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('src/**/*.csproj', 'research/**/*.csproj', 'tests/**/*.csproj') }}
       - name: Build pinned SDK and verify wire contract
         shell: pwsh
         run: |
@@ -46,10 +44,42 @@ jobs:
           dotnet build research/R0SdkProbe/R0SdkProbe.csproj -c Release
           if ($LASTEXITCODE -ne 0) { throw 'SDK_BUILD_FAILED' }
           ./research/R0SdkProbe/Test-Wire.ps1 -Dll research/R0SdkProbe/bin/Release/net10.0/R0SdkProbe.dll
+      - name: Exercise actual bounded PowerShell runner and typed UI contract
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet run --project tests/RunnerTests/RunnerTests.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'R2_RUNNER_FAILED' }
+          ./tests/Test-NativeStatus.ps1 -Exe src/WindowsAdminMcp/bin/Release/net10.0-windows10.0.19041.0/WindowsAdminMCP.exe -SmokeOnly
+      - name: Verify unified startup definition without registering a live tunnel
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $plan=./installer/NativeStartup.ps1 -Action Plan | ConvertFrom-Json
+          if($plan.mutated -or $plan.service_start -ne 'Automatic' -or $plan.trigger -ne 'MSFT_TaskLogonTrigger' -or $plan.logon -ne 'Interactive' -or $plan.run_level -ne 'Highest' -or $plan.arguments -ne 'tunnel' -or $plan.multiple_instances -ne 'IgnoreNew' -or $plan.restart_count -ne 3){throw 'NATIVE_STARTUP_PLAN_INVALID'}
+          Write-Host 'R6_STARTUP_DEFINITION=PASS (plan only; no task registered)'
+  release:
+    # Full native package acceptance on main, or once a PR leaves draft.
+    # Iterative draft PRs keep the fast native-contract gate only.
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && !github.event.pull_request.draft)
+    needs: windows
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('src/**/*.csproj', 'research/**/*.csproj', 'tests/**/*.csproj') }}
       - name: Exercise SCM, SQLite, Job Objects and shared MCP queue
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          dotnet build research/R0SdkProbe/R0SdkProbe.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'SDK_BUILD_FAILED' }
           dotnet publish research/R0NativeProbe/R0NativeProbe.csproj -c Release -r win-x64 --self-contained true -o "${{ runner.temp }}/R0NativeProbe"
           if ($LASTEXITCODE -ne 0) { throw 'PUBLISH_FAILED' }
           ./research/R0NativeProbe/Test-Native.ps1 -Exe "${{ runner.temp }}/R0NativeProbe/R0NativeProbe.exe" -SdkDll research/R0SdkProbe/bin/Release/net10.0/R0SdkProbe.dll
@@ -60,19 +90,6 @@ jobs:
           dotnet publish src/WindowsAdminMcp/WindowsAdminMcp.csproj -c Release -r win-x64 --self-contained true -o "${{ runner.temp }}/WindowsAdminMcpCandidate"
           if ($LASTEXITCODE -ne 0) { throw 'R1_PUBLISH_FAILED' }
           ./tests/Test-NativeStatus.ps1 -Exe "${{ runner.temp }}/WindowsAdminMcpCandidate/WindowsAdminMCP.exe"
-      - name: Exercise actual bounded PowerShell runner before MCP wiring
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          dotnet run --project tests/RunnerTests/RunnerTests.csproj -c Release
-          if ($LASTEXITCODE -ne 0) { throw 'R2_RUNNER_FAILED' }
-      - name: Verify unified startup definition without registering a live tunnel
-        shell: pwsh
-        run: |
-          $ErrorActionPreference='Stop'
-          $plan=./installer/NativeStartup.ps1 -Action Plan | ConvertFrom-Json
-          if($plan.mutated -or $plan.service_start -ne 'Automatic' -or $plan.trigger -ne 'MSFT_TaskLogonTrigger' -or $plan.logon -ne 'Interactive' -or $plan.run_level -ne 'Highest' -or $plan.arguments -ne 'tunnel' -or $plan.multiple_instances -ne 'IgnoreNew' -or $plan.restart_count -ne 3){throw 'NATIVE_STARTUP_PLAN_INVALID'}
-          Write-Host 'R6_STARTUP_DEFINITION=PASS (plan only; no task registered)'
       - name: Build and test offline native installation package
         shell: pwsh
         run: |

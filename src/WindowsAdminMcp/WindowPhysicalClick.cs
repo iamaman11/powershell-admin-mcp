@@ -11,6 +11,7 @@ internal static class WindowPhysicalClick
     private const uint LeftUp = 0x0004;
     private const uint InputKeyboard = 1;
     private const uint KeyUp = 0x0002;
+    private const uint KeyUnicode = 0x0004;
     private const uint RootAncestor = 2;
 
     internal static WindowActionResult Click(IntPtr hwnd, AutomationElement target,
@@ -22,9 +23,6 @@ internal static class WindowPhysicalClick
         try
         {
             var current = target.Current;
-            if (current.IsOffscreen || IsIconic(hwnd) || !IsWindowVisible(hwnd))
-                return new(WindowActionCode.WINDOW_NOT_VISIBLE, ElapsedMs: clock.ElapsedMilliseconds,
-                    FailureStage: stage);
             if (current.ControlType != ControlType.Button &&
                 current.ControlType != ControlType.Hyperlink &&
                 current.ControlType != ControlType.MenuItem &&
@@ -33,6 +31,15 @@ internal static class WindowPhysicalClick
                 current.ControlType != ControlType.ListItem &&
                 current.ControlType != ControlType.TabItem)
                 return new(WindowActionCode.UNSUPPORTED_ACTION, ElapsedMs: clock.ElapsedMilliseconds);
+
+            // Chrome web content can be clicked through its explicitly opted-in
+            // DevTools connection without stealing desktop focus or mouse position.
+            var background = WindowChromeCdp.TryDispatch(hwnd, target, request, clock);
+            if (background is not null) return background;
+
+            if (current.IsOffscreen || IsIconic(hwnd) || !IsWindowVisible(hwnd))
+                return new(WindowActionCode.WINDOW_NOT_VISIBLE, ElapsedMs: clock.ElapsedMilliseconds,
+                    FailureStage: stage);
 
             if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd))
                 return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
@@ -110,8 +117,15 @@ internal static class WindowPhysicalClick
         WindowFailureStage stage = WindowFailureStage.PREPARE_FOCUS;
         try
         {
-            if (request.Key is null || !target.Current.IsKeyboardFocusable ||
-                target.Current.IsOffscreen || IsIconic(hwnd) || !IsWindowVisible(hwnd))
+            if (request.Key is null)
+                return new(WindowActionCode.INVALID_ARGUMENT, FailureStage: stage,
+                    ElapsedMs: clock.ElapsedMilliseconds);
+
+            var background = WindowChromeCdp.TryDispatch(hwnd, target, request, clock);
+            if (background is not null) return background;
+
+            if (!target.Current.IsKeyboardFocusable || target.Current.IsOffscreen ||
+                IsIconic(hwnd) || !IsWindowVisible(hwnd))
                 return new(WindowActionCode.FOCUS_UNAVAILABLE, FailureStage: stage,
                     ElapsedMs: clock.ElapsedMilliseconds);
 
@@ -187,6 +201,97 @@ internal static class WindowPhysicalClick
                 ForegroundChanged: foregroundAtEntry != GetForegroundWindow(),
                 FailureStage: stage, ExceptionType: e.GetType().Name,
                 HResult: e.HResult.ToString("X8"), ElapsedMs: clock.ElapsedMilliseconds);
+        }
+    }
+
+    // TYPE_TEXT replaces an Edit/ComboBox value. For providers without
+    // ValuePattern.SetValue it uses one ordered Unicode SendInput batch, never
+    // a sequence of unverified per-character clicks or global paste shortcuts.
+    internal static WindowActionResult TypeText(IntPtr hwnd, AutomationElement target,
+        WindowActionRequest request, Stopwatch clock)
+    {
+        bool dispatched = false;
+        var foregroundAtEntry = GetForegroundWindow();
+        try
+        {
+            if (request.Value is null || (target.Current.ControlType != ControlType.Edit &&
+                target.Current.ControlType != ControlType.ComboBox))
+                return new(WindowActionCode.UNSUPPORTED_ACTION, ElapsedMs: clock.ElapsedMilliseconds);
+            var background = WindowChromeCdp.TryDispatch(hwnd, target, request, clock);
+            if (background is not null) return background;
+
+            if (!target.Current.IsKeyboardFocusable || target.Current.IsOffscreen ||
+                IsIconic(hwnd) || !IsWindowVisible(hwnd))
+                return new(WindowActionCode.FOCUS_UNAVAILABLE, FailureStage: WindowFailureStage.PREPARE_FOCUS);
+            if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd))
+                return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
+                    FailureStage: WindowFailureStage.ACTIVATE_WINDOW);
+            if (GetForegroundWindow() != hwnd)
+                return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
+                    FailureStage: WindowFailureStage.ACTIVATE_WINDOW);
+
+            if (!target.Current.HasKeyboardFocus) target.SetFocus();
+            bool focused = false;
+            for (int attempt = 0; attempt < 4 && GetForegroundWindow() == hwnd; attempt++)
+            {
+                var actual = AutomationElement.FocusedElement;
+                focused = target.Current.HasKeyboardFocus && actual is not null &&
+                    actual.GetRuntimeId().SequenceEqual(target.GetRuntimeId());
+                if (focused) break;
+                Thread.Sleep(25);
+            }
+            if (!focused || GetForegroundWindow() != hwnd ||
+                !WindowInspector.TryParseElementRef(request.ElementId, out long snapshot) ||
+                WindowCatalog.ResolveId(request.WindowId, Process.GetCurrentProcess().SessionId,
+                    out var resolved) != WindowResolveCode.OK || resolved != hwnd ||
+                !string.Equals(WindowInspector.ElementRef(target, request.WindowId, snapshot),
+                    request.ElementId, StringComparison.Ordinal))
+                return new(WindowActionCode.FOCUS_UNAVAILABLE,
+                    FailureStage: WindowFailureStage.PREPARE_FOCUS);
+
+            var inputs = new List<KeyboardEventInput>(4 + request.Value.Length * 2);
+            // Ctrl+A selects the current field contents before replacing them.
+            inputs.Add(new() { Type = InputKeyboard, VirtualKey = 0x11 });
+            inputs.Add(new() { Type = InputKeyboard, VirtualKey = 0x41 });
+            inputs.Add(new() { Type = InputKeyboard, VirtualKey = 0x41, Flags = KeyUp });
+            inputs.Add(new() { Type = InputKeyboard, VirtualKey = 0x11, Flags = KeyUp });
+            if (request.Value.Length == 0)
+            {
+                inputs.Add(new() { Type = InputKeyboard, VirtualKey = 0x2E });
+                inputs.Add(new() { Type = InputKeyboard, VirtualKey = 0x2E, Flags = KeyUp });
+            }
+            foreach (char ch in request.Value)
+            {
+                inputs.Add(new() { Type = InputKeyboard, Scan = ch, Flags = KeyUnicode });
+                inputs.Add(new() { Type = InputKeyboard, Scan = ch, Flags = KeyUnicode | KeyUp });
+            }
+            var actualFocus = AutomationElement.FocusedElement;
+            if (GetForegroundWindow() != hwnd || !target.Current.HasKeyboardFocus ||
+                actualFocus is null ||
+                !actualFocus.GetRuntimeId().SequenceEqual(target.GetRuntimeId()) ||
+                WindowCatalog.ResolveId(request.WindowId, Process.GetCurrentProcess().SessionId,
+                    out resolved) != WindowResolveCode.OK || resolved != hwnd)
+                return new(WindowActionCode.FOCUS_UNAVAILABLE,
+                    FailureStage: WindowFailureStage.PREPARE_FOCUS);
+            dispatched = true;
+            uint inserted = SendKeyboardInput((uint)inputs.Count, [.. inputs],
+                Marshal.SizeOf<KeyboardEventInput>());
+            bool changed = foregroundAtEntry != GetForegroundWindow();
+            return inserted == inputs.Count && GetForegroundWindow() == hwnd
+                ? new(WindowActionCode.COMPLETED, ForegroundChanged: changed,
+                    TargetActivated: foregroundAtEntry != hwnd, ElapsedMs: clock.ElapsedMilliseconds)
+                : new(WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
+                    ForegroundChanged: changed, FailureStage: WindowFailureStage.DISPATCH_INPUT,
+                    Detail: $"TEXT_INPUTS_INSERTED_{inserted}:WIN32_{Marshal.GetLastPInvokeError()}",
+                    ElapsedMs: clock.ElapsedMilliseconds);
+        }
+        catch (Exception e) when (e is COMException or ElementNotAvailableException or InvalidOperationException)
+        {
+            return new(dispatched ? WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT :
+                WindowActionCode.FOCUS_UNAVAILABLE, EffectUnknown: dispatched,
+                FailureStage: dispatched ? WindowFailureStage.DISPATCH_INPUT : WindowFailureStage.PREPARE_FOCUS,
+                ExceptionType: e.GetType().Name, HResult: e.HResult.ToString("X8"),
+                ElapsedMs: clock.ElapsedMilliseconds);
         }
     }
 

@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$Exe)
+param([Parameter(Mandatory)][string]$Exe,[switch]$SmokeOnly)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 if(-not $env:GITHUB_ACTIONS -or $env:RUNNER_OS -ne 'Windows'){throw 'ISOLATED_WINDOWS_CI_ONLY'}
@@ -68,8 +68,8 @@ try{
         $inspectTool=@($list.tools|Where-Object name -eq 'windows.inspect_window')
         $actionTool=@($list.tools|Where-Object name -eq 'windows.invoke_element')
         Assert ($inspectTool.Count -eq 1 -and $actionTool.Count -eq 1 -and
-            @(@('window_id','max_depth','max_elements','start_path','start_element_id','offset','include_details','name_contains','role_filter','wait_ms')|Where-Object {-not $inspectTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
-            @(@('window_id','element_id','action','value','confirm','element_path','expected_name','expected_change','key')|Where-Object {-not $actionTool[0].inputSchema.properties.Contains($_)}).Count -eq 0) 'r5.actual_tools_list_exposes_typed_semantic_uia_contract'
+            @(@('window_id','max_depth','max_elements','start_path','start_element_id','offset','include_details','name_contains','role_filter','wait_ms','scope','tab_id')|Where-Object {-not $inspectTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
+            @(@('window_id','element_id','action','value','confirm','element_path','expected_name','expected_change','key','expected_kind')|Where-Object {-not $actionTool[0].inputSchema.properties.Contains($_)}).Count -eq 0) 'r5.actual_tools_list_exposes_typed_semantic_uia_contract'
         Assert ($actionTool[0].outputSchema.properties.Contains('foreground_changed') -and
             $actionTool[0].outputSchema.properties.Contains('target_activated') -and
             $actionTool[0].outputSchema.properties.Contains('effect_state') -and
@@ -85,6 +85,10 @@ try{
         Assert ($v.frontend.pid -eq $p.Id -and $v.frontend.sid -eq $caller.User.Value -and
             $v.frontend.session_id -eq $p.SessionId -and $v.command_context -in @('SYSTEM','UNCONFIRMED') -and
             $v.versions.mcp_version -eq '0.8.1-dev' -and $v.versions.store_schema -eq 4 -and $v.timing.ipc_ms -ge 0) 'hardening.separate_frontend_and_runner_identity'
+    }
+    if($SmokeOnly){
+        Write-Host 'R1_TYPED_MCP_SMOKE=PASS (three clients; SCM and schema; cleanup follows)'
+        return
     }
     Send $a 31 'tools/call' @{name='windows.list_windows';arguments=@{max_windows=0};_meta=$meta}
     $invalidWindowList=(Receive $a 31).structuredContent
