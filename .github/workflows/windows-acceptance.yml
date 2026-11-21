@@ -23,7 +23,7 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 18
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Require full acceptance for unreviewed direct main pushes
         id: provenance
         if: github.event_name == 'push'
@@ -74,13 +74,13 @@ jobs:
           }
           Write-Host 'POWERSHELL_PARSE=PASS'
           ./tests/Test-OperatorUpdate.ps1
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.nuget/packages
-          key: nuget-${{ runner.os }}-${{ hashFiles('src/**/*.csproj', 'research/**/*.csproj', 'tests/**/*.csproj') }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', 'src/**/*.csproj', 'research/**/*.csproj', 'tests/**/*.csproj') }}
       - name: Exercise actual bounded PowerShell runner and typed UI contract
         if: github.event_name != 'push' || steps.provenance.outputs.full == 'true'
         shell: pwsh
@@ -98,7 +98,7 @@ jobs:
       # This is a fixed historical upgrade fixture. Cache its tested ZIP,
       # not mutable compiler outputs or the current commit's release binary.
       # Main never needs the historical candidate again after PR acceptance.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         if: github.event_name != 'push' || steps.provenance.outputs.full == 'true'
         with:
           path: |
@@ -152,7 +152,7 @@ jobs:
           dotnet publish research/R0NativeProbe/R0NativeProbe.csproj -c Release -r win-x64 --self-contained true -o "${{ runner.temp }}/R0NativeProbe"
           if($LASTEXITCODE -ne 0){throw 'R0_PUBLISH_FAILED'}
           ./research/R0NativeProbe/Test-Native.ps1 -Exe "${{ runner.temp }}/R0NativeProbe/R0NativeProbe.exe" -SdkDll research/R0SdkProbe/bin/Release/net10.0/R0SdkProbe.dll
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: success() && (github.event_name == 'push' || github.event_name == 'pull_request')
         with:
           name: WindowsAdminMCP-offline-package
@@ -170,7 +170,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: WindowsAdminMCP-offline-package
           path: package

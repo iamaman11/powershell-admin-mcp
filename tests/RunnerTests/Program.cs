@@ -31,6 +31,18 @@ using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent())
 }
 Check(AdminTools.ExecWaitBudget(120)==TimeSpan.FromSeconds(90) && AdminTools.ExecWaitBudget(85)==TimeSpan.FromSeconds(90) &&
     AdminTools.ExecWaitBudget(10)==TimeSpan.FromSeconds(15), "transport.exec_wait_budget");
+var doctorSnapshot = new DoctorSnapshot(DoctorState.DEGRADED,
+    [new DoctorCheck(DoctorComponent.Store, DoctorState.DEGRADED,
+        DoctorReason.RECONCILIATION_REQUIRED, DoctorAction.INSPECT_JOBS)],
+    true, true, 17, "candidate", 42);
+var doctorStatus = new AdminStatus(StatusCode.OK, "ci", Diagnostics: doctorSnapshot);
+var doctorWire = System.Text.Json.JsonSerializer.Serialize(doctorStatus, PipeWire.Json);
+Check(System.Text.Json.JsonSerializer.Deserialize<AdminStatus>(doctorWire, PipeWire.Json)?.Diagnostics is
+    { Status: DoctorState.DEGRADED, ReconciliationCount: 17, LocalOperationalReady: true,
+      Checks: [{ Reason: DoctorReason.RECONCILIATION_REQUIRED }] } &&
+    !System.Text.Json.JsonSerializer.Serialize(new AdminStatus(StatusCode.OK, "ci"), PipeWire.Json)
+        .Contains("diagnostics", StringComparison.Ordinal),
+    "status.optional_typed_doctor_without_changing_default_status");
 var testWindowIdentity = new WindowIdentity(0x12345, 4242, 133700000000000000, 1);
 string testWindowId = WindowCatalog.FormatId(testWindowIdentity);
 Check(WindowCatalog.TryParseId(testWindowId, out var decodedWindowId) && decodedWindowId == testWindowIdentity &&
@@ -285,6 +297,14 @@ Check(new WindowActionResult(WindowActionCode.COMPLETED).EffectState == WindowEf
     new WindowActionResult(WindowActionCode.STALE_ELEMENT).EffectState == WindowEffectState.NO_EFFECT &&
     new WindowActionResult(WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT, EffectUnknown: true).EffectState ==
         WindowEffectState.EFFECT_UNKNOWN, "windows.action_effect_state_never_assumes_success");
+var executionWire = System.Text.Json.JsonSerializer.Serialize(new WindowActionResult(
+    WindowActionCode.COMPLETED, ExecutionMethod: WindowExecutionMethod.WIN32_SENDINPUT), PipeWire.Json);
+Check(executionWire.Contains("\"execution_method\":\"WIN32_SENDINPUT\"", StringComparison.Ordinal) &&
+    System.Text.Json.JsonSerializer.Deserialize<WindowActionResult>(executionWire, PipeWire.Json)?.ExecutionMethod ==
+        WindowExecutionMethod.WIN32_SENDINPUT &&
+    !System.Text.Json.JsonSerializer.Serialize(new WindowActionResult(WindowActionCode.STALE_ELEMENT), PipeWire.Json)
+        .Contains("execution_method", StringComparison.Ordinal),
+    "windows.typed_execution_method_only_after_dispatch");
 Check(WindowChromeCdp.TryReadEndpoint(
         "9222\n/devtools/browser/01234567-89ab-cdef-0123-456789abcdef\n", out var chromeEndpoint) &&
     chromeEndpoint?.Host == "127.0.0.1" && chromeEndpoint.Port == 9222 &&
@@ -643,7 +663,9 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             new WindowActionRequest(realWindowId, buttonTarget.ElementId, WindowActionKind.INVOKE, null)))
             .WaitAsync(TimeSpan.FromSeconds(5));
         Check(click.Status == WindowActionCode.COMPLETED &&
-            Volatile.Read(ref clickCount) == 1, "windows.action_invoke_occluded_button");
+            Volatile.Read(ref clickCount) == 1 &&
+            click.ExecutionMethod == WindowExecutionMethod.UIA_PATTERN,
+            "windows.action_invoke_occluded_button");
         Check(click.ForegroundChanged == false && click.TargetActivated == false,
             "windows.action_invoke_preserves_foreground");
         var asyncTree = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 2, 50,

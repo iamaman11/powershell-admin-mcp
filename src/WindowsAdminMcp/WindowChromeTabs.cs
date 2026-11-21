@@ -670,7 +670,8 @@ internal static partial class WindowChromeCdp
                 ExpectedStateObserved: effect,
                 ObservationState: effect is null ? WindowObservationState.NOT_REQUESTED :
                     effect == true ? WindowObservationState.OBSERVED : WindowObservationState.NOT_OBSERVED,
-                ExpectedEnabledObserved: enabledObserved, ElapsedMs: clock.ElapsedMilliseconds);
+                ExpectedEnabledObserved: enabledObserved, ElapsedMs: clock.ElapsedMilliseconds,
+                ExecutionMethod: WindowExecutionMethod.CHROME_CDP);
         }
         catch (Exception e) when (e is WebSocketException or IOException or JsonException or
             OperationCanceledException or InvalidOperationException or KeyNotFoundException)
@@ -679,7 +680,8 @@ internal static partial class WindowChromeCdp
             return new(dispatched ? WindowActionCode.CDP_FAILED_UNKNOWN_EFFECT : WindowActionCode.CDP_UNAVAILABLE,
                 EffectUnknown: dispatched, FailureStage: dispatched ? WindowFailureStage.DISPATCH_INPUT :
                     WindowFailureStage.CDP_TARGET, ExceptionType: e.GetType().Name,
-                ElapsedMs: clock.ElapsedMilliseconds);
+                ElapsedMs: clock.ElapsedMilliseconds,
+                ExecutionMethod: dispatched ? WindowExecutionMethod.CHROME_CDP : null);
         }
         WindowActionResult Rejected(WindowActionCode status) => new(status,
             TargetVerified: status == WindowActionCode.EXPECTED_STATE_ALREADY_TRUE,

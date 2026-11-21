@@ -6,9 +6,9 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 
 [JsonConverter(typeof(JsonStringEnumConverter<DoctorState>))]
-internal enum DoctorState { OK, DEGRADED, NOT_TESTED }
+public enum DoctorState { OK, DEGRADED, NOT_TESTED }
 [JsonConverter(typeof(JsonStringEnumConverter<DoctorReason>))]
-internal enum DoctorReason
+public enum DoctorReason
 {
     OBSERVED, MISSING, ACCESS_OR_READBACK_FAILED, NOT_CANONICAL, HASH_MISMATCH,
     MULTIPLE_PROCESSES, SERVICE_NOT_CONFIRMED, STORE_NOT_CONFIRMED, STORE_AT_CAPACITY, STORE_CAPACITY_WARNING,
@@ -16,11 +16,24 @@ internal enum DoctorReason
     STARTUP_NOT_TESTED, DESKTOP_NOT_TESTED, EXTERNAL_RECEIPT_MATCHED, EXTERNAL_RECEIPT_INVALID, MANIFEST_UNVERIFIED, STARTUP_NOT_READY, STARTUP_READBACK_FAILED
 }
 [JsonConverter(typeof(JsonStringEnumConverter<DoctorComponent>))]
-internal enum DoctorComponent { Native, Package, PowerShell, Service, Store, Boot, Tun, Vendor, Remote, Startup, Desktop }
+public enum DoctorComponent { Native, Package, PowerShell, Service, Store, Boot, Tun, Vendor, Remote, Startup, Desktop }
 [JsonConverter(typeof(JsonStringEnumConverter<DoctorAction>))]
-internal enum DoctorAction { NONE, VERIFY_INSTALLATION, CHECK_SERVICE, INSPECT_JOBS, CHECK_BOOT_LOG, CHECK_INTERNET,
+public enum DoctorAction { NONE, VERIFY_INSTALLATION, CHECK_SERVICE, INSPECT_JOBS, CHECK_BOOT_LOG, CHECK_INTERNET,
     VERIFY_SUPPORTED_REMOTE_ACCESS, VERIFY_STARTUP, VERIFY_INTERACTIVE_DESKTOP }
-internal sealed record DoctorCheck(DoctorComponent Component,DoctorState Status,DoctorReason Reason,DoctorAction NextAction);
+public sealed record DoctorCheck(DoctorComponent Component,DoctorState Status,DoctorReason Reason,DoctorAction NextAction);
+public sealed record DoctorSnapshot(
+    [property:JsonPropertyName("status")] DoctorState Status,
+    [property:JsonPropertyName("checks")] DoctorCheck[] Checks,
+    [property:JsonPropertyName("local_operational_ready")] bool LocalOperationalReady,
+    [property:JsonPropertyName("user_worker_ready")] bool UserWorkerReady,
+    [property:JsonPropertyName("reconciliation_count")] long? ReconciliationCount,
+    [property:JsonPropertyName("installed_commit")] string? InstalledCommit,
+    [property:JsonPropertyName("elapsed_ms")] long ElapsedMs)
+{
+    internal static DoctorSnapshot FromReport(DoctorReport report) => new(report.Status, report.Checks,
+        report.LocalOperationalReady, report.UserWorkerReady, report.ReconciliationCount,
+        report.InstalledCommit, report.ElapsedMs);
+}
 internal sealed record DoctorReport(int SchemaVersion,DoctorState Status,string CorrelationId,DateTimeOffset ObservedAt,
     long ElapsedMs,DoctorCheck[] Checks,string RuntimeVersion,string? Executable,string PowerShellPath,
     AdminStatus? Service,StoreSummary? Store,BootObservation Boot,TunReadiness Tun,

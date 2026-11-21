@@ -144,18 +144,21 @@ internal static class WindowPhysicalClick
             bool activated = foregroundAtEntry != hwnd && GetForegroundWindow() == hwnd;
             return inserted == inputs.Length
                 ? new(WindowActionCode.COMPLETED, ElapsedMs: clock.ElapsedMilliseconds,
-                    ForegroundChanged: changed, TargetActivated: activated)
+                    ForegroundChanged: changed, TargetActivated: activated,
+                    ExecutionMethod: WindowExecutionMethod.WIN32_SENDINPUT)
                 : new(WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
                     ElapsedMs: clock.ElapsedMilliseconds, ForegroundChanged: changed,
                     TargetActivated: activated, FailureStage: stage,
-                    Detail: $"INPUTS_INSERTED_{inserted}:WIN32_{Marshal.GetLastPInvokeError()}");
+                    Detail: $"INPUTS_INSERTED_{inserted}:WIN32_{Marshal.GetLastPInvokeError()}",
+                    ExecutionMethod: WindowExecutionMethod.WIN32_SENDINPUT);
         }
         catch (Exception e) when (e is COMException or ElementNotAvailableException or InvalidOperationException)
         {
             return new(dispatched ? WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT : WindowActionCode.UIA_UNAVAILABLE,
                 EffectUnknown: dispatched, ElapsedMs: clock.ElapsedMilliseconds,
                 FailureStage: stage, ExceptionType: e.GetType().Name,
-                HResult: e.HResult.ToString("X8"));
+                HResult: e.HResult.ToString("X8"),
+                ExecutionMethod: dispatched ? WindowExecutionMethod.WIN32_SENDINPUT : null);
         }
     }
 
@@ -233,11 +236,13 @@ internal static class WindowPhysicalClick
             bool activated = foregroundAtEntry != hwnd && GetForegroundWindow() == hwnd;
             return inserted == inputs.Length
                 ? new(WindowActionCode.COMPLETED, ForegroundChanged: changed,
-                    TargetActivated: activated, ElapsedMs: clock.ElapsedMilliseconds)
+                    TargetActivated: activated, ElapsedMs: clock.ElapsedMilliseconds,
+                    ExecutionMethod: WindowExecutionMethod.WIN32_SENDINPUT)
                 : new(WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
                     ForegroundChanged: changed, TargetActivated: activated,
                     FailureStage: stage, ElapsedMs: clock.ElapsedMilliseconds,
-                    Detail: $"KEY_INPUTS_INSERTED_{inserted}:WIN32_{Marshal.GetLastPInvokeError()}");
+                    Detail: $"KEY_INPUTS_INSERTED_{inserted}:WIN32_{Marshal.GetLastPInvokeError()}",
+                    ExecutionMethod: WindowExecutionMethod.WIN32_SENDINPUT);
         }
         catch (Exception e) when (e is COMException or ElementNotAvailableException or InvalidOperationException)
         {
@@ -245,7 +250,8 @@ internal static class WindowPhysicalClick
                 WindowActionCode.FOCUS_UNAVAILABLE, EffectUnknown: dispatched,
                 ForegroundChanged: foregroundAtEntry != GetForegroundWindow(),
                 FailureStage: stage, ExceptionType: e.GetType().Name,
-                HResult: e.HResult.ToString("X8"), ElapsedMs: clock.ElapsedMilliseconds);
+                HResult: e.HResult.ToString("X8"), ElapsedMs: clock.ElapsedMilliseconds,
+                ExecutionMethod: dispatched ? WindowExecutionMethod.WIN32_SENDINPUT : null);
         }
     }
 
@@ -352,14 +358,16 @@ internal static class WindowPhysicalClick
                 if (inserted != selection.Length)
                     return new(WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
                         FailureStage: WindowFailureStage.DISPATCH_INPUT,
-                        Detail: $"TEXT_SELECT_INSERTED_{inserted}", ElapsedMs: clock.ElapsedMilliseconds);
+                        Detail: $"TEXT_SELECT_INSERTED_{inserted}", ElapsedMs: clock.ElapsedMilliseconds,
+                        ExecutionMethod: WindowExecutionMethod.WIN32_SENDINPUT);
                 Thread.Sleep(100);
                 for (int offset = 0; offset < request.Value.Length;)
                 {
                     if (GetForegroundWindow() != hwnd || !target.Current.HasKeyboardFocus)
                         return new(WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
                             FailureStage: WindowFailureStage.DISPATCH_INPUT,
-                            Detail: "FOCUS_LOST_DURING_TEXT", ElapsedMs: clock.ElapsedMilliseconds);
+                            Detail: "FOCUS_LOST_DURING_TEXT", ElapsedMs: clock.ElapsedMilliseconds,
+                            ExecutionMethod: WindowExecutionMethod.WIN32_SENDINPUT);
                     // KEYEVENTF_UNICODE uses UTF-16; keep surrogate pairs in
                     // the same SendInput call so no half-character is emitted.
                     int units = ChromeChunkUnits(request.Value, offset);
@@ -370,7 +378,8 @@ internal static class WindowPhysicalClick
                         return new(WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
                             FailureStage: WindowFailureStage.DISPATCH_INPUT,
                             Detail: $"TEXT_CHUNK_INSERTED_{accepted}_OF_{chunk.Length}",
-                            ElapsedMs: clock.ElapsedMilliseconds);
+                            ElapsedMs: clock.ElapsedMilliseconds,
+                            ExecutionMethod: WindowExecutionMethod.WIN32_SENDINPUT);
                     offset += units;
                     Thread.Sleep(25);
                 }
@@ -381,11 +390,13 @@ internal static class WindowPhysicalClick
             bool changed = foregroundAtEntry != GetForegroundWindow();
             return inserted == inputs.Count && GetForegroundWindow() == hwnd
                 ? new(WindowActionCode.COMPLETED, ForegroundChanged: changed,
-                    TargetActivated: foregroundAtEntry != hwnd, ElapsedMs: clock.ElapsedMilliseconds)
+                    TargetActivated: foregroundAtEntry != hwnd, ElapsedMs: clock.ElapsedMilliseconds,
+                    ExecutionMethod: WindowExecutionMethod.WIN32_SENDINPUT)
                 : new(WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
                     ForegroundChanged: changed, FailureStage: WindowFailureStage.DISPATCH_INPUT,
                     Detail: $"TEXT_INPUTS_INSERTED_{inserted}:WIN32_{Marshal.GetLastPInvokeError()}",
-                    ElapsedMs: clock.ElapsedMilliseconds);
+                    ElapsedMs: clock.ElapsedMilliseconds,
+                    ExecutionMethod: WindowExecutionMethod.WIN32_SENDINPUT);
         }
         catch (Exception e) when (e is COMException or ElementNotAvailableException or InvalidOperationException)
         {
@@ -393,7 +404,8 @@ internal static class WindowPhysicalClick
                 WindowActionCode.FOCUS_UNAVAILABLE, EffectUnknown: dispatched,
                 FailureStage: dispatched ? WindowFailureStage.DISPATCH_INPUT : WindowFailureStage.PREPARE_FOCUS,
                 ExceptionType: e.GetType().Name, HResult: e.HResult.ToString("X8"),
-                ElapsedMs: clock.ElapsedMilliseconds);
+                ElapsedMs: clock.ElapsedMilliseconds,
+                ExecutionMethod: dispatched ? WindowExecutionMethod.WIN32_SENDINPUT : null);
         }
     }
 

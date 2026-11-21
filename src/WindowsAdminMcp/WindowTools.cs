@@ -40,7 +40,7 @@ public sealed class WindowTools
         if (max_windows is < 1 or > 100)
             return new(WindowListCode.INVALID_ARGUMENT, []);
 
-        var status = await AdminTools.Status(cancellationToken);
+        var status = await AdminTools.Status(cancellationToken: cancellationToken);
         if (status.Status != StatusCode.OK)
             return new(WindowListCode.SERVICE_UNAVAILABLE, [], Detail: status.Status.ToString());
 
@@ -76,7 +76,7 @@ public sealed class WindowTools
                 window_id, max_depth, max_elements, start_path, start_element_id, offset,
                 include_details, name_contains, role_filter, wait_ms, scope, tab_id,
                 expected_profile, expected_origin, expected_url));
-        var status = await AdminTools.Status(cancellationToken);
+        var status = await AdminTools.Status(cancellationToken: cancellationToken);
         if (status.Status != StatusCode.OK)
             return new(WindowInspectCode.SERVICE_UNAVAILABLE, [], Detail: status.Status.ToString());
         using var self = Process.GetCurrentProcess();
@@ -105,7 +105,7 @@ public sealed class WindowTools
     {
         if (!WindowCapture.Valid(window_id, max_width))
             return WindowCapture.Response(new(WindowCaptureCode.INVALID_ARGUMENT));
-        var status = await AdminTools.Status(cancellationToken);
+        var status = await AdminTools.Status(cancellationToken: cancellationToken);
         if (status.Status != StatusCode.OK)
             return WindowCapture.Response(new(WindowCaptureCode.SERVICE_UNAVAILABLE, Detail: status.Status.ToString()));
         using var self = Process.GetCurrentProcess();
@@ -142,7 +142,7 @@ public sealed class WindowTools
         if (!WindowAction.Valid(request)) return new(WindowActionCode.INVALID_ARGUMENT);
         if (!confirm) return new(WindowActionCode.CONFIRMATION_REQUIRED);
 
-        var status = await AdminTools.Status(cancellationToken);
+        var status = await AdminTools.Status(cancellationToken: cancellationToken);
         if (status.Status != StatusCode.OK)
             return new(WindowActionCode.SERVICE_UNAVAILABLE, Detail: status.Status.ToString());
         using var self = Process.GetCurrentProcess();

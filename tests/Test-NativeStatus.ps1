@@ -69,6 +69,7 @@ try{
         Assert (@($required|Where-Object {$_ -notin $names}).Count -eq 0 -and $names.Count -eq @($names|Select-Object -Unique).Count) 'r5.required_window_tools_without_duplicates'
         $inspectTool=@($list.tools|Where-Object name -eq 'windows.inspect_window')
         $actionTool=@($list.tools|Where-Object name -eq 'windows.invoke_element')
+        $statusTool=@($list.tools|Where-Object name -eq 'powershell_status')
         Assert ($inspectTool.Count -eq 1 -and $actionTool.Count -eq 1 -and
             @(@('window_id','max_depth','max_elements','start_path','start_element_id','offset','include_details','name_contains','role_filter','wait_ms','scope','tab_id','expected_profile','expected_origin','expected_url')|Where-Object {-not $inspectTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
             @(@('window_id','element_id','action','value','confirm','element_path','expected_name','expected_change','key','expected_kind','expected_value','expected_profile','expected_origin','expected_url','observation_timeout_ms')|Where-Object {-not $actionTool[0].inputSchema.properties.Contains($_)}).Count -eq 0) 'r5.actual_tools_list_exposes_typed_semantic_uia_contract'
@@ -79,13 +80,16 @@ try{
         Assert ($actionTool[0].outputSchema.properties.Contains('foreground_changed') -and
             $actionTool[0].outputSchema.properties.Contains('target_activated') -and
             $actionTool[0].outputSchema.properties.Contains('effect_state') -and
+            $actionTool[0].outputSchema.properties.Contains('execution_method') -and
             $actionTool[0].outputSchema.properties.Contains('failure_stage') -and
             $actionTool[0].outputSchema.properties.Contains('hresult')) 'r5.typed_uia_effect_and_diagnostics_fields'
+        Assert ($statusTool.Count -eq 1 -and $statusTool[0].inputSchema.properties.Contains('include_diagnostics') -and
+            $statusTool[0].outputSchema.properties.Contains('diagnostics')) 'r5.optional_typed_doctor_without_new_tool'
         $schemaBytes=[Text.Encoding]::UTF8.GetByteCount(($list|ConvertTo-Json -Depth 30 -Compress))
         Write-Host "MCP_TOOLS_LIST_BYTES=$schemaBytes"
-        # One independently useful update tool adds ~1.2 KiB to the previous
-        # 24-KiB catalog; enforce a measured 26-KiB budget with headroom.
-        Assert ($schemaBytes -le 26500) 'r5.typed_tool_schema_under_26kib_with_margin'
+        # The optional doctor summary adds typed component/reason/next-action enums
+        # to the existing nine-tool catalog; keep its total output bounded.
+        Assert ($schemaBytes -le 31000) 'r5.typed_tool_schema_under_31kib'
         Assert (@($list.tools|Where-Object {$_.name -eq 'powershell_status' -and $_.Contains('outputSchema')}).Count -eq 1) 'r1.typed_status_schema'
         $v=Wait-Status $p 'OK'
         Assert ($v.service_pid -eq $svc.ProcessId -and $v.execution_sid -eq 'S-1-5-18' -and $v.elevated) 'r1.scm_pid_and_real_execution_identity'
@@ -135,6 +139,11 @@ try{
     $results=@(foreach($p in @($a,$b,$c)){(Receive $p 2).structuredContent})
     Assert (@($results|Where-Object {$_.status -eq 'OK' -and $_.service_pid -eq $svc.ProcessId}).Count -eq 3) 'r1.one_service_three_stdio_clients'
     Assert (@($results.correlation_id|Select-Object -Unique).Count -eq 3) 'r1.unique_correlations'
+    Send $a 39 'tools/call' @{name='powershell_status';arguments=@{include_diagnostics=$true};_meta=$meta}
+    $diagnostics=(Receive $a 39).structuredContent
+    Assert ($diagnostics.status -eq 'OK' -and $diagnostics.diagnostics.status -in @('OK','DEGRADED','NOT_TESTED') -and
+        @($diagnostics.diagnostics.checks).Count -eq 11 -and
+        $diagnostics.diagnostics.checks[0].component -eq 'Native') 'r5.doctor_typed_on_non_ok_health_without_exec_error'
     Stop-Service $name
     $offline=Wait-Status $a 'SERVICE_UNAVAILABLE'
     Assert ($offline.native_error -eq 1062) 'r1.typed_service_offline'

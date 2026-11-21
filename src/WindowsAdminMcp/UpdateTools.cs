@@ -67,7 +67,7 @@ public sealed class UpdateTools
 
         if (action == UpdateToolAction.REQUEST)
         {
-            var service = await AdminTools.Status(cancellationToken);
+            var service = await AdminTools.Status(cancellationToken: cancellationToken);
             if (service.Status != StatusCode.OK || service.ExecutionContext != CommandContext.USER ||
                 service.UserContextAvailable != true || service.Frontend?.Elevated != true)
                 return new(UpdateToolCode.SERVICE_UNAVAILABLE, InstalledCommit: package.Commit,

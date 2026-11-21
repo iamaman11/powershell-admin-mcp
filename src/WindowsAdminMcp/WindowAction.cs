@@ -25,6 +25,9 @@ public enum WindowObservationState { NOT_REQUESTED, OBSERVED, NOT_OBSERVED, UNKN
 [JsonConverter(typeof(JsonStringEnumConverter<WindowEffectState>))]
 public enum WindowEffectState { NO_EFFECT, EFFECT_VERIFIED, EFFECT_UNKNOWN }
 
+[JsonConverter(typeof(JsonStringEnumConverter<WindowExecutionMethod>))]
+public enum WindowExecutionMethod { UIA_PATTERN, WIN32_SENDINPUT, CHROME_CDP }
+
 [JsonConverter(typeof(JsonStringEnumConverter<WindowFailureStage>))]
 public enum WindowFailureStage { RESOLVE_ELEMENT, PREPARE_UIA, DISPATCH_UIA, ACTIVATE_WINDOW, PREPARE_FOCUS, HIT_TEST, DISPATCH_INPUT, VERIFY_EFFECT, WORKER, CDP_CONNECT, CDP_TARGET }
 
@@ -76,7 +79,9 @@ public sealed record WindowActionResult(
     [property: JsonPropertyName("hresult")] string? HResult = null,
     [property: JsonPropertyName("provider_response")] string? ProviderResponse = null,
     [property: JsonPropertyName("observation_state")] WindowObservationState ObservationState = WindowObservationState.NOT_REQUESTED,
-    [property: JsonPropertyName("expected_enabled_observed")] bool? ExpectedEnabledObserved = null)
+    [property: JsonPropertyName("expected_enabled_observed")] bool? ExpectedEnabledObserved = null,
+    [property: JsonPropertyName("execution_method"), JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)]
+        WindowExecutionMethod? ExecutionMethod = null)
 {
     // A successful provider call is dispatch acknowledgement, NOT proof that the UI changed.
     [JsonPropertyName("effect_state")]
