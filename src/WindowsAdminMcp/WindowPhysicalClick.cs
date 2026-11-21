@@ -65,6 +65,15 @@ internal static class WindowPhysicalClick
         role == ControlType.RadioButton || role == ControlType.ListItem ||
         role == ControlType.TabItem || role == ControlType.Edit;
 
+    internal static int ChromeChunkUnits(string value, int offset)
+    {
+        if (offset < 0 || offset >= value.Length) throw new ArgumentOutOfRangeException(nameof(offset));
+        int units = offset < 64 ? 1 : Math.Min(16, value.Length - offset);
+        if (offset + units < value.Length && char.IsSurrogatePair(value, offset + units - 1))
+            units++;
+        return units;
+    }
+
     internal static WindowActionResult Click(IntPtr hwnd, AutomationElement target,
         WindowActionRequest request, Stopwatch clock, bool allowCdp = true)
     {
@@ -280,7 +289,7 @@ internal static class WindowPhysicalClick
                 // batch can go to the window while the React input stays inert.
                 // The verified native PowerShell probe needed an explicit
                 // post-click interval. Fail closed if focus was stolen meanwhile.
-                Thread.Sleep(240);
+                Thread.Sleep(320);
                 if (GetForegroundWindow() != hwnd)
                     return new(WindowActionCode.FOCUS_UNAVAILABLE,
                         FailureStage: WindowFailureStage.PREPARE_FOCUS,
@@ -332,50 +341,38 @@ internal static class WindowPhysicalClick
             if (request.ExpectedProfile is not null && target.Current.ControlType == ControlType.Edit &&
                 request.Value.Length > 0)
             {
-                // A single large keyboard batch can race a clean React input's
-                // first controlled-state update. Prime the field with one real
-                // Unicode scalar, verify its exact UIA value, then deliver the
-                // remaining characters as one fast, ordered batch. This avoids
-                // per-character delays on long fields and never replays an
-                // ambiguous action after dispatch.
-                int leadLength = request.Value.Length > 1 &&
-                    char.IsSurrogatePair(request.Value, 0) ? 2 : 1;
+                // Chromium's controlled React inputs can discard a fast batch
+                // even after the first character appears in UIA. A verified
+                // native probe succeeded with 25ms between Unicode scalars.
+                // Pace the initial characters, then use bounded chunks for
+                // long text so the isolated worker stays within its deadline.
                 var selection = inputs.GetRange(0, 4).ToArray();
-                var lead = inputs.GetRange(4, leadLength * 2).ToArray();
-                var tail = inputs.GetRange(4 + lead.Length, inputs.Count - 4 - lead.Length).ToArray();
                 int inputSize = Marshal.SizeOf<KeyboardEventInput>();
                 inserted = SendKeyboardInput((uint)selection.Length, selection, inputSize);
-                if (inserted == selection.Length)
+                if (inserted != selection.Length)
+                    return new(WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
+                        FailureStage: WindowFailureStage.DISPATCH_INPUT,
+                        Detail: $"TEXT_SELECT_INSERTED_{inserted}", ElapsedMs: clock.ElapsedMilliseconds);
+                Thread.Sleep(100);
+                for (int offset = 0; offset < request.Value.Length;)
                 {
-                    Thread.Sleep(95);
                     if (GetForegroundWindow() != hwnd || !target.Current.HasKeyboardFocus)
                         return new(WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
                             FailureStage: WindowFailureStage.DISPATCH_INPUT,
-                            Detail: "FOCUS_LOST_AFTER_SELECT", ElapsedMs: clock.ElapsedMilliseconds);
-                    inserted += SendKeyboardInput((uint)lead.Length, lead, inputSize);
-                }
-                if (inserted == selection.Length + lead.Length)
-                {
-                    bool leadObserved = false;
-                    for (int attempt = 0; attempt < 5 && GetForegroundWindow() == hwnd; attempt++)
-                    {
-                        Thread.Sleep(attempt == 0 ? 130 : 60);
-                        if (target.TryGetCurrentPattern(ValuePattern.Pattern, out var value) &&
-                            value is ValuePattern pattern &&
-                            string.Equals(pattern.Current.Value, request.Value[..leadLength],
-                                StringComparison.Ordinal))
-                        {
-                            leadObserved = true;
-                            break;
-                        }
-                    }
-                    if (!leadObserved || GetForegroundWindow() != hwnd ||
-                        !target.Current.HasKeyboardFocus)
+                            Detail: "FOCUS_LOST_DURING_TEXT", ElapsedMs: clock.ElapsedMilliseconds);
+                    // KEYEVENTF_UNICODE uses UTF-16; keep surrogate pairs in
+                    // the same SendInput call so no half-character is emitted.
+                    int units = ChromeChunkUnits(request.Value, offset);
+                    var chunk = inputs.GetRange(4 + offset * 2, units * 2).ToArray();
+                    uint accepted = SendKeyboardInput((uint)chunk.Length, chunk, inputSize);
+                    inserted += accepted;
+                    if (accepted != chunk.Length)
                         return new(WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
                             FailureStage: WindowFailureStage.DISPATCH_INPUT,
-                            Detail: "CHROME_REACT_PRIMER_NOT_OBSERVED", ElapsedMs: clock.ElapsedMilliseconds);
-                    if (tail.Length > 0)
-                        inserted += SendKeyboardInput((uint)tail.Length, tail, inputSize);
+                            Detail: $"TEXT_CHUNK_INSERTED_{accepted}_OF_{chunk.Length}",
+                            ElapsedMs: clock.ElapsedMilliseconds);
+                    offset += units;
+                    Thread.Sleep(25);
                 }
             }
             else
