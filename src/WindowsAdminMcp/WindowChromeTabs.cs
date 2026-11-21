@@ -518,8 +518,9 @@ internal static partial class WindowChromeCdp
     {
         if (!TryParseTabElementRef(request.ElementId, out var target) || target is null)
             return new(WindowActionCode.STALE_ELEMENT);
-        if (!TryEndpoint(out var endpoint))
-            return new(WindowActionCode.CDP_UNAVAILABLE, FailureStage: WindowFailureStage.CDP_CONNECT);
+        if (!TryEndpoint(out var endpoint, out string endpointFailure))
+            return new(WindowActionCode.CDP_UNAVAILABLE, FailureStage: WindowFailureStage.CDP_CONNECT,
+                Detail: endpointFailure);
         try
         {
             return InvokeTabAsync(endpoint!, hwnd, request, target, clock).GetAwaiter().GetResult();
@@ -529,7 +530,9 @@ internal static partial class WindowChromeCdp
         {
             CloseTabConnection();
             return new(WindowActionCode.CDP_UNAVAILABLE, FailureStage: WindowFailureStage.CDP_CONNECT,
-                ExceptionType: e.GetType().Name, ElapsedMs: clock.ElapsedMilliseconds);
+                ExceptionType: e.GetType().Name,
+                Detail: e is WebSocketException ws ? $"CDP_WEBSOCKET_{ws.WebSocketErrorCode}" : null,
+                ElapsedMs: clock.ElapsedMilliseconds);
         }
     }
 
