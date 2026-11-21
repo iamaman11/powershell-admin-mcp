@@ -237,6 +237,17 @@ Check(WindowPhysicalClick.CanUseNativeFallback(null) &&
     !WindowPhysicalClick.CanUseNativeFallback(new(WindowActionCode.CDP_FAILED_UNKNOWN_EFFECT,
         EffectUnknown: true, FailureStage: WindowFailureStage.DISPATCH_INPUT)),
     "chrome.native_fallback_only_before_any_cdp_dispatch");
+var textRequest = new WindowActionRequest(testWindowId, freshElementId,
+    WindowActionKind.TYPE_TEXT, "CI_NEW");
+var textUnverified = WindowAction.RequireVerifiedTextEffect(textRequest,
+    new(WindowActionCode.COMPLETED, ExpectedStateObserved: false), true);
+Check(textUnverified.Status == WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT &&
+    textUnverified.EffectUnknown && textUnverified.FailureStage == WindowFailureStage.VERIFY_EFFECT &&
+    WindowAction.RequireVerifiedTextEffect(textRequest,
+        new(WindowActionCode.COMPLETED, ExpectedStateObserved: true), true).Status == WindowActionCode.COMPLETED &&
+    WindowAction.RequireVerifiedTextEffect(textRequest,
+        new(WindowActionCode.COMPLETED), false).Status == WindowActionCode.COMPLETED,
+    "windows.text_input_requires_observed_value_before_success");
 using (var protectedNode = System.Text.Json.JsonDocument.Parse(
     "{\"properties\":[{\"name\":\"protected\",\"value\":{\"value\":true}}]}"))
     Check(WindowChromeCdp.IsProtectedAx(protectedNode.RootElement),
@@ -804,6 +815,26 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                 keyboard.EffectState == WindowEffectState.EFFECT_VERIFIED &&
                 keyboard.TargetVerified && Volatile.Read(ref keyboardClickCount) == 1,
                 "windows.key_press_owned_button_exactly_once_with_verified_effect");
+        var inputTree = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 50,
+            realWindowId)).WaitAsync(TimeSpan.FromSeconds(5));
+        var nativeTypingTarget = inputTree.Elements.Single(e => e.Role.Contains("Edit", StringComparison.Ordinal));
+        const string typedValue = "CI_UIA_NATIVE_TYPED";
+        var typed = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, nativeTypingTarget.ElementId,
+                WindowActionKind.TYPE_TEXT, typedValue,
+                ExpectedName: "CI_UIA_INPUT_NAME", ExpectedChange: WindowExpectedChange.APPEARS,
+                ExpectedKind: WindowExpectedKind.UIA_VALUE, ExpectedValue: typedValue,
+                ObservationTimeoutMs: 3000))).WaitAsync(TimeSpan.FromSeconds(7));
+        if (typed.Status is WindowActionCode.FOREGROUND_UNAVAILABLE or WindowActionCode.FOCUS_UNAVAILABLE)
+            Console.WriteLine($"NOT_TESTED windows.type_text_owned_edit focus={typed.Status}");
+        else
+        {
+            string actualText = (string)created.Form.Invoke(new Func<string>(() => created.Input.Text));
+            Check(typed.Status == WindowActionCode.COMPLETED &&
+                typed.EffectState == WindowEffectState.EFFECT_VERIFIED &&
+                typed.ExpectedStateObserved == true && actualText == typedValue,
+                "windows.type_text_owned_edit_value_observed_after_native_input");
+        }
     }
     finally
     {

@@ -288,7 +288,7 @@ internal static class WindowAction
                             HResult = result.HResult ?? e.HResult.ToString("X8") };
                     }
                 }
-                return result;
+                return RequireVerifiedTextEffect(request, result, valueObservable);
             }
             WindowInspector.TryParseElementRef(request.ElementId, out long snapshotMs);
             if (request.ElementPath is not null)
@@ -451,6 +451,20 @@ internal static class WindowAction
             EffectUnknown = result.EffectUnknown && !observed,
             FailureStage = observed ? result.FailureStage :
                 result.FailureStage ?? WindowFailureStage.VERIFY_EFFECT };
+
+    // SendInput returning a full insertion count means the OS queued keys;
+    // it is not proof that Chrome/React changed an input. When the value or
+    // requested postcondition was observable but never appeared, report an
+    // unknown effect (no automatic retry) instead of a successful operation.
+    internal static WindowActionResult RequireVerifiedTextEffect(WindowActionRequest request,
+        WindowActionResult result, bool valueObservable) =>
+        (request.Action is WindowActionKind.SET_VALUE or WindowActionKind.TYPE_TEXT) &&
+        result.Status == WindowActionCode.COMPLETED && result.ExpectedStateObserved != true &&
+        (valueObservable || request.ExpectedEnabledName is not null || request.ExpectedName is not null)
+            ? result with { Status = WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT,
+                EffectUnknown = true, FailureStage = result.FailureStage ?? WindowFailureStage.VERIFY_EFFECT,
+                Detail = result.Detail ?? "TEXT_EFFECT_NOT_OBSERVED" }
+            : result;
 
     private static object? Pattern(AutomationElement element, ControlType role, WindowActionKind kind)
     {
