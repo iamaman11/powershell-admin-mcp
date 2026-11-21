@@ -21,7 +21,8 @@ internal static class WindowPhysicalClick
         background is null || background.Status == WindowActionCode.CDP_UNAVAILABLE &&
         !background.EffectUnknown && background.FailureStage == WindowFailureStage.CDP_CONNECT;
 
-    private static bool ActivateVerifiedWindow(IntPtr hwnd, AutomationElement target)
+    private static bool ActivateVerifiedWindow(IntPtr hwnd, AutomationElement target,
+        bool focusElement = true)
     {
         if (GetForegroundWindow() == hwnd) return true;
         _ = SetForegroundWindow(hwnd);
@@ -30,7 +31,9 @@ internal static class WindowPhysicalClick
         // control receives native UIA focus. This does not inject user input.
         try
         {
-            if (target.Current.IsKeyboardFocusable)
+            // Mouse input must not focus a covered target before hit testing:
+            // some providers raise its window and make an overlay appear absent.
+            if (focusElement && target.Current.IsKeyboardFocusable)
                 target.SetFocus();
         }
         catch (Exception e) when (e is COMException or ElementNotAvailableException or
@@ -70,7 +73,7 @@ internal static class WindowPhysicalClick
                 return new(WindowActionCode.WINDOW_NOT_VISIBLE, ElapsedMs: clock.ElapsedMilliseconds,
                     FailureStage: stage);
 
-            if (!ActivateVerifiedWindow(hwnd, target))
+            if (!ActivateVerifiedWindow(hwnd, target, focusElement: false))
                 return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
                     ElapsedMs: clock.ElapsedMilliseconds, FailureStage: stage,
                     Detail: ForegroundPolicy);
