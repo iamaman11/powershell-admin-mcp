@@ -737,6 +737,14 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                 null, parent.Path))).WaitAsync(TimeSpan.FromSeconds(5));
         Check(stalePath.Status == WindowActionCode.STALE_ELEMENT && Volatile.Read(ref pagedClickCount) == 1,
             "windows.action_reject_mismatched_exact_path");
+        // WinForms may reposition its main form after Shown (DPI/nonclient
+        // corrections). Realign the independent topmost cover before using it
+        // as a physical occlusion fixture, or the button becomes exposed.
+        created.Form.Invoke(new Action(() =>
+        {
+            testCover!.Bounds = created.Form.Bounds;
+            testCover.BringToFront();
+        }));
         var freshClickTree = await Task.Run(() => WindowInspector.InspectCore(
             created.Handle, 3, 40, realWindowId)).WaitAsync(TimeSpan.FromSeconds(5));
         var freshButton = freshClickTree.Elements.Single(e => e.Name == "CI_UIA_OWNED_BUTTON");
