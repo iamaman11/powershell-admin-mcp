@@ -475,7 +475,9 @@ internal static class WindowAction
             WindowActionKind.SET_VALUE when role == ControlType.Edit || role == ControlType.ComboBox => ValuePattern.Pattern,
             WindowActionKind.SELECT when role == ControlType.ListItem ||
                 role == ControlType.TabItem || role == ControlType.RadioButton => SelectionItemPattern.Pattern,
-            WindowActionKind.TOGGLE when role == ControlType.CheckBox => TogglePattern.Pattern,
+            // TogglePattern is implemented by toggle buttons as well as checkboxes.
+            // Trust the actual advertised UIA pattern, not a single control role.
+            WindowActionKind.TOGGLE => TogglePattern.Pattern,
             WindowActionKind.EXPAND or WindowActionKind.COLLAPSE => ExpandCollapsePattern.Pattern,
             _ => null
         };
