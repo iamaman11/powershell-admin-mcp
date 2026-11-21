@@ -817,10 +817,10 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                 "windows.key_press_owned_button_exactly_once_with_verified_effect");
         var inputTree = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 50,
             realWindowId)).WaitAsync(TimeSpan.FromSeconds(5));
-        var inputTarget = inputTree.Elements.Single(e => e.Role.Contains("Edit", StringComparison.Ordinal));
+        var nativeTypingTarget = inputTree.Elements.Single(e => e.Role.Contains("Edit", StringComparison.Ordinal));
         const string typedValue = "CI_UIA_NATIVE_TYPED";
         var typed = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
-            new WindowActionRequest(realWindowId, inputTarget.ElementId,
+            new WindowActionRequest(realWindowId, nativeTypingTarget.ElementId,
                 WindowActionKind.TYPE_TEXT, typedValue,
                 ExpectedName: "CI_UIA_INPUT_NAME", ExpectedChange: WindowExpectedChange.APPEARS,
                 ExpectedKind: WindowExpectedKind.UIA_VALUE, ExpectedValue: typedValue,
