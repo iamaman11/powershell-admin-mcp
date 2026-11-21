@@ -275,6 +275,16 @@ internal static class WindowPhysicalClick
                 var click = Click(hwnd, target, request with { Action = WindowActionKind.CLICK },
                     clock, allowCdp: false);
                 if (click.Status != WindowActionCode.COMPLETED) return click;
+                // SendInput queues the mouse events before Chromium necessarily
+                // processes their DOM focus transition. An immediate Unicode
+                // batch can go to the window while the React input stays inert.
+                // The verified native PowerShell probe needed an explicit
+                // post-click interval. Fail closed if focus was stolen meanwhile.
+                Thread.Sleep(240);
+                if (GetForegroundWindow() != hwnd)
+                    return new(WindowActionCode.FOCUS_UNAVAILABLE,
+                        FailureStage: WindowFailureStage.PREPARE_FOCUS,
+                        ElapsedMs: clock.ElapsedMilliseconds);
             }
 
             if (!target.Current.HasKeyboardFocus) target.SetFocus();

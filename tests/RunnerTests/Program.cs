@@ -843,9 +843,23 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             WindowActionCode.TARGET_OCCLUDED or WindowActionCode.CLICK_POINT_UNAVAILABLE)
             Console.WriteLine($"NOT_TESTED windows.click_owned_edit status={editClick.Status}");
         else
+        {
+            // Native SendInput reports successful queueing, not synchronous
+            // processing by WinForms' message loop on a separate thread.
+            // Observe the actual focus with a bound, rather than racing the
+            // mouse-up dispatch and treating its delayed effect as failure.
+            bool editFocused = false;
+            for (int attempt = 0; attempt < 20; attempt++)
+            {
+                editFocused = (bool)created.Form.Invoke(new Func<bool>(() => created.Input.Focused));
+                if (editFocused) break;
+                await Task.Delay(25);
+            }
+            Console.WriteLine($"EDIT_CLICK status={editClick.Status} verified={editClick.TargetVerified} " +
+                $"focused={editFocused} stage={editClick.FailureStage} detail={editClick.Detail}");
             Check(editClick.Status == WindowActionCode.COMPLETED && editClick.TargetVerified &&
-                (bool)created.Form.Invoke(new Func<bool>(() => created.Input.Focused)),
-                "windows.click_owned_edit_focuses_exact_field");
+                editFocused, "windows.click_owned_edit_focuses_exact_field");
+        }
         const string typedValue = "CI_UIA_NATIVE_TYPED";
         var typed = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, nativeTypingTarget.ElementId,
