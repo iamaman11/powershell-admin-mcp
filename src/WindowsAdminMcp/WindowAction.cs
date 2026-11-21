@@ -203,6 +203,24 @@ internal static class WindowAction
                     element.TryGetCurrentPattern(SelectionItemPattern.Pattern, out _);
                 bool valueObservable = (request.Action is WindowActionKind.SET_VALUE or WindowActionKind.TYPE_TEXT) &&
                     element.TryGetCurrentPattern(ValuePattern.Pattern, out _);
+                WindowActionResult ClickWithNativeFallback()
+                {
+                    // A semantic UIA action addresses the verified control without
+                    // requiring Windows to grant foreground activation. Chromium
+                    // advertises InvokePattern for ordinary web buttons even when
+                    // CDP is unavailable. Physical input remains the fallback for
+                    // controls that do not expose a matching UIA pattern.
+                    var semantic = SemanticClickAction(element, current.ControlType);
+                    if (semantic is not null)
+                    {
+                        var native = WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(),
+                            request with { Action = semantic.Value }, clock);
+                        // Never replay an action after it may have been delivered:
+                        // even an HRESULT failure can follow a real browser click.
+                        if (!CanFallbackAfterNativeClick(native)) return native;
+                    }
+                    return WindowPhysicalClick.Click(hwnd, element, request, clock);
+                }
                 WindowActionResult SetValueWithNativeFallback()
                 {
                     var browser = WindowChromeCdp.TryDispatch(hwnd, element, request, clock);
@@ -223,7 +241,7 @@ internal static class WindowAction
                             clock, radioInvoke);
                 }
                 var result = request.Action == WindowActionKind.CLICK
-                    ? WindowPhysicalClick.Click(hwnd, element, request, clock)
+                    ? ClickWithNativeFallback()
                     : request.Action == WindowActionKind.KEY_PRESS
                     ? WindowPhysicalClick.PressKey(hwnd, element, request, clock)
                     : request.Action == WindowActionKind.TYPE_TEXT
@@ -288,7 +306,8 @@ internal static class WindowAction
                             HResult = result.HResult ?? e.HResult.ToString("X8") };
                     }
                 }
-                return RequireVerifiedTextEffect(request, result, valueObservable);
+                return RequireVerifiedActionEffect(request,
+                    RequireVerifiedTextEffect(request, result, valueObservable));
             }
             WindowInspector.TryParseElementRef(request.ElementId, out long snapshotMs);
             if (request.ElementPath is not null)
@@ -452,6 +471,24 @@ internal static class WindowAction
             FailureStage = observed ? result.FailureStage :
                 result.FailureStage ?? WindowFailureStage.VERIFY_EFFECT };
 
+    // A successful native dispatch is not a verified UI action. If the caller
+    // supplied a postcondition and it was not observed, preserve the unknown
+    // effect and do not encourage an unsafe second click.
+    internal static WindowActionResult RequireVerifiedActionEffect(WindowActionRequest request,
+        WindowActionResult result) =>
+        result.Status == WindowActionCode.COMPLETED && result.ExpectedStateObserved != true &&
+        (request.ExpectedName is not null || request.ExpectedEnabledName is not null)
+            ? result with { Status = WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT,
+                EffectUnknown = true, FailureStage = result.FailureStage ?? WindowFailureStage.VERIFY_EFFECT,
+                Detail = result.Detail ?? "EXPECTED_EFFECT_NOT_OBSERVED" }
+            : result;
+
+    // Only a failure known to have happened before UIA dispatch may fall
+    // through to CDP/physical input. An uncertain provider result is final.
+    internal static bool CanFallbackAfterNativeClick(WindowActionResult result) =>
+        !result.EffectUnknown && result.FailureStage != WindowFailureStage.DISPATCH_UIA &&
+        (result.Status is WindowActionCode.UIA_UNAVAILABLE or WindowActionCode.UNSUPPORTED_ACTION);
+
     // SendInput returning a full insertion count means the OS queued keys;
     // it is not proof that Chrome/React changed an input. When the value or
     // requested postcondition was observable but never appeared, report an
@@ -465,6 +502,20 @@ internal static class WindowAction
                 EffectUnknown = true, FailureStage = result.FailureStage ?? WindowFailureStage.VERIFY_EFFECT,
                 Detail = result.Detail ?? "TEXT_EFFECT_NOT_OBSERVED" }
             : result;
+
+    private static WindowActionKind? SemanticClickAction(AutomationElement element, ControlType role)
+    {
+        if ((role == ControlType.Button || role == ControlType.Hyperlink ||
+            role == ControlType.MenuItem) && Pattern(element, role, WindowActionKind.INVOKE) is not null)
+            return WindowActionKind.INVOKE;
+        if ((role == ControlType.Button || role == ControlType.CheckBox) &&
+            Pattern(element, role, WindowActionKind.TOGGLE) is not null)
+            return WindowActionKind.TOGGLE;
+        if ((role == ControlType.RadioButton || role == ControlType.ListItem ||
+            role == ControlType.TabItem) && Pattern(element, role, WindowActionKind.SELECT) is not null)
+            return WindowActionKind.SELECT;
+        return null;
+    }
 
     private static object? Pattern(AutomationElement element, ControlType role, WindowActionKind kind)
     {

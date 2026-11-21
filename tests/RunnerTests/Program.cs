@@ -348,6 +348,26 @@ Check(reconciled.Status == WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT &&
     unverified.EffectState == WindowEffectState.EFFECT_UNKNOWN &&
     unverified.FailureStage == WindowFailureStage.DISPATCH_UIA,
     "windows.provider_error_reconciles_actual_effect_without_retry_or_losing_diagnostics");
+Check(WindowAction.CanFallbackAfterNativeClick(new(WindowActionCode.UIA_UNAVAILABLE,
+        FailureStage: WindowFailureStage.PREPARE_UIA)) &&
+    WindowAction.CanFallbackAfterNativeClick(new(WindowActionCode.UNSUPPORTED_ACTION)) &&
+    !WindowAction.CanFallbackAfterNativeClick(providerFailed) &&
+    !WindowAction.CanFallbackAfterNativeClick(new(WindowActionCode.UIA_UNAVAILABLE,
+        FailureStage: WindowFailureStage.DISPATCH_UIA)) &&
+    !WindowAction.CanFallbackAfterNativeClick(new(WindowActionCode.COMPLETED)),
+    "windows.semantic_click_only_falls_back_before_any_possible_dispatch");
+var expectedClick = new WindowActionRequest(testWindowId, freshElementId,
+    WindowActionKind.CLICK, null, ExpectedName: "CI_CLICKED",
+    ExpectedChange: WindowExpectedChange.APPEARS);
+var notObserved = WindowAction.RequireVerifiedActionEffect(expectedClick,
+    new(WindowActionCode.COMPLETED, ExpectedStateObserved: false,
+        ObservationState: WindowObservationState.NOT_OBSERVED));
+Check(notObserved.Status == WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT &&
+    notObserved.EffectUnknown && notObserved.EffectState == WindowEffectState.EFFECT_UNKNOWN &&
+    notObserved.FailureStage == WindowFailureStage.VERIFY_EFFECT &&
+    WindowAction.RequireVerifiedActionEffect(expectedClick,
+        new(WindowActionCode.COMPLETED, ExpectedStateObserved: true)).Status == WindowActionCode.COMPLETED,
+    "windows.semantic_click_requires_requested_effect_not_provider_acknowledgement");
 var invalidAction = await WindowTools.InvokeElement("bad", "bad", WindowActionKind.INVOKE, confirm: true);
 Check(invalidAction.Status == WindowActionCode.INVALID_ARGUMENT, "windows.action_reject_bad_ref_before_ipc");
 var missingConfirmation = await WindowTools.InvokeElement(testWindowId, freshElementId,
@@ -780,34 +800,41 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         }));
         var freshClickTree = await Task.Run(() => WindowInspector.InspectCore(
             created.Handle, 3, 40, realWindowId)).WaitAsync(TimeSpan.FromSeconds(5));
-        var freshButton = freshClickTree.Elements.Single(e => e.Name == "CI_UIA_OWNED_BUTTON");
+        var freshEdit = freshClickTree.Elements.Single(e => e.Role.Contains("Edit", StringComparison.Ordinal));
         var blocked = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
-            new WindowActionRequest(realWindowId, freshButton.ElementId, WindowActionKind.CLICK, null)))
+            new WindowActionRequest(realWindowId, freshEdit.ElementId, WindowActionKind.CLICK, null,
+                freshEdit.Path)))
             .WaitAsync(TimeSpan.FromSeconds(5));
         var overlayState = (string)created.Form.Invoke(new Func<string>(() =>
             $"visible={testCover!.Visible} topmost={testCover.TopMost} " +
             $"cover={testCover.Bounds} main={created.Form.Bounds}"));
-        await Task.Delay(100);
-        Console.WriteLine($"OCCLUDED_CLICK status={blocked.Status} stage={blocked.FailureStage} " +
-            $"detail={blocked.Detail} clicks={Volatile.Read(ref clickCount)} {overlayState}");
-        Check(blocked.Status is WindowActionCode.TARGET_OCCLUDED or
-            WindowActionCode.CLICK_POINT_UNAVAILABLE or WindowActionCode.FOREGROUND_UNAVAILABLE &&
-            Volatile.Read(ref clickCount) == 1, "windows.click_rejects_occluded_target_before_input");
+        Console.WriteLine($"OCCLUDED_PHYSICAL_FALLBACK status={blocked.Status} stage={blocked.FailureStage} " +
+            $"detail={blocked.Detail} {overlayState}");
+        Check((blocked.Status is WindowActionCode.TARGET_OCCLUDED or
+            WindowActionCode.CLICK_POINT_UNAVAILABLE or WindowActionCode.FOREGROUND_UNAVAILABLE) &&
+            (string)created.Form.Invoke(new Func<string>(() => created.Input.Text)) ==
+                "CI_UIA_UPDATED_VALUE", "windows.physical_fallback_rejects_occluded_edit_before_input");
+        var freshButton = freshClickTree.Elements.Single(e => e.Name == "CI_UIA_OWNED_BUTTON");
+        var backgroundClick = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, freshButton.ElementId, WindowActionKind.CLICK,
+                null, freshButton.Path, ExpectedName: "CI_UIA_CLICKED",
+                ExpectedChange: WindowExpectedChange.APPEARS))).WaitAsync(TimeSpan.FromSeconds(5));
+        Check(backgroundClick.Status == WindowActionCode.COMPLETED &&
+            backgroundClick.EffectState == WindowEffectState.EFFECT_VERIFIED &&
+            backgroundClick.TargetVerified && Volatile.Read(ref clickCount) == 2 &&
+            (bool)created.Form.Invoke(new Func<bool>(() => testCover!.Visible)),
+            "windows.click_invokes_occluded_uia_button_once_without_foreground_precondition");
+        var renamedTree = await Task.Run(() => WindowInspector.InspectCore(
+            created.Handle, 3, 40, realWindowId, nameContains: "CI_UIA_CLICKED"));
+        var renamedButton = renamedTree.Elements.Single(e => e.Name == "CI_UIA_CLICKED");
+        var notRepeated = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, renamedButton.ElementId, WindowActionKind.CLICK,
+                null, renamedButton.Path, ExpectedName: "CI_UIA_CLICKED",
+                ExpectedChange: WindowExpectedChange.APPEARS))).WaitAsync(TimeSpan.FromSeconds(5));
+        Check(notRepeated.Status == WindowActionCode.EXPECTED_STATE_ALREADY_TRUE &&
+            Volatile.Read(ref clickCount) == 2,
+            "windows.click_does_not_repeat_an_already_observed_effect");
         created.Form.Invoke(new Action(() => testCover!.Hide()));
-        var uncoveredTree = await Task.Run(() => WindowInspector.InspectCore(
-            created.Handle, 3, 40, realWindowId)).WaitAsync(TimeSpan.FromSeconds(5));
-        var uncoveredButton = uncoveredTree.Elements.Single(e => e.Name == "CI_UIA_OWNED_BUTTON");
-        var physical = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
-            new WindowActionRequest(realWindowId, uncoveredButton.ElementId, WindowActionKind.CLICK,
-                null, ExpectedName: "CI_UIA_CLICKED", ExpectedChange: WindowExpectedChange.APPEARS)))
-            .WaitAsync(TimeSpan.FromSeconds(5));
-        if (physical.Status == WindowActionCode.FOREGROUND_UNAVAILABLE)
-            Console.WriteLine("NOT_TESTED windows.click_owned_button_foreground_denied_by_ci_desktop");
-        else
-            Check(physical.Status == WindowActionCode.COMPLETED &&
-                physical.EffectState == WindowEffectState.EFFECT_VERIFIED &&
-                physical.TargetVerified && Volatile.Read(ref clickCount) == 2,
-                "windows.click_owned_button_exactly_once_with_verified_effect");
         var keyboardTree = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 10,
             realWindowId, nameContains: "CI_UIA_KEYBOARD_BUTTON", roleFilter: WindowRoleFilter.BUTTON))
             .WaitAsync(TimeSpan.FromSeconds(5));
