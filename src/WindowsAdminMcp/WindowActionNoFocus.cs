@@ -155,10 +155,12 @@ internal static class WindowActionNoFocus
                         (focusDetail is null ? "" : ":" + focusDetail),
                     ElapsedMs: clock.ElapsedMilliseconds, TargetActivated: targetActivated,
                     FailureStage: stage, HResult: result.ToString("X8"),
-                    ProviderResponse: result.ToString("X8"))
+                    ProviderResponse: result.ToString("X8"),
+                    ExecutionMethod: WindowExecutionMethod.UIA_PATTERN)
                 : new(WindowActionCode.COMPLETED, ForegroundChanged: changed,
                     Detail: focusDetail,
-                    ElapsedMs: clock.ElapsedMilliseconds, TargetActivated: targetActivated);
+                    ElapsedMs: clock.ElapsedMilliseconds, TargetActivated: targetActivated,
+                    ExecutionMethod: WindowExecutionMethod.UIA_PATTERN);
         }
         catch (Exception error) when (error is COMException or InvalidOperationException or
                                       ArgumentException or NotSupportedException)
@@ -166,7 +168,8 @@ internal static class WindowActionNoFocus
             return new(dispatched ? WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT : WindowActionCode.UIA_UNAVAILABLE,
                 EffectUnknown: dispatched, Detail: error.HResult.ToString("X8"),
                 ElapsedMs: clock.ElapsedMilliseconds, FailureStage: stage,
-                ExceptionType: error.GetType().Name, HResult: error.HResult.ToString("X8"));
+                ExceptionType: error.GetType().Name, HResult: error.HResult.ToString("X8"),
+                ExecutionMethod: dispatched ? WindowExecutionMethod.UIA_PATTERN : null);
         }
         finally
         {

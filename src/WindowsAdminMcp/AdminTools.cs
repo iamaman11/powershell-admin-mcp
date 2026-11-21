@@ -64,8 +64,9 @@ public sealed class AdminTools
     internal static Task<AdminResponse> Diagnostics(CancellationToken ct) => Call(new(AdminOperation.Diagnostics),ct);
 
     [McpServerTool(Name="powershell_status",UseStructuredContent=true),
-        Description("Service identity.")]
-    public static async Task<AdminStatus> Status(CancellationToken cancellationToken)
+        Description("Service identity; optional typed read-only doctor diagnostics.")]
+    public static async Task<AdminStatus> Status(bool include_diagnostics=false,
+        CancellationToken cancellationToken=default)
     {
         var reply=await Call(new(AdminOperation.Status),cancellationToken);
         var status=reply.Info??new(reply.Code,reply.Correlation);
@@ -75,9 +76,11 @@ public sealed class AdminTools
             new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator));
         // The service owns queue/identity checks. A user frontend is not proof
         // that a matching user-side runner is currently available.
-        return status with {Frontend=frontend,ExecutionContext=status.Status!=StatusCode.OK?CommandContext.UNCONFIRMED:
+        var result=status with {Frontend=frontend,ExecutionContext=status.Status!=StatusCode.OK?CommandContext.UNCONFIRMED:
             identity.IsSystem?CommandContext.SYSTEM:
             status.UserContextAvailable==true?CommandContext.USER:CommandContext.UNCONFIRMED};
+        if (!include_diagnostics || result.Status!=StatusCode.OK) return result;
+        return result with {Diagnostics=DoctorSnapshot.FromReport(await Doctor.ObserveAsync())};
     }
 
     [McpServerTool(Name="powershell_job",UseStructuredContent=true),
@@ -107,7 +110,7 @@ public sealed class AdminTools
         var started=DateTimeOffset.UtcNow;
         if(!DesktopCapture.ValidArguments(monitor,x,y,width,height,max_width))
             return DesktopCapture.Error(CaptureCode.INVALID_ARGUMENT,correlation,timing:new(StartedUtc:started,ToolMs:clock.ElapsedMilliseconds));
-        var status=await Status(cancellationToken);
+        var status=await Status(cancellationToken: cancellationToken);
         if(status.Status!=StatusCode.OK)
             return DesktopCapture.Error(CaptureCode.SERVICE_CHECK_FAILED,correlation,status.Status,
                 timing:(status.Timing??new()) with {StartedUtc=started,ToolMs=clock.ElapsedMilliseconds},serviceCorrelation:status.CorrelationId);

@@ -53,7 +53,9 @@ public sealed record AdminStatus(
     [property: JsonPropertyName("user_context_available")] bool? UserContextAvailable = null,
     [property:JsonPropertyName("versions")] VersionIdentity? Versions = null,
     [property:JsonPropertyName("admission_open")] bool? AdmissionOpen = null,
-    [property:JsonPropertyName("timing")] ToolTiming? Timing = null);
+    [property:JsonPropertyName("timing")] ToolTiming? Timing = null,
+    [property:JsonPropertyName("diagnostics"), JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)]
+        DoctorSnapshot? Diagnostics = null);
 
 
 // Service derives these fields from the authenticated local pipe client, not MCP input.

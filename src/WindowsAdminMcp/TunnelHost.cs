@@ -92,7 +92,7 @@ internal static class TunnelHost
             bool ready=false;
             do
             {
-                var status=await AdminTools.Status(CancellationToken.None);
+                var status=await AdminTools.Status(cancellationToken: CancellationToken.None);
                 if(status.Status==StatusCode.OK && status.ServicePid is int pid && status.ExecutionSid=="S-1-5-18")
                 {
                     using var service=Process.GetProcessById(pid);
@@ -134,7 +134,7 @@ internal static class TunnelHost
                 if (dependency == TunReadiness.READY)
                 {
                     // The service may have stopped while the network was unavailable.
-                    var status = await AdminTools.Status(CancellationToken.None);
+                    var status = await AdminTools.Status(cancellationToken: CancellationToken.None);
                     if (status.Status == StatusCode.OK && status.ServicePid is int currentPid &&
                         status.ExecutionSid == "S-1-5-18")
                     {
