@@ -730,6 +730,23 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             collapsed.ObservationState == WindowObservationState.OBSERVED &&
             collapsed.Status == WindowActionCode.COMPLETED,
             "windows.collapse_native_uia_pattern_with_verified_state");
+        var clickExpanded = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, expandTarget.ElementId, WindowActionKind.CLICK,
+                null, expandTarget.Path, ObservationTimeoutMs: 3000))).WaitAsync(TimeSpan.FromSeconds(5));
+        Check(clickExpanded.Status == WindowActionCode.COMPLETED &&
+            clickExpanded.EffectState == WindowEffectState.EFFECT_VERIFIED &&
+            clickExpanded.ObservationState == WindowObservationState.OBSERVED,
+            "windows.click_expands_native_disclosure_without_physical_foreground_input");
+        var expandedClickTree = await Task.Run(() => WindowInspector.InspectCore(created.Handle,
+            3, 10, realWindowId, nameContains: "CI_UIA_EXPANDABLE", roleFilter: WindowRoleFilter.COMBO_BOX));
+        var expandedClickTarget = expandedClickTree.Elements.Single(e => e.Name == "CI_UIA_EXPANDABLE");
+        var clickCollapsed = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, expandedClickTarget.ElementId, WindowActionKind.CLICK,
+                null, expandedClickTarget.Path, ObservationTimeoutMs: 3000))).WaitAsync(TimeSpan.FromSeconds(5));
+        Check(clickCollapsed.Status == WindowActionCode.COMPLETED &&
+            clickCollapsed.EffectState == WindowEffectState.EFFECT_VERIFIED &&
+            clickCollapsed.ObservationState == WindowObservationState.OBSERVED,
+            "windows.click_collapses_native_disclosure_without_physical_foreground_input");
         var deepTree = await Task.Run(() => WindowInspector.InspectCore(
             created.Handle, WindowInspector.MaxDepth, 100, realWindowId))
             .WaitAsync(TimeSpan.FromSeconds(5));

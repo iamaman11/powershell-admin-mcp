@@ -191,15 +191,18 @@ internal static class WindowAction
                         return new(WindowActionCode.EXPECTED_STATE_ALREADY_TRUE,
                             ElapsedMs: clock.ElapsedMilliseconds);
                 }
-                bool expansionObservable = (request.Action is WindowActionKind.EXPAND or WindowActionKind.COLLAPSE) &&
+                var semanticClick = request.Action == WindowActionKind.CLICK
+                    ? SemanticClickAction(element, current.ControlType) : null;
+                var effectiveAction = semanticClick ?? request.Action;
+                bool expansionObservable = (effectiveAction is WindowActionKind.EXPAND or WindowActionKind.COLLAPSE) &&
                     element.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out _);
-                if (expansionObservable && TargetExpanded(hwnd, path, element.GetRuntimeId(), request.Action))
+                if (expansionObservable && TargetExpanded(hwnd, path, element.GetRuntimeId(), effectiveAction))
                     return new(WindowActionCode.EXPECTED_STATE_ALREADY_TRUE,
                         ElapsedMs: clock.ElapsedMilliseconds);
                 bool radioInvoke = request.Action == WindowActionKind.SELECT &&
                     current.ControlType == ControlType.RadioButton &&
                     element.TryGetCurrentPattern(InvokePattern.Pattern, out _);
-                bool selectionObservable = request.Action == WindowActionKind.SELECT &&
+                bool selectionObservable = effectiveAction == WindowActionKind.SELECT &&
                     element.TryGetCurrentPattern(SelectionItemPattern.Pattern, out _);
                 bool valueObservable = (request.Action is WindowActionKind.SET_VALUE or WindowActionKind.TYPE_TEXT) &&
                     element.TryGetCurrentPattern(ValuePattern.Pattern, out _);
@@ -210,11 +213,10 @@ internal static class WindowAction
                     // advertises InvokePattern for ordinary web buttons even when
                     // CDP is unavailable. Physical input remains the fallback for
                     // controls that do not expose a matching UIA pattern.
-                    var semantic = SemanticClickAction(element, current.ControlType);
-                    if (semantic is not null)
+                    if (semanticClick is not null)
                     {
                         var native = WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(),
-                            request with { Action = semantic.Value }, clock);
+                            request with { Action = semanticClick.Value }, clock);
                         // Never replay an action after it may have been delivered:
                         // even an HRESULT failure can follow a real browser click.
                         if (!CanFallbackAfterNativeClick(native)) return native;
@@ -281,7 +283,7 @@ internal static class WindowAction
                                 ? WindowEffectObserver.Check(request, baseline) ==
                                     (request.ExpectedChange == WindowExpectedChange.APPEARS)
                                 : selectionObservable ? TargetSelected(hwnd, path, element.GetRuntimeId())
-                                : expansionObservable ? TargetExpanded(hwnd, path, element.GetRuntimeId(), request.Action)
+                                : expansionObservable ? TargetExpanded(hwnd, path, element.GetRuntimeId(), effectiveAction)
                                 : valueObservable ? TargetValue(hwnd, path, element.GetRuntimeId(), request.Value!)
                                 : true;
                             enabledObserved = request.ExpectedEnabledName is null ||
@@ -514,6 +516,13 @@ internal static class WindowAction
         if ((role == ControlType.RadioButton || role == ControlType.ListItem ||
             role == ControlType.TabItem) && Pattern(element, role, WindowActionKind.SELECT) is not null)
             return WindowActionKind.SELECT;
+        if (Pattern(element, role, WindowActionKind.EXPAND) is ExpandCollapsePattern expand)
+            return expand.Current.ExpandCollapseState switch
+            {
+                ExpandCollapseState.Collapsed => WindowActionKind.EXPAND,
+                ExpandCollapseState.Expanded or ExpandCollapseState.PartiallyExpanded => WindowActionKind.COLLAPSE,
+                _ => null
+            };
         return null;
     }
 
