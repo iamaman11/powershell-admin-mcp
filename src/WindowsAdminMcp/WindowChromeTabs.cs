@@ -1,6 +1,8 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.Net;
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text;
@@ -162,17 +164,59 @@ internal static partial class WindowChromeCdp
         $"c1:{stamp:x}:{targetId}:{backendId:x}:{loaderId}:" +
         ElementDigest(windowId, targetId, backendId, loaderId, url, role, name);
 
-    private static bool TryEndpoint(out Uri? endpoint)
+    // A DevToolsActivePort file can survive an earlier Chrome debugging session.
+    // A stale file is not evidence of an active, authorized CDP connection.
+    internal static bool LoopbackPortOpen(int port)
+    {
+        if (port is < 1 or > 65535) return false;
+        try
+        {
+            using var client = new TcpClient();
+            using var deadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(350));
+            client.ConnectAsync(IPAddress.Loopback, port, deadline.Token).GetAwaiter().GetResult();
+            return client.Connected;
+        }
+        catch (Exception e) when (e is SocketException or IOException or OperationCanceledException)
+        { return false; }
+    }
+
+    private static bool TryEndpoint(out Uri? endpoint, out string failure)
     {
         endpoint = null;
+        failure = "CHROME_REMOTE_DEBUGGING_NOT_ENABLED";
         string data = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (string.IsNullOrWhiteSpace(data)) return false;
         try
         {
-            return TryReadEndpoint(File.ReadAllText(Path.Combine(data, "Google", "Chrome",
-                "User Data", "DevToolsActivePort")), out endpoint);
+            if (!TryReadEndpoint(File.ReadAllText(Path.Combine(data, "Google", "Chrome",
+                "User Data", "DevToolsActivePort")), out endpoint))
+            {
+                failure = "CHROME_DEBUG_ENDPOINT_INVALID";
+                return false;
+            }
+            if (!TabConnected || _tabEndpoint != endpoint)
+            {
+                if (!LoopbackPortOpen(endpoint!.Port))
+                {
+                    failure = "CHROME_DEBUG_PORT_CLOSED";
+                    return false;
+                }
+            }
+            failure = "";
+            return true;
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
+        catch (FileNotFoundException) { return false; }
+        catch (DirectoryNotFoundException) { return false; }
+        catch (UnauthorizedAccessException)
+        {
+            failure = "CHROME_DEBUG_ENDPOINT_ACCESS_DENIED";
+            return false;
+        }
+        catch (IOException)
+        {
+            failure = "CHROME_DEBUG_ENDPOINT_READ_FAILED";
+            return false;
+        }
     }
 
     private static bool MatchesBounds(WindowBounds native, WindowBounds chrome, double dpi)
@@ -236,8 +280,10 @@ internal static partial class WindowChromeCdp
         string? nameFilter, WindowRoleFilter? roleFilter,
         string? expectedProfile = null, string? expectedOrigin = null, string? expectedUrl = null)
     {
-        if (hwnd == IntPtr.Zero || !TryEndpoint(out var endpoint))
-            return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: "CHROME_REMOTE_DEBUGGING_UNAVAILABLE");
+        if (hwnd == IntPtr.Zero)
+            return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: "WINDOW_NOT_AVAILABLE");
+        if (!TryEndpoint(out var endpoint, out string endpointFailure))
+            return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: endpointFailure);
         try
         {
             WindowCatalog.TryParseId(windowId, out var identity);
@@ -257,7 +303,8 @@ internal static partial class WindowChromeCdp
             CloseTabConnection();
             return new(e is InvalidOperationException && e.Message == "CDP_WINDOW_NOT_UNIQUE"
                 ? WindowInspectCode.CDP_TARGET_AMBIGUOUS : WindowInspectCode.CDP_UNAVAILABLE,
-                [], Detail: e is InvalidOperationException ? e.Message : e.GetType().Name);
+                [], Detail: e is InvalidOperationException ? e.Message : e is WebSocketException ws
+                    ? $"CDP_WEBSOCKET_{ws.WebSocketErrorCode}" : e.GetType().Name);
         }
     }
 

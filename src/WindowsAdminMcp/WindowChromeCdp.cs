@@ -97,16 +97,12 @@ internal static partial class WindowChromeCdp
         catch (Win32Exception) { return null; }
         catch (InvalidOperationException) { return null; }
         catch (System.Security.SecurityException) { return null; }
-        string? localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        if (string.IsNullOrWhiteSpace(localAppData)) return null;
-        string portFile = Path.Combine(localAppData, "Google", "Chrome", "User Data", "DevToolsActivePort");
-        string fileContents;
-        try { fileContents = File.ReadAllText(portFile); }
-        catch (IOException) { return null; }
-        catch (UnauthorizedAccessException) { return null; }
-        if (!TryReadEndpoint(fileContents, out var endpoint))
+        if (!TryEndpoint(out var endpoint, out string endpointFailure))
+        {
+            if (endpointFailure == "CHROME_REMOTE_DEBUGGING_NOT_ENABLED") return null;
             return new(WindowActionCode.CDP_UNAVAILABLE, FailureStage: WindowFailureStage.CDP_CONNECT,
-                Detail: "INVALID_CHROME_DEBUG_ENDPOINT", ElapsedMs: clock.ElapsedMilliseconds);
+                Detail: endpointFailure, ElapsedMs: clock.ElapsedMilliseconds);
+        }
         try
         {
             var bounds = new WindowBounds(rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top);
@@ -117,7 +113,9 @@ internal static partial class WindowChromeCdp
                                    OperationCanceledException or InvalidOperationException or KeyNotFoundException)
         {
             return new(WindowActionCode.CDP_UNAVAILABLE, FailureStage: WindowFailureStage.CDP_CONNECT,
-                ExceptionType: e.GetType().Name, ElapsedMs: clock.ElapsedMilliseconds);
+                ExceptionType: e.GetType().Name,
+                Detail: e is WebSocketException ws ? $"CDP_WEBSOCKET_{ws.WebSocketErrorCode}" : null,
+                ElapsedMs: clock.ElapsedMilliseconds);
         }
     }
 
