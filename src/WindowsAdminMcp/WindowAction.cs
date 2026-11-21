@@ -475,7 +475,7 @@ internal static class WindowAction
         var auditId = Guid.NewGuid().ToString("N");
         if (!WriteAudit(auditId, "INTENT", request, null))
             return new(WindowActionCode.AUDIT_UNAVAILABLE, AuditId: auditId);
-        WindowActionResult result = WindowChromeCdp.ValidTabElementRef(request.ElementId)
+        WindowActionResult result = request.ExpectedProfile is not null
             ? await WindowChromeBroker.InvokeAsync(request, cancellationToken)
             : await RunDisposableWorkerAsync(request, cancellationToken);
         if (!WriteAudit(auditId, "RESULT", request, result))

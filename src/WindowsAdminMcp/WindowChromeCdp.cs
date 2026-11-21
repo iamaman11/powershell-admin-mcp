@@ -161,12 +161,11 @@ internal static partial class WindowChromeCdp
     {
         bool dispatched = false;
         var foregroundAtEntry = GetForegroundWindow();
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        using var deadline = new CancellationTokenSource(
+            TimeSpan.FromSeconds(TabConnected ? 6 : 24));
         try
         {
-            using var ws = new ClientWebSocket();
-            await ws.ConnectAsync(endpoint, deadline.Token);
-            var cdp = new Session(ws, deadline.Token);
+            var cdp = await TabSessionAsync(endpoint, deadline.Token);
             var targets = await cdp.Call("Target.getTargets", new { });
             string title = GetTitle(hwnd);
             if (string.IsNullOrWhiteSpace(title))
@@ -196,8 +195,7 @@ internal static partial class WindowChromeCdp
                     dpi == 0 ? 1 : dpi / 96.0)) candidates.Add(targetId);
             }
             if (candidates.Count != 1) return Rejected(WindowActionCode.CDP_TARGET_AMBIGUOUS);
-            var attach = await cdp.Call("Target.attachToTarget", new { targetId = candidates[0], flatten = true });
-            string sessionId = attach.GetProperty("sessionId").GetString()!;
+            string sessionId = await Attach(cdp, candidates[0]);
             var document = await cdp.Call("DOM.getDocument", new { depth = 0 }, sessionId);
             int nodeId = document.GetProperty("root").GetProperty("nodeId").GetInt32();
             var matches = await cdp.Call("Accessibility.queryAXTree",
@@ -293,6 +291,7 @@ internal static partial class WindowChromeCdp
         catch (Exception e) when (e is WebSocketException or IOException or JsonException or
                                    OperationCanceledException or InvalidOperationException or KeyNotFoundException)
         {
+            CloseTabConnection();
             return new(dispatched ? WindowActionCode.CDP_FAILED_UNKNOWN_EFFECT : WindowActionCode.CDP_UNAVAILABLE,
                 EffectUnknown: dispatched, FailureStage: dispatched ? WindowFailureStage.DISPATCH_INPUT :
                     WindowFailureStage.CDP_CONNECT, ExceptionType: e.GetType().Name,

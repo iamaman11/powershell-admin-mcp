@@ -205,10 +205,14 @@ Check(WindowChromeCdp.ValidTargetId("0123456789abcdef0123456789abcdef") &&
 string freshTabRef = "c1:" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString("x") +
     ":0123456789abcdef0123456789abcdef:1:loader:0123456789abcdef0123456789abcdef";
 var chromeAction = new WindowActionRequest(testWindowId, freshTabRef,
-    WindowActionKind.CLICK, ExpectedProfile: "Valer");
+    WindowActionKind.CLICK, null, ExpectedProfile: "Valer");
+var chromeUiaAction = new WindowActionRequest(testWindowId, freshElementId,
+    WindowActionKind.CLICK, null, ExpectedProfile: "Valer");
 Check(WindowChromeCdp.ValidTabElementRef(freshTabRef) && WindowAction.Valid(chromeAction) &&
     !WindowAction.Valid(chromeAction with { ExpectedProfile = null }) &&
     new ChromeBrokerRequest(Action: chromeAction).Valid &&
+    new ChromeBrokerRequest(Action: chromeUiaAction).Valid &&
+    !new ChromeBrokerRequest(Action: chromeUiaAction with { ExpectedProfile = null }).Valid &&
     !new ChromeBrokerRequest(Action: chromeAction with { ExpectedProfile = null }).Valid &&
     new ChromeBrokerRequest(Inspect: new(testWindowId, 16, 50, null, null, 0,
         false, null, null, 0, WindowInspectScope.TABS, ExpectedProfile: "Valer")).Valid &&
