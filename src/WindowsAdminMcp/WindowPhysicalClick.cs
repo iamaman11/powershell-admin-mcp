@@ -6,7 +6,7 @@ using System.Windows.Automation;
 // unexpected foreground window; UIA actions remain the background-first path.
 internal static class WindowPhysicalClick
 {
-    private const string ForegroundPolicy = "WINDOWS_FOREGROUND_POLICY_USE_UIA_OR_OPT_IN_CDP";
+    private const string ForegroundPolicy = "WINDOWS_FOREGROUND_POLICY_NOT_GRANTED";
     private const uint InputMouse = 0;
     private const uint LeftDown = 0x0002;
     private const uint LeftUp = 0x0004;
@@ -14,6 +14,29 @@ internal static class WindowPhysicalClick
     private const uint KeyUp = 0x0002;
     private const uint KeyUnicode = 0x0004;
     private const uint RootAncestor = 2;
+
+    // Only a failure before any CDP dispatch may use the native path. An
+    // ambiguous browser action must never be replayed through SendInput.
+    internal static bool CanUseNativeFallback(WindowActionResult? background) =>
+        background is null || background.Status == WindowActionCode.CDP_UNAVAILABLE &&
+        !background.EffectUnknown && background.FailureStage == WindowFailureStage.CDP_CONNECT;
+
+    private static bool ActivateVerifiedWindow(IntPtr hwnd, AutomationElement target)
+    {
+        if (GetForegroundWindow() == hwnd) return true;
+        _ = SetForegroundWindow(hwnd);
+        if (GetForegroundWindow() == hwnd) return true;
+        // Chrome sometimes grants foreground only when the exact accessible
+        // control receives native UIA focus. This does not inject user input.
+        if (target.Current.IsKeyboardFocusable)
+            target.SetFocus();
+        for (int i = 0; i < 4; i++)
+        {
+            if (GetForegroundWindow() == hwnd) return true;
+            Thread.Sleep(25);
+        }
+        return false;
+    }
 
     internal static WindowActionResult Click(IntPtr hwnd, AutomationElement target,
         WindowActionRequest request, Stopwatch clock)
@@ -36,17 +59,13 @@ internal static class WindowPhysicalClick
             // Chrome web content can be clicked through its explicitly opted-in
             // DevTools connection without stealing desktop focus or mouse position.
             var background = WindowChromeCdp.TryDispatch(hwnd, target, request, clock);
-            if (background is not null) return background;
+            if (!CanUseNativeFallback(background)) return background!;
 
             if (current.IsOffscreen || IsIconic(hwnd) || !IsWindowVisible(hwnd))
                 return new(WindowActionCode.WINDOW_NOT_VISIBLE, ElapsedMs: clock.ElapsedMilliseconds,
                     FailureStage: stage);
 
-            if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd))
-                return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
-                    ElapsedMs: clock.ElapsedMilliseconds, FailureStage: stage,
-                    Detail: ForegroundPolicy);
-            if (GetForegroundWindow() != hwnd)
+            if (!ActivateVerifiedWindow(hwnd, target))
                 return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
                     ElapsedMs: clock.ElapsedMilliseconds, FailureStage: stage,
                     Detail: ForegroundPolicy);
@@ -125,18 +144,14 @@ internal static class WindowPhysicalClick
                     ElapsedMs: clock.ElapsedMilliseconds);
 
             var background = WindowChromeCdp.TryDispatch(hwnd, target, request, clock);
-            if (background is not null) return background;
+            if (!CanUseNativeFallback(background)) return background!;
 
             if (!target.Current.IsKeyboardFocusable || target.Current.IsOffscreen ||
                 IsIconic(hwnd) || !IsWindowVisible(hwnd))
                 return new(WindowActionCode.FOCUS_UNAVAILABLE, FailureStage: stage,
                     ElapsedMs: clock.ElapsedMilliseconds);
 
-            if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd))
-                return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
-                    FailureStage: WindowFailureStage.ACTIVATE_WINDOW,
-                    ElapsedMs: clock.ElapsedMilliseconds, Detail: ForegroundPolicy);
-            if (GetForegroundWindow() != hwnd)
+            if (!ActivateVerifiedWindow(hwnd, target))
                 return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
                     FailureStage: WindowFailureStage.ACTIVATE_WINDOW,
                     ElapsedMs: clock.ElapsedMilliseconds, Detail: ForegroundPolicy);
@@ -211,7 +226,7 @@ internal static class WindowPhysicalClick
     // ValuePattern.SetValue it uses one ordered Unicode SendInput batch, never
     // a sequence of unverified per-character clicks or global paste shortcuts.
     internal static WindowActionResult TypeText(IntPtr hwnd, AutomationElement target,
-        WindowActionRequest request, Stopwatch clock)
+        WindowActionRequest request, Stopwatch clock, bool allowCdp = true)
     {
         bool dispatched = false;
         var foregroundAtEntry = GetForegroundWindow();
@@ -220,16 +235,16 @@ internal static class WindowPhysicalClick
             if (request.Value is null || (target.Current.ControlType != ControlType.Edit &&
                 target.Current.ControlType != ControlType.ComboBox))
                 return new(WindowActionCode.UNSUPPORTED_ACTION, ElapsedMs: clock.ElapsedMilliseconds);
-            var background = WindowChromeCdp.TryDispatch(hwnd, target, request, clock);
-            if (background is not null) return background;
+            if (allowCdp)
+            {
+                var background = WindowChromeCdp.TryDispatch(hwnd, target, request, clock);
+                if (!CanUseNativeFallback(background)) return background!;
+            }
 
             if (!target.Current.IsKeyboardFocusable || target.Current.IsOffscreen ||
                 IsIconic(hwnd) || !IsWindowVisible(hwnd))
                 return new(WindowActionCode.FOCUS_UNAVAILABLE, FailureStage: WindowFailureStage.PREPARE_FOCUS);
-            if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd))
-                return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
-                    FailureStage: WindowFailureStage.ACTIVATE_WINDOW, Detail: ForegroundPolicy);
-            if (GetForegroundWindow() != hwnd)
+            if (!ActivateVerifiedWindow(hwnd, target))
                 return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
                     FailureStage: WindowFailureStage.ACTIVATE_WINDOW, Detail: ForegroundPolicy);
 

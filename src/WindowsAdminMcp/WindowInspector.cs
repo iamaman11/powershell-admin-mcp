@@ -156,6 +156,8 @@ internal static class WindowInspector
             return "tab_id: omit for scope=TABS";
         if (scope == WindowInspectScope.TAB && !WindowChromeCdp.ValidTargetId(tabId))
             return "tab_id: expected a target ID from scope=TABS";
+        if (scope != WindowInspectScope.WINDOW && expectedProfile is null)
+            return "expected_profile: required for Chrome TABS/TAB";
         if (scope != WindowInspectScope.WINDOW && (startPath is not null || startElementId is not null || waitMs != 0))
             return "scope: TAB/TABS cannot use UIA subtree or wait arguments";
         if (scope != WindowInspectScope.WINDOW && includeDetails)
@@ -413,6 +415,10 @@ internal static class WindowInspector
             return new(WindowInspectCode.INVALID_ARGUMENT, [], Detail: ArgumentError(windowId, maxDepth,
                 maxElements, startPath, startElementId, offset, includeDetails, nameContains,
                 roleFilter, waitMs, scope, tabId, expectedProfile, expectedOrigin, expectedUrl));
+        if (scope != WindowInspectScope.WINDOW)
+            return await WindowChromeBroker.InspectAsync(new(windowId, maxDepth, maxElements,
+                startPath, startElementId, offset, includeDetails, nameContains, roleFilter,
+                waitMs, scope, tabId, expectedProfile, expectedOrigin, expectedUrl), cancellationToken);
         var executable = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(executable)) return new(WindowInspectCode.WORKER_FAILED, []);
         var start = new ProcessStartInfo(executable)

@@ -306,13 +306,15 @@ internal static partial class WindowChromeCdp
     private sealed class Session(ClientWebSocket socket, CancellationToken cancellationToken)
     {
         private int _nextId;
+        private CancellationToken _deadline = cancellationToken;
+        internal void SetDeadline(CancellationToken deadline) => _deadline = deadline;
         internal async Task<JsonElement> Call(string method, object parameters, string? sessionId = null)
         {
             int id = ++_nextId;
             byte[] payload = JsonSerializer.SerializeToUtf8Bytes(new
                 { id, method, @params = parameters, sessionId },
                 new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull });
-            await socket.SendAsync(payload.AsMemory(), WebSocketMessageType.Text, true, cancellationToken);
+            await socket.SendAsync(payload.AsMemory(), WebSocketMessageType.Text, true, _deadline);
             var buffer = new byte[16384];
             using var stream = new MemoryStream();
             while (true)
@@ -321,7 +323,7 @@ internal static partial class WindowChromeCdp
                 WebSocketReceiveResult part;
                 do
                 {
-                    part = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
+                    part = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), _deadline);
                     if (part.MessageType != WebSocketMessageType.Text || stream.Length + part.Count > MaxMessageBytes)
                         throw new JsonException("CDP_MESSAGE_INVALID");
                     stream.Write(buffer, 0, part.Count);

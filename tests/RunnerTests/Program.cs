@@ -61,10 +61,13 @@ Check(WindowInspector.ValidArguments(testWindowId, 0, 1) &&
     !WindowInspector.ValidArguments(testWindowId, 17, 50) &&
     !WindowInspector.ValidArguments(testWindowId, 3, 101) &&
     !WindowInspector.ValidArguments("invalid", 3, 60), "windows.inspect_bounded_arguments");
-Check(WindowInspector.ValidArguments(testWindowId, 16, 50,
+Check(!WindowInspector.ValidArguments(testWindowId, 16, 50,
         scope: WindowInspectScope.TABS) &&
     WindowInspector.ValidArguments(testWindowId, 16, 50,
-        scope: WindowInspectScope.TAB, tabId: "0123456789abcdef0123456789abcdef") &&
+        scope: WindowInspectScope.TABS, expectedProfile: "Valer") &&
+    WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.TAB, tabId: "0123456789abcdef0123456789abcdef",
+        expectedProfile: "Valer") &&
     !WindowInspector.ValidArguments(testWindowId, 16, 50,
         scope: WindowInspectScope.TAB, tabId: "invalid") &&
     !WindowInspector.ValidArguments(testWindowId, 16, 50,
@@ -79,7 +82,7 @@ Check(WindowInspector.ValidArguments(testWindowId, 16, 50,
         expectedOrigin: "https://example.com") &&
     WindowInspector.ValidArguments(testWindowId, 16, 50,
         scope: WindowInspectScope.TAB, tabId: "0123456789abcdef0123456789abcdef",
-        expectedUrl: "https://example.com/form?a=1") &&
+        expectedProfile: "Valer", expectedUrl: "https://example.com/form?a=1") &&
     WindowInspector.ValidArguments(testWindowId, 16, 50,
         scope: WindowInspectScope.WINDOW, expectedProfile: "Valer") &&
     !WindowInspector.ValidArguments(testWindowId, 16, 50,
@@ -199,6 +202,37 @@ Check(WindowChromeCdp.ValidTargetId("0123456789abcdef0123456789abcdef") &&
     !WindowChromeCdp.ValidTargetId("https://example.com") &&
     !WindowChromeCdp.ValidTabElementRef("c1:1:bad:1:bad:deadbeef"),
     "chrome.cdp_target_and_element_reference_boundaries");
+string freshTabRef = "c1:" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString("x") +
+    ":0123456789abcdef0123456789abcdef:1:loader:0123456789abcdef0123456789abcdef";
+var chromeAction = new WindowActionRequest(testWindowId, freshTabRef,
+    WindowActionKind.CLICK, ExpectedProfile: "Valer");
+Check(WindowChromeCdp.ValidTabElementRef(freshTabRef) && WindowAction.Valid(chromeAction) &&
+    !WindowAction.Valid(chromeAction with { ExpectedProfile = null }) &&
+    new ChromeBrokerRequest(Action: chromeAction).Valid &&
+    !new ChromeBrokerRequest(Action: chromeAction with { ExpectedProfile = null }).Valid &&
+    new ChromeBrokerRequest(Inspect: new(testWindowId, 16, 50, null, null, 0,
+        false, null, null, 0, WindowInspectScope.TABS, ExpectedProfile: "Valer")).Valid &&
+    !new ChromeBrokerRequest(Inspect: new(testWindowId, 16, 50, null, null, 0,
+        false, null, null, 0, WindowInspectScope.WINDOW, ExpectedProfile: "Valer")).Valid &&
+    WindowChromeBroker.SameBinding(testWindowId, "Valer", testWindowId, "VALER") &&
+    WindowChromeBroker.SameBinding(testWindowId, "Valer", WindowCatalog.FormatId(
+        testWindowIdentity with { Handle = 0x99999 }), "Valer") &&
+    !WindowChromeBroker.SameBinding(testWindowId, "Valer", testWindowId, "Other") &&
+    WindowChromeBroker.ReplyMatches(new(Action: chromeAction),
+        new(Action: new(WindowActionCode.COMPLETED))) &&
+    !WindowChromeBroker.ReplyMatches(new(Action: chromeAction),
+        new(Inspect: new(WindowInspectCode.COMPLETED, []))),
+    "chrome.profile_bound_broker_reuses_connection_and_rejects_cross_profile");
+Check(WindowPhysicalClick.CanUseNativeFallback(null) &&
+    WindowPhysicalClick.CanUseNativeFallback(new(WindowActionCode.CDP_UNAVAILABLE,
+        FailureStage: WindowFailureStage.CDP_CONNECT)) &&
+    !WindowPhysicalClick.CanUseNativeFallback(new(WindowActionCode.CDP_UNAVAILABLE,
+        EffectUnknown: true, FailureStage: WindowFailureStage.CDP_CONNECT)) &&
+    !WindowPhysicalClick.CanUseNativeFallback(new(WindowActionCode.CDP_CONTEXT_MISMATCH)) &&
+    !WindowPhysicalClick.CanUseNativeFallback(new(WindowActionCode.TARGET_OCCLUDED)) &&
+    !WindowPhysicalClick.CanUseNativeFallback(new(WindowActionCode.CDP_FAILED_UNKNOWN_EFFECT,
+        EffectUnknown: true, FailureStage: WindowFailureStage.DISPATCH_INPUT)),
+    "chrome.native_fallback_only_before_any_cdp_dispatch");
 using (var protectedNode = System.Text.Json.JsonDocument.Parse(
     "{\"properties\":[{\"name\":\"protected\",\"value\":{\"value\":true}}]}"))
     Check(WindowChromeCdp.IsProtectedAx(protectedNode.RootElement),

@@ -149,6 +149,13 @@ else if (args is ["window-action-worker"])
     }
     Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, PipeWire.Json));
 }
+else if (args is ["window-cdp-worker", var parentPid] &&
+    int.TryParse(parentPid, out int cdpParentPid) && cdpParentPid > 0)
+{
+    // User-session, short-idle-lived broker. No listener, Chrome restart or
+    // credential access; exits when the MCP frontend exits.
+    await WindowChromeBroker.RunWorkerAsync(cdpParentPid);
+}
 else if (args is ["stdio"])
 {
     // The SDK frontend is not a runtime credential owner.

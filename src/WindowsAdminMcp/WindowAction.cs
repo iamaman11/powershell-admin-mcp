@@ -94,6 +94,7 @@ internal static class WindowAction
         WindowCatalog.TryParseId(request.WindowId, out _) &&
         WindowChromeCdp.ContextArgumentError(request.ExpectedProfile, request.ExpectedOrigin,
             request.ExpectedUrl) is null &&
+        (!WindowChromeCdp.ValidTabElementRef(request.ElementId) || request.ExpectedProfile is not null) &&
         (WindowChromeCdp.ValidTabElementRef(request.ElementId) ||
             request.ExpectedOrigin is null && request.ExpectedUrl is null) &&
         (WindowInspector.TryParseElementRef(request.ElementId, out _) ||
@@ -146,7 +147,12 @@ internal static class WindowAction
         if (hwnd == IntPtr.Zero || !Valid(request))
             return new(WindowActionCode.INVALID_ARGUMENT, ElapsedMs: clock.ElapsedMilliseconds);
         if (WindowChromeCdp.ValidTabElementRef(request.ElementId))
+        {
+            if (!WindowChromeCdp.VerifiedChromeProfile(hwnd, request.ExpectedProfile!))
+                return new(WindowActionCode.CDP_CONTEXT_MISMATCH,
+                    Detail: "PROFILE_NOT_VERIFIED", ElapsedMs: clock.ElapsedMilliseconds);
             return WindowChromeCdp.InvokeTab(hwnd, request, clock);
+        }
         if (request.ExpectedProfile is not null &&
             !WindowChromeCdp.VerifiedChromeProfile(hwnd, request.ExpectedProfile))
             return new(WindowActionCode.CDP_CONTEXT_MISMATCH, Detail: "PROFILE_NOT_VERIFIED");
@@ -197,6 +203,25 @@ internal static class WindowAction
                     element.TryGetCurrentPattern(SelectionItemPattern.Pattern, out _);
                 bool valueObservable = (request.Action is WindowActionKind.SET_VALUE or WindowActionKind.TYPE_TEXT) &&
                     element.TryGetCurrentPattern(ValuePattern.Pattern, out _);
+                WindowActionResult SetValueWithNativeFallback()
+                {
+                    var browser = WindowChromeCdp.TryDispatch(hwnd, element, request, clock);
+                    if (!WindowPhysicalClick.CanUseNativeFallback(browser)) return browser!;
+                    // A verified Chrome profile uses real keyboard events so
+                    // React receives input/change, unlike provider-only ValuePattern.
+                    if (request.ExpectedProfile is not null)
+                    {
+                        var typed = WindowPhysicalClick.TypeText(hwnd, element, request, clock,
+                            allowCdp: false);
+                        if (typed.Status is not (WindowActionCode.FOCUS_UNAVAILABLE or
+                            WindowActionCode.FOREGROUND_UNAVAILABLE) || typed.EffectUnknown)
+                            return typed;
+                    }
+                    return Pattern(element, current.ControlType, request.Action) is null
+                        ? new(WindowActionCode.UNSUPPORTED_ACTION)
+                        : WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(), request,
+                            clock, radioInvoke);
+                }
                 var result = request.Action == WindowActionKind.CLICK
                     ? WindowPhysicalClick.Click(hwnd, element, request, clock)
                     : request.Action == WindowActionKind.KEY_PRESS
@@ -204,11 +229,7 @@ internal static class WindowAction
                     : request.Action == WindowActionKind.TYPE_TEXT
                     ? WindowPhysicalClick.TypeText(hwnd, element, request, clock)
                     : request.Action == WindowActionKind.SET_VALUE
-                    ? WindowChromeCdp.TryDispatch(hwnd, element, request, clock) ??
-                        (Pattern(element, current.ControlType, request.Action) is null
-                            ? new WindowActionResult(WindowActionCode.UNSUPPORTED_ACTION)
-                            : WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(), request,
-                                clock, radioInvoke))
+                    ? SetValueWithNativeFallback()
                     : WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(), request,
                         clock, radioInvoke);
                 result = result with { TargetVerified = true, TargetIdentity = request.ElementId };
@@ -454,6 +475,17 @@ internal static class WindowAction
         var auditId = Guid.NewGuid().ToString("N");
         if (!WriteAudit(auditId, "INTENT", request, null))
             return new(WindowActionCode.AUDIT_UNAVAILABLE, AuditId: auditId);
+        WindowActionResult result = WindowChromeCdp.ValidTabElementRef(request.ElementId)
+            ? await WindowChromeBroker.InvokeAsync(request, cancellationToken)
+            : await RunDisposableWorkerAsync(request, cancellationToken);
+        if (!WriteAudit(auditId, "RESULT", request, result))
+            return new(WindowActionCode.AUDIT_RESULT_FAILED, AuditId: auditId, EffectUnknown: true);
+        return result with { AuditId = auditId };
+    }
+
+    private static async Task<WindowActionResult> RunDisposableWorkerAsync(WindowActionRequest request,
+        CancellationToken cancellationToken)
+    {
         WindowActionResult result;
         bool launched = false;
         using var process = new Process();
@@ -504,9 +536,7 @@ internal static class WindowAction
                     ExceptionType: e.GetType().Name, HResult: e.HResult.ToString("X8"));
             }
         }
-        if (!WriteAudit(auditId, "RESULT", request, result))
-            return new(WindowActionCode.AUDIT_RESULT_FAILED, AuditId: auditId, EffectUnknown: true);
-        return result with { AuditId = auditId };
+        return result;
     }
 
     private static void Stop(Process process, bool launched)
