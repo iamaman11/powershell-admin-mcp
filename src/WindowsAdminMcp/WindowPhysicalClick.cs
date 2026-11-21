@@ -14,6 +14,7 @@ internal static class WindowPhysicalClick
     private const uint KeyUp = 0x0002;
     private const uint KeyUnicode = 0x0004;
     private const uint RootAncestor = 2;
+    private const uint PreviousZWindow = 3;
 
     // Only a failure before any CDP dispatch may use the native path. An
     // ambiguous browser action must never be replayed through SendInput.
@@ -323,6 +324,22 @@ internal static class WindowPhysicalClick
 
     private static bool HitsTarget(IntPtr hwnd, AutomationElement target, Point pixel)
     {
+        // UIA and WindowFromPoint may report the covered child even while a
+        // separate topmost HWND physically occupies the same screen point.
+        // A native pointer must never pass through such an overlay.
+        IntPtr above = GetWindow(hwnd, PreviousZWindow);
+        for (int i = 0; above != IntPtr.Zero && i < 256; i++)
+        {
+            if (IsWindowVisible(above) && !IsIconic(above) &&
+                GetWindowRect(above, out var bounds) &&
+                pixel.X >= bounds.Left && pixel.X < bounds.Right &&
+                pixel.Y >= bounds.Top && pixel.Y < bounds.Bottom)
+                return false;
+            IntPtr next = GetWindow(above, PreviousZWindow);
+            if (next == above) return false;
+            above = next;
+        }
+        if (above != IntPtr.Zero) return false;
         var hitWindow = WindowFromPoint(pixel);
         if (hitWindow == IntPtr.Zero || GetAncestor(hitWindow, RootAncestor) != hwnd)
             return false;
@@ -342,6 +359,12 @@ internal static class WindowPhysicalClick
     {
         public readonly int X = x;
         public readonly int Y = y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Rect
+    {
+        public int Left, Top, Right, Bottom;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -391,6 +414,11 @@ internal static class WindowPhysicalClick
     private static extern IntPtr WindowFromPoint(Point point);
     [DllImport("user32.dll")]
     private static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetWindow(IntPtr hwnd, uint command);
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(IntPtr hwnd, out Rect rectangle);
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint inputs, [In] Input[] input, int size);
     [DllImport("user32.dll", EntryPoint = "SendInput", SetLastError = true)]
