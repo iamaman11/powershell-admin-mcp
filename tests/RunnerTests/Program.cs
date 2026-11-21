@@ -743,8 +743,12 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         var blocked = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, freshButton.ElementId, WindowActionKind.CLICK, null)))
             .WaitAsync(TimeSpan.FromSeconds(5));
+        var overlayState = (string)created.Form.Invoke(new Func<string>(() =>
+            $"visible={testCover!.Visible} topmost={testCover.TopMost} " +
+            $"cover={testCover.Bounds} main={created.Form.Bounds}"));
+        await Task.Delay(100);
         Console.WriteLine($"OCCLUDED_CLICK status={blocked.Status} stage={blocked.FailureStage} " +
-            $"detail={blocked.Detail} clicks={Volatile.Read(ref clickCount)}");
+            $"detail={blocked.Detail} clicks={Volatile.Read(ref clickCount)} {overlayState}");
         Check(blocked.Status is WindowActionCode.TARGET_OCCLUDED or
             WindowActionCode.CLICK_POINT_UNAVAILABLE or WindowActionCode.FOREGROUND_UNAVAILABLE &&
             Volatile.Read(ref clickCount) == 1, "windows.click_rejects_occluded_target_before_input");
