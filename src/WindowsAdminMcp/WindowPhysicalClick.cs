@@ -28,8 +28,13 @@ internal static class WindowPhysicalClick
         if (GetForegroundWindow() == hwnd) return true;
         // Chrome sometimes grants foreground only when the exact accessible
         // control receives native UIA focus. This does not inject user input.
-        if (target.Current.IsKeyboardFocusable)
-            target.SetFocus();
+        try
+        {
+            if (target.Current.IsKeyboardFocusable)
+                target.SetFocus();
+        }
+        catch (Exception e) when (e is COMException or ElementNotAvailableException or
+            InvalidOperationException) { return false; }
         for (int i = 0; i < 4; i++)
         {
             if (GetForegroundWindow() == hwnd) return true;
