@@ -6,6 +6,7 @@ using System.Windows.Automation;
 // unexpected foreground window; UIA actions remain the background-first path.
 internal static class WindowPhysicalClick
 {
+    private const string ForegroundPolicy = "WINDOWS_FOREGROUND_POLICY_USE_UIA_OR_OPT_IN_CDP";
     private const uint InputMouse = 0;
     private const uint LeftDown = 0x0002;
     private const uint LeftUp = 0x0004;
@@ -43,10 +44,12 @@ internal static class WindowPhysicalClick
 
             if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd))
                 return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
-                    ElapsedMs: clock.ElapsedMilliseconds, FailureStage: stage);
+                    ElapsedMs: clock.ElapsedMilliseconds, FailureStage: stage,
+                    Detail: ForegroundPolicy);
             if (GetForegroundWindow() != hwnd)
                 return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
-                    ElapsedMs: clock.ElapsedMilliseconds, FailureStage: stage);
+                    ElapsedMs: clock.ElapsedMilliseconds, FailureStage: stage,
+                    Detail: ForegroundPolicy);
 
             stage = WindowFailureStage.HIT_TEST;
             if (!WindowInspector.TryParseElementRef(request.ElementId, out long snapshot) ||
@@ -132,11 +135,11 @@ internal static class WindowPhysicalClick
             if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd))
                 return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
                     FailureStage: WindowFailureStage.ACTIVATE_WINDOW,
-                    ElapsedMs: clock.ElapsedMilliseconds);
+                    ElapsedMs: clock.ElapsedMilliseconds, Detail: ForegroundPolicy);
             if (GetForegroundWindow() != hwnd)
                 return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
                     FailureStage: WindowFailureStage.ACTIVATE_WINDOW,
-                    ElapsedMs: clock.ElapsedMilliseconds);
+                    ElapsedMs: clock.ElapsedMilliseconds, Detail: ForegroundPolicy);
 
             if (!target.Current.HasKeyboardFocus) target.SetFocus();
             // UIA providers can update focus asynchronously. Allow one short
@@ -225,10 +228,10 @@ internal static class WindowPhysicalClick
                 return new(WindowActionCode.FOCUS_UNAVAILABLE, FailureStage: WindowFailureStage.PREPARE_FOCUS);
             if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd))
                 return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
-                    FailureStage: WindowFailureStage.ACTIVATE_WINDOW);
+                    FailureStage: WindowFailureStage.ACTIVATE_WINDOW, Detail: ForegroundPolicy);
             if (GetForegroundWindow() != hwnd)
                 return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
-                    FailureStage: WindowFailureStage.ACTIVATE_WINDOW);
+                    FailureStage: WindowFailureStage.ACTIVATE_WINDOW, Detail: ForegroundPolicy);
 
             if (!target.Current.HasKeyboardFocus) target.SetFocus();
             bool focused = false;

@@ -358,10 +358,37 @@ internal static partial class WindowChromeCdp
         return matches == 1 && equals;
     }
 
+    private static bool AxDisabled(JsonElement node)
+    {
+        if (!node.TryGetProperty("properties", out var properties) ||
+            properties.ValueKind != JsonValueKind.Array) return false;
+        return properties.EnumerateArray().Any(property =>
+            property.TryGetProperty("name", out var name) && name.GetString() == "disabled" &&
+            property.TryGetProperty("value", out var value) &&
+            value.TryGetProperty("value", out var boolean) && boolean.ValueKind == JsonValueKind.True);
+    }
+
+    internal static bool HasAxEnabled(JsonElement ax, string name, bool enabled)
+    {
+        int matches = 0;
+        bool state = false;
+        foreach (var node in ax.GetProperty("nodes").EnumerateArray())
+        {
+            if (node.TryGetProperty("ignored", out var ignored) && ignored.GetBoolean() ||
+                AxValue(node, "name") != name || IsProtectedAx(node)) continue;
+            matches++;
+            state = AxDisabled(node) != enabled;
+        }
+        return matches == 1 && state;
+    }
+
     private static bool ExpectedAxState(JsonElement ax, WindowActionRequest request) =>
-        request.ExpectedKind == WindowExpectedKind.UIA_VALUE
-            ? HasAxValue(ax, request.ExpectedName!, request.ExpectedValue!)
-            : HasAxName(ax, request.ExpectedName!);
+        request.ExpectedKind switch
+        {
+            WindowExpectedKind.UIA_VALUE => HasAxValue(ax, request.ExpectedName!, request.ExpectedValue!),
+            WindowExpectedKind.UIA_ENABLED => HasAxEnabled(ax, request.ExpectedName!, true),
+            _ => HasAxName(ax, request.ExpectedName!)
+        };
 
     private static async Task ReplaceFocusedText(Session cdp, string sessionId, string value)
     {
@@ -423,7 +450,8 @@ internal static partial class WindowChromeCdp
         WindowActionRequest request, TabElementRef target, Stopwatch clock)
     {
         bool dispatched = false;
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+        using var timeout = new CancellationTokenSource(
+            TimeSpan.FromMilliseconds(request.ObservationTimeoutMs + 3000));
         try
         {
             using var socket = new ClientWebSocket();
@@ -445,16 +473,20 @@ internal static partial class WindowChromeCdp
                 !(node.TryGetProperty("ignored", out var ignored) && ignored.GetBoolean())).ToArray();
             if (nodeMatches.Length != 1) return Rejected(WindowActionCode.STALE_ELEMENT);
             if (IsProtectedAx(nodeMatches[0])) return Rejected(WindowActionCode.PASSWORD_DENIED);
+            if (AxDisabled(nodeMatches[0])) return Rejected(WindowActionCode.DISABLED);
             string role = AxValue(nodeMatches[0], "role"), name = AxValue(nodeMatches[0], "name");
             if (!string.Equals(ElementDigest(request.WindowId, selected.Id, target.BackendId,
                 loader, selected.Url, role, name), target.Digest, StringComparison.OrdinalIgnoreCase))
                 return Rejected(WindowActionCode.STALE_ELEMENT);
             if (request.ExpectedName is not null)
             {
-                bool before = request.ExpectedKind is WindowExpectedKind.UIA_ELEMENT or WindowExpectedKind.UIA_VALUE
+                bool before = request.ExpectedKind is WindowExpectedKind.UIA_ELEMENT or
+                    WindowExpectedKind.UIA_VALUE or WindowExpectedKind.UIA_ENABLED
                     ? ExpectedAxState(ax, request)
                     : WindowAction.ExternalStatePresent(request.ExpectedKind, request.ExpectedName);
-                if (before == (request.ExpectedChange == WindowExpectedChange.APPEARS))
+                if (before == (request.ExpectedChange == WindowExpectedChange.APPEARS) &&
+                    (request.ExpectedEnabledName is null ||
+                     HasAxEnabled(ax, request.ExpectedEnabledName, request.ExpectedEnabled)))
                     return Rejected(WindowActionCode.EXPECTED_STATE_ALREADY_TRUE);
             }
             string provider = "CDP_BACKGROUND";
@@ -484,13 +516,14 @@ internal static partial class WindowChromeCdp
                 await cdp.Call("Input.dispatchMouseEvent", new { type = "mouseReleased", x, y,
                     button = "left", clickCount = 1 }, sessionId);
             }
-            else if (request.Action is WindowActionKind.KEY_PRESS or WindowActionKind.TYPE_TEXT)
+            else if (request.Action is WindowActionKind.KEY_PRESS or WindowActionKind.TYPE_TEXT or
+                     WindowActionKind.SET_VALUE)
             {
-                if (request.Action == WindowActionKind.TYPE_TEXT &&
+                if ((request.Action is WindowActionKind.TYPE_TEXT or WindowActionKind.SET_VALUE) &&
                     role is not ("textbox" or "searchbox" or "combobox"))
                     return Rejected(WindowActionCode.UNSUPPORTED_ACTION);
                 await cdp.Call("DOM.focus", new { backendNodeId = target.BackendId }, sessionId);
-                if (request.Action == WindowActionKind.TYPE_TEXT)
+                if (request.Action is WindowActionKind.TYPE_TEXT or WindowActionKind.SET_VALUE)
                 {
                     dispatched = true;
                     await ReplaceFocusedText(cdp, sessionId, request.Value!);
@@ -514,21 +547,42 @@ internal static partial class WindowChromeCdp
             else return Rejected(WindowActionCode.UNSUPPORTED_ACTION);
 
             bool? effect = null;
-            if (request.ExpectedName is not null)
+            bool? enabledObserved = null;
+            if (request.ExpectedName is not null || request.ExpectedEnabledName is not null ||
+                (request.Action is WindowActionKind.TYPE_TEXT or WindowActionKind.SET_VALUE))
             {
-                bool latest = request.ExpectedKind is WindowExpectedKind.UIA_ELEMENT or WindowExpectedKind.UIA_VALUE
-                    ? ExpectedAxState(await cdp.Call("Accessibility.getFullAXTree", new { }, sessionId), request)
-                    : WindowAction.ExternalStatePresent(request.ExpectedKind, request.ExpectedName);
-                effect = latest ==
-                    (request.ExpectedChange == WindowExpectedChange.APPEARS);
-            }
-            else if (request.Action == WindowActionKind.TYPE_TEXT)
-            {
-                effect = await ReadTextValue(cdp, sessionId, target.BackendId, request.Value!);
+                var observation = Stopwatch.StartNew();
+                do
+                {
+                    bool needsAx = request.ExpectedEnabledName is not null ||
+                        (request.ExpectedName is not null && request.ExpectedKind is
+                            (WindowExpectedKind.UIA_ELEMENT or WindowExpectedKind.UIA_VALUE or
+                                WindowExpectedKind.UIA_ENABLED));
+                    var latestAx = needsAx
+                        ? await cdp.Call("Accessibility.getFullAXTree", new { }, sessionId)
+                        : default;
+                    bool primary = request.ExpectedName is not null
+                        ? (request.ExpectedKind is WindowExpectedKind.UIA_ELEMENT or
+                            WindowExpectedKind.UIA_VALUE or WindowExpectedKind.UIA_ENABLED
+                            ? ExpectedAxState(latestAx, request)
+                            : WindowAction.ExternalStatePresent(request.ExpectedKind, request.ExpectedName)) ==
+                            (request.ExpectedChange == WindowExpectedChange.APPEARS)
+                        : (request.Action is WindowActionKind.TYPE_TEXT or WindowActionKind.SET_VALUE)
+                            ? await ReadTextValue(cdp, sessionId, target.BackendId, request.Value!)
+                            : true;
+                    enabledObserved = request.ExpectedEnabledName is null ? null :
+                        HasAxEnabled(latestAx, request.ExpectedEnabledName, request.ExpectedEnabled);
+                    effect = primary && enabledObserved != false;
+                    if (effect == true) break;
+                    await Task.Delay(100, timeout.Token);
+                } while (observation.ElapsedMilliseconds < request.ObservationTimeoutMs);
             }
             return new(WindowActionCode.COMPLETED, TargetVerified: true,
                 TargetIdentity: request.ElementId, ProviderResponse: provider,
-                ExpectedStateObserved: effect, ElapsedMs: clock.ElapsedMilliseconds);
+                ExpectedStateObserved: effect,
+                ObservationState: effect is null ? WindowObservationState.NOT_REQUESTED :
+                    effect == true ? WindowObservationState.OBSERVED : WindowObservationState.NOT_OBSERVED,
+                ExpectedEnabledObserved: enabledObserved, ElapsedMs: clock.ElapsedMilliseconds);
         }
         catch (Exception e) when (e is WebSocketException or IOException or JsonException or
             OperationCanceledException or InvalidOperationException or KeyNotFoundException)

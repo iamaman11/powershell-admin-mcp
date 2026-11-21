@@ -25,6 +25,7 @@ internal static class WindowActionNoFocus
     private const int ValuePatternId = 10002;
     private const int SelectionItemPatternId = 10010;
     private const int TogglePatternId = 10015;
+    private const int ExpandCollapsePatternId = 10005;
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int SetAutoFocus(IntPtr self, int enabled);
@@ -119,6 +120,7 @@ internal static class WindowActionNoFocus
                 WindowActionKind.SELECT when radioInvoke => InvokePatternId,
                 WindowActionKind.SELECT => SelectionItemPatternId,
                 WindowActionKind.TOGGLE => TogglePatternId,
+                WindowActionKind.EXPAND or WindowActionKind.COLLAPSE => ExpandCollapsePatternId,
                 _ => 0
             };
             if (patternId == 0) return new(WindowActionCode.INVALID_ARGUMENT);
@@ -132,7 +134,8 @@ internal static class WindowActionNoFocus
             dispatched = true;
             int result = request.Action == WindowActionKind.SET_VALUE
                 ? Method<SetValueAction>(pattern, PatternActionSlot)(pattern, request.Value!)
-                : Method<InvokeAction>(pattern, PatternActionSlot)(pattern);
+                : Method<InvokeAction>(pattern, request.Action == WindowActionKind.COLLAPSE
+                    ? PatternActionSlot + 1 : PatternActionSlot)(pattern);
             bool changedDuringPreparation = foregroundAtEntry != foregroundBefore;
             IntPtr foregroundAfter = GetForegroundWindow();
             bool changedDuringAction = foregroundBefore != foregroundAfter;
