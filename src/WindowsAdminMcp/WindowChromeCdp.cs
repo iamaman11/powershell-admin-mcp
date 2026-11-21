@@ -81,9 +81,12 @@ internal static partial class WindowChromeCdp
     internal static WindowActionResult? TryDispatch(IntPtr hwnd, AutomationElement target,
         WindowActionRequest request, Stopwatch clock)
     {
-        if (request.Action is not (WindowActionKind.CLICK or WindowActionKind.KEY_PRESS or WindowActionKind.TYPE_TEXT) ||
+        if (request.Action is not (WindowActionKind.CLICK or WindowActionKind.KEY_PRESS or
+            WindowActionKind.TYPE_TEXT or WindowActionKind.SET_VALUE) ||
             !TryWebRole(target, out string? role, out string? name) ||
             !GetWindowRect(hwnd, out var rect)) return null;
+        if (request.Action == WindowActionKind.SET_VALUE && role is not ("textbox" or "combobox"))
+            return null;
         WindowCatalog.TryParseId(request.WindowId, out var identity);
         try
         {
@@ -256,7 +259,7 @@ internal static partial class WindowChromeCdp
                 }
                 else return Rejected(WindowActionCode.TARGET_OCCLUDED);
             }
-            else if (request.Action == WindowActionKind.TYPE_TEXT)
+            else if (request.Action is WindowActionKind.TYPE_TEXT or WindowActionKind.SET_VALUE)
             {
                 await cdp.Call("DOM.focus", new { backendNodeId }, sessionId);
                 dispatched = true;
@@ -283,7 +286,7 @@ internal static partial class WindowChromeCdp
                 ForegroundChanged: foregroundAtEntry != foregroundAtExit,
                 TargetActivated: foregroundAtEntry != hwnd && foregroundAtExit == hwnd,
                 ProviderResponse: providerResponse, ElapsedMs: clock.ElapsedMilliseconds,
-                ExpectedStateObserved: request.Action == WindowActionKind.TYPE_TEXT &&
+                ExpectedStateObserved: (request.Action is WindowActionKind.TYPE_TEXT or WindowActionKind.SET_VALUE) &&
                     request.ExpectedName is null
                     ? await ReadTextValue(cdp, sessionId, backendNodeId, request.Value!) : null);
         }

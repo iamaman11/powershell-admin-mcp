@@ -132,11 +132,13 @@ public sealed class WindowTools
         string? expected_value = null, string? expected_profile = null,
         string? expected_origin = null, string? expected_url = null,
         int observation_timeout_ms = 8000,
+        string? expected_enabled_name = null, bool expected_enabled = true,
         CancellationToken cancellationToken = default)
     {
         var request = new WindowActionRequest(window_id, element_id, action, value,
             element_path, expected_name, expected_change, key, expected_kind,
-            expected_value, expected_profile, expected_origin, expected_url, observation_timeout_ms);
+            expected_value, expected_profile, expected_origin, expected_url, observation_timeout_ms,
+            expected_enabled_name, expected_enabled);
         if (!WindowAction.Valid(request)) return new(WindowActionCode.INVALID_ARGUMENT);
         if (!confirm) return new(WindowActionCode.CONFIRMATION_REQUIRED);
 

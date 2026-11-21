@@ -141,6 +141,18 @@ Check(WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId,
         WindowActionKind.SET_VALUE, "next", ExpectedName: "CI_UIA_INPUT_NAME",
         ExpectedChange: WindowExpectedChange.APPEARS, ExpectedKind: WindowExpectedKind.UIA_VALUE,
         ExpectedValue: "next")) &&
+    WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId,
+        WindowActionKind.EXPAND, null)) &&
+    WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId,
+        WindowActionKind.COLLAPSE, null)) &&
+    WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId,
+        WindowActionKind.TYPE_TEXT, "next", ExpectedName: "CI_UIA_INPUT_NAME",
+        ExpectedChange: WindowExpectedChange.APPEARS, ExpectedKind: WindowExpectedKind.UIA_VALUE,
+        ExpectedValue: "next", ExpectedEnabledName: "CI_UIA_SAVE")) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId,
+        WindowActionKind.TYPE_TEXT, "next", ExpectedEnabledName: " ")) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId,
+        WindowActionKind.TYPE_TEXT, "next", ExpectedEnabled: false)) &&
     !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId,
         WindowActionKind.INVOKE, null, ExpectedKind: WindowExpectedKind.UIA_VALUE,
         ExpectedValue: "next")) &&
@@ -193,6 +205,8 @@ using (var protectedNode = System.Text.Json.JsonDocument.Parse(
         "chrome.cdp_protected_fields_are_not_actionable");
 using (var ax = System.Text.Json.JsonDocument.Parse("""
     {"nodes":[{"name":{"value":"test field"},"value":{"value":"updated"}},
+              {"name":{"value":"Save"}},
+              {"name":{"value":"Disabled"},"properties":[{"name":"disabled","value":{"value":true}}]},
               {"name":{"value":"hidden"},"value":{"value":"secret"},
                "properties":[{"name":"protected","value":{"value":true}}]}]}
     """))
@@ -201,6 +215,19 @@ using (var ax = System.Text.Json.JsonDocument.Parse("""
         !WindowChromeCdp.HasAxValue(ax.RootElement, "hidden", "secret") &&
         !WindowChromeCdp.HasAxValue(ax.RootElement, "unknown", ""),
         "chrome.cdp_value_postcondition_is_exact_and_ignores_protected_fields");
+using (var ax = System.Text.Json.JsonDocument.Parse("""
+    {"nodes":[{"name":{"value":"Save"}},
+              {"name":{"value":"Disabled"},"properties":[{"name":"disabled","value":{"value":true}}]},
+              {"name":{"value":"Duplicate"}}, {"name":{"value":"Duplicate"}},
+              {"name":{"value":"Secret"},"properties":[{"name":"protected","value":{"value":true}}]}]}
+    """))
+    Check(WindowChromeCdp.HasAxEnabled(ax.RootElement, "Save", true) &&
+        WindowChromeCdp.HasAxEnabled(ax.RootElement, "Disabled", false) &&
+        !WindowChromeCdp.HasAxEnabled(ax.RootElement, "Disabled", true) &&
+        !WindowChromeCdp.HasAxEnabled(ax.RootElement, "Duplicate", true) &&
+        !WindowChromeCdp.HasAxEnabled(ax.RootElement, "Secret", true) &&
+        !WindowChromeCdp.HasAxEnabled(ax.RootElement, "Missing", true),
+        "chrome.cdp_enabled_postcondition_is_unique_and_provider_verified");
 Check(new WindowActionResult(WindowActionCode.COMPLETED).EffectState == WindowEffectState.EFFECT_UNKNOWN &&
     new WindowActionResult(WindowActionCode.COMPLETED, ExpectedStateObserved: true).EffectState ==
         WindowEffectState.EFFECT_VERIFIED &&
@@ -273,7 +300,7 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
     {
         try
         {
-            using var form = new System.Windows.Forms.Form { Text = "CI_UIA_OWNED_WINDOW", Width = 330, Height = 390 };
+            using var form = new System.Windows.Forms.Form { Text = "CI_UIA_OWNED_WINDOW", Width = 330, Height = 475 };
             using var button = new System.Windows.Forms.Button
                 { Text = "CI_UIA_OWNED_BUTTON", AccessibleName = "CI_UIA_OWNED_BUTTON", Width = 250 };
             using var input = new System.Windows.Forms.TextBox
@@ -344,6 +371,29 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                 timer.Start();
             };
             form.Controls.Add(titleButton);
+            using var saveButton = new System.Windows.Forms.Button
+                { Text = "CI_UIA_SAVE", AccessibleName = "CI_UIA_SAVE", Top = 347,
+                  Width = 250, Enabled = false };
+            form.Controls.Add(saveButton);
+            input.TextChanged += (_, _) =>
+            {
+                if (input.Text != "CI_UIA_UPDATED_VALUE") return;
+                var timer = new System.Windows.Forms.Timer { Interval = 250 };
+                timer.Tick += (_, _) =>
+                {
+                    timer.Stop();
+                    saveButton.Enabled = true;
+                    timer.Dispose();
+                };
+                timer.Start();
+            };
+            using var expandable = new System.Windows.Forms.ComboBox
+                { Name = "CI_UIA_EXPANDABLE", AccessibleName = "CI_UIA_EXPANDABLE",
+                  DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                  Top = 382, Width = 250 };
+            expandable.Items.AddRange(["Option A", "Option B"]);
+            expandable.SelectedIndex = 0;
+            form.Controls.Add(expandable);
             // Emulate Chromium's deeply nested ControlView hierarchy without a browser dependency.
             var nested = new System.Windows.Forms.Panel
                 { Left = 10, Top = 142, Width = 275, Height = 42,
@@ -527,11 +577,15 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                 "CI_UIA_UPDATED_VALUE", ExpectedName: "CI_UIA_INPUT_NAME",
                 ExpectedChange: WindowExpectedChange.APPEARS,
                 ExpectedKind: WindowExpectedKind.UIA_VALUE,
-                ExpectedValue: "CI_UIA_UPDATED_VALUE"))).WaitAsync(TimeSpan.FromSeconds(5));
+                ExpectedValue: "CI_UIA_UPDATED_VALUE", ObservationTimeoutMs: 3500,
+                ExpectedEnabledName: "CI_UIA_SAVE"))).WaitAsync(TimeSpan.FromSeconds(6));
         var edited = (string)created.Form.Invoke(new Func<string>(() => created.Input.Text));
         Check(edit.Status == WindowActionCode.COMPLETED && edited == "CI_UIA_UPDATED_VALUE" &&
-            edit.EffectState == WindowEffectState.EFFECT_VERIFIED,
-            "windows.action_set_value_occluded_edit_with_verified_property");
+            edit.EffectState == WindowEffectState.EFFECT_VERIFIED &&
+            edit.ExpectedEnabledObserved == true &&
+            (bool)created.Form.Invoke(new Func<bool>(() => created.Form.Controls
+                .OfType<System.Windows.Forms.Button>().Single(b => b.AccessibleName == "CI_UIA_SAVE").Enabled)),
+            "windows.action_set_value_verifies_field_and_delayed_save_enabled");
         Check(edit.ForegroundChanged == false && edit.TargetActivated == false,
             "windows.action_set_value_preserves_foreground");
         var repeatedEdit = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
@@ -561,6 +615,30 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         Check(select.Status == WindowActionCode.COMPLETED && select.ForegroundChanged == false &&
             select.TargetActivated == false &&
             selectedAfter, "windows.action_select_occluded_radio_without_focus");
+        var expandTree = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 10,
+            realWindowId, nameContains: "CI_UIA_EXPANDABLE", roleFilter: WindowRoleFilter.COMBO_BOX));
+        var expandTarget = expandTree.Elements.Single(e => e.Name == "CI_UIA_EXPANDABLE");
+        Check(expandTarget.Patterns.Contains("ExpandCollapsePatternIdentifiers.Pattern"),
+            "windows.expand_collapse_native_pattern_available_on_combo_box");
+        var expanded = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, expandTarget.ElementId, WindowActionKind.EXPAND,
+                null, ObservationTimeoutMs: 3000))).WaitAsync(TimeSpan.FromSeconds(5));
+        Check(expanded.EffectState == WindowEffectState.EFFECT_VERIFIED &&
+            expanded.ObservationState == WindowObservationState.OBSERVED &&
+            expanded.Status == WindowActionCode.COMPLETED,
+            "windows.expand_native_uia_pattern_with_verified_state");
+        var expandAgain = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, expandTarget.ElementId, WindowActionKind.EXPAND,
+                null))).WaitAsync(TimeSpan.FromSeconds(5));
+        Check(expandAgain.Status == WindowActionCode.EXPECTED_STATE_ALREADY_TRUE,
+            "windows.expand_precondition_rejects_duplicate_dispatch");
+        var collapsed = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, expandTarget.ElementId, WindowActionKind.COLLAPSE,
+                null, ObservationTimeoutMs: 3000))).WaitAsync(TimeSpan.FromSeconds(5));
+        Check(collapsed.EffectState == WindowEffectState.EFFECT_VERIFIED &&
+            collapsed.ObservationState == WindowObservationState.OBSERVED &&
+            collapsed.Status == WindowActionCode.COMPLETED,
+            "windows.collapse_native_uia_pattern_with_verified_state");
         var deepTree = await Task.Run(() => WindowInspector.InspectCore(
             created.Handle, WindowInspector.MaxDepth, 100, realWindowId))
             .WaitAsync(TimeSpan.FromSeconds(5));

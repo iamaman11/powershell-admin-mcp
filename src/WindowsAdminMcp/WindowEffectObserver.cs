@@ -37,6 +37,15 @@ internal static class WindowEffectObserver
         return root is not null && WindowAction.ExpectedStatePresent(root, request);
     }
 
+    internal static bool EnabledState(string windowId, string name, bool enabled)
+    {
+        using var current = Process.GetCurrentProcess();
+        if (WindowCatalog.ResolveId(windowId, current.SessionId, out var hwnd) != WindowResolveCode.OK)
+            return false;
+        var root = AutomationElement.FromHandle(hwnd);
+        return root is not null && WindowAction.ExpectedEnabledPresent(root, name, enabled);
+    }
+
     private static string[] WindowIdentities(string title)
     {
         using var current = Process.GetCurrentProcess();

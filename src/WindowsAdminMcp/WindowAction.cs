@@ -8,7 +8,7 @@ using System.Text.Json.Serialization;
 using System.Windows.Automation;
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowActionKind>))]
-public enum WindowActionKind { INVOKE, SET_VALUE, SELECT, TOGGLE, CLICK, KEY_PRESS, TYPE_TEXT }
+public enum WindowActionKind { INVOKE, SET_VALUE, SELECT, TOGGLE, EXPAND, COLLAPSE, CLICK, KEY_PRESS, TYPE_TEXT }
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowKey>))]
 public enum WindowKey { ENTER, SPACE, ESCAPE }
@@ -17,7 +17,7 @@ public enum WindowKey { ENTER, SPACE, ESCAPE }
 public enum WindowExpectedChange { APPEARS, DISAPPEARS }
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowExpectedKind>))]
-public enum WindowExpectedKind { UIA_ELEMENT, UIA_VALUE, WINDOW_TITLE, PROCESS_NAME, WINDOW_CREATED, PROCESS_STARTED }
+public enum WindowExpectedKind { UIA_ELEMENT, UIA_VALUE, UIA_ENABLED, WINDOW_TITLE, PROCESS_NAME, WINDOW_CREATED, PROCESS_STARTED }
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowObservationState>))]
 public enum WindowObservationState { NOT_REQUESTED, OBSERVED, NOT_OBSERVED, UNKNOWN }
@@ -56,7 +56,9 @@ internal sealed record WindowActionRequest(
     [property: JsonPropertyName("expected_profile")] string? ExpectedProfile = null,
     [property: JsonPropertyName("expected_origin")] string? ExpectedOrigin = null,
     [property: JsonPropertyName("expected_url")] string? ExpectedUrl = null,
-    [property: JsonPropertyName("observation_timeout_ms")] int ObservationTimeoutMs = 8000);
+    [property: JsonPropertyName("observation_timeout_ms")] int ObservationTimeoutMs = 8000,
+    [property: JsonPropertyName("expected_enabled_name")] string? ExpectedEnabledName = null,
+    [property: JsonPropertyName("expected_enabled")] bool ExpectedEnabled = true);
 
 public sealed record WindowActionResult(
     [property: JsonPropertyName("status")] WindowActionCode Status,
@@ -73,7 +75,8 @@ public sealed record WindowActionResult(
     [property: JsonPropertyName("exception_type")] string? ExceptionType = null,
     [property: JsonPropertyName("hresult")] string? HResult = null,
     [property: JsonPropertyName("provider_response")] string? ProviderResponse = null,
-    [property: JsonPropertyName("observation_state")] WindowObservationState ObservationState = WindowObservationState.NOT_REQUESTED)
+    [property: JsonPropertyName("observation_state")] WindowObservationState ObservationState = WindowObservationState.NOT_REQUESTED,
+    [property: JsonPropertyName("expected_enabled_observed")] bool? ExpectedEnabledObserved = null)
 {
     // A successful provider call is dispatch acknowledgement, NOT proof that the UI changed.
     [JsonPropertyName("effect_state")]
@@ -112,6 +115,10 @@ internal static class WindowAction
          !string.IsNullOrWhiteSpace(request.ExpectedName) &&
          !request.ExpectedName.Contains('\0') &&
          request.ExpectedChange is not null && Enum.IsDefined(request.ExpectedChange.Value)) &&
+        (request.ExpectedEnabledName is null ? request.ExpectedEnabled :
+            request.ExpectedEnabledName.Length is >= 1 and <= 128 &&
+            !string.IsNullOrWhiteSpace(request.ExpectedEnabledName) &&
+            !request.ExpectedEnabledName.Contains('\0')) &&
         (request.Action == WindowActionKind.KEY_PRESS ?
             request.Key is not null && Enum.IsDefined(request.Key.Value) : request.Key is null) &&
         (request.Action is WindowActionKind.SET_VALUE or WindowActionKind.TYPE_TEXT ?
@@ -153,7 +160,8 @@ internal static class WindowAction
                 var current = element.Current;
                 if (current.IsPassword) return new(WindowActionCode.PASSWORD_DENIED);
                 if (!current.IsEnabled) return new(WindowActionCode.DISABLED);
-                if (request.Action is not (WindowActionKind.CLICK or WindowActionKind.KEY_PRESS or WindowActionKind.TYPE_TEXT) &&
+                if (request.Action is not (WindowActionKind.CLICK or WindowActionKind.KEY_PRESS or
+                    WindowActionKind.TYPE_TEXT or WindowActionKind.SET_VALUE) &&
                     Pattern(element, current.ControlType, request.Action) is null)
                     return new(WindowActionCode.UNSUPPORTED_ACTION);
                 // Creation checks compare identities, not a boolean "process exists":
@@ -171,25 +179,40 @@ internal static class WindowAction
                 {
                     bool before = ExpectedStatePresent(root, request);
                     bool desired = request.ExpectedChange == WindowExpectedChange.APPEARS;
-                    if (before == desired)
+                    if (before == desired && (request.ExpectedEnabledName is null ||
+                        WindowEffectObserver.EnabledState(request.WindowId,
+                            request.ExpectedEnabledName, request.ExpectedEnabled)))
                         return new(WindowActionCode.EXPECTED_STATE_ALREADY_TRUE,
                             ElapsedMs: clock.ElapsedMilliseconds);
                 }
+                bool expansionObservable = (request.Action is WindowActionKind.EXPAND or WindowActionKind.COLLAPSE) &&
+                    element.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out _);
+                if (expansionObservable && TargetExpanded(hwnd, path, element.GetRuntimeId(), request.Action))
+                    return new(WindowActionCode.EXPECTED_STATE_ALREADY_TRUE,
+                        ElapsedMs: clock.ElapsedMilliseconds);
                 bool radioInvoke = request.Action == WindowActionKind.SELECT &&
                     current.ControlType == ControlType.RadioButton &&
                     element.TryGetCurrentPattern(InvokePattern.Pattern, out _);
                 bool selectionObservable = request.Action == WindowActionKind.SELECT &&
                     element.TryGetCurrentPattern(SelectionItemPattern.Pattern, out _);
+                bool valueObservable = (request.Action is WindowActionKind.SET_VALUE or WindowActionKind.TYPE_TEXT) &&
+                    element.TryGetCurrentPattern(ValuePattern.Pattern, out _);
                 var result = request.Action == WindowActionKind.CLICK
                     ? WindowPhysicalClick.Click(hwnd, element, request, clock)
                     : request.Action == WindowActionKind.KEY_PRESS
                     ? WindowPhysicalClick.PressKey(hwnd, element, request, clock)
                     : request.Action == WindowActionKind.TYPE_TEXT
                     ? WindowPhysicalClick.TypeText(hwnd, element, request, clock)
+                    : request.Action == WindowActionKind.SET_VALUE
+                    ? WindowChromeCdp.TryDispatch(hwnd, element, request, clock) ??
+                        (Pattern(element, current.ControlType, request.Action) is null
+                            ? new WindowActionResult(WindowActionCode.UNSUPPORTED_ACTION)
+                            : WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(), request,
+                                clock, radioInvoke))
                     : WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(), request,
                         clock, radioInvoke);
                 result = result with { TargetVerified = true, TargetIdentity = request.ElementId };
-                if (request.Action is WindowActionKind.SET_VALUE or WindowActionKind.TYPE_TEXT &&
+                if ((request.Action is WindowActionKind.SET_VALUE or WindowActionKind.TYPE_TEXT) &&
                     (result.Status == WindowActionCode.COMPLETED || result.EffectUnknown))
                 {
                     try
@@ -205,23 +228,33 @@ internal static class WindowAction
                 // Providers may report a failed Invoke *after* the UI changed.
                 // Reconcile by observation without re-dispatching the action.
                 if ((result.Status == WindowActionCode.COMPLETED || result.EffectUnknown) &&
-                    (request.ExpectedName is not null || selectionObservable))
+                    (request.ExpectedName is not null || request.ExpectedEnabledName is not null ||
+                     selectionObservable || expansionObservable || valueObservable))
                 {
                     try
                     {
                         bool observed = false;
+                        bool enabledObserved = false;
                         var verification = Stopwatch.StartNew();
                         do
                         {
-                            observed = request.ExpectedName is not null
+                            bool primary = request.ExpectedName is not null
                                 ? WindowEffectObserver.Check(request, baseline) ==
                                     (request.ExpectedChange == WindowExpectedChange.APPEARS)
-                                : TargetSelected(hwnd, path, element.GetRuntimeId());
+                                : selectionObservable ? TargetSelected(hwnd, path, element.GetRuntimeId())
+                                : expansionObservable ? TargetExpanded(hwnd, path, element.GetRuntimeId(), request.Action)
+                                : valueObservable ? TargetValue(hwnd, path, element.GetRuntimeId(), request.Value!)
+                                : true;
+                            enabledObserved = request.ExpectedEnabledName is null ||
+                                WindowEffectObserver.EnabledState(request.WindowId,
+                                    request.ExpectedEnabledName, request.ExpectedEnabled);
+                            observed = primary && enabledObserved;
                             if (observed) break;
                             Thread.Sleep(100);
                         } while (verification.ElapsedMilliseconds < request.ObservationTimeoutMs);
                         result = ReconcileObserved(result, observed) with
-                        { ObservationState = observed ? WindowObservationState.OBSERVED : WindowObservationState.NOT_OBSERVED };
+                        { ObservationState = observed ? WindowObservationState.OBSERVED : WindowObservationState.NOT_OBSERVED,
+                          ExpectedEnabledObserved = request.ExpectedEnabledName is null ? null : enabledObserved };
                     }
                     catch (Exception e) when (e is COMException or ElementNotAvailableException or
                                               InvalidOperationException or Win32Exception or
@@ -310,6 +343,15 @@ internal static class WindowAction
             string.Equals(valuePattern.Current.Value, value, StringComparison.Ordinal);
     }
 
+    internal static bool ExpectedEnabledPresent(AutomationElement root, string name, bool enabled)
+    {
+        var controls = root.FindAll(TreeScope.Descendants,
+            new PropertyCondition(AutomationElement.NameProperty, name));
+        if (controls.Count != 1) return false;
+        var control = controls[0].Current;
+        return !control.IsOffscreen && !control.IsPassword && control.IsEnabled == enabled;
+    }
+
     internal static bool ExpectedStatePresent(AutomationElement root, WindowActionRequest request)
     {
         string name = request.ExpectedName!;
@@ -317,6 +359,7 @@ internal static class WindowAction
         {
             WindowExpectedKind.UIA_ELEMENT => ExpectedNamePresent(root, name),
             WindowExpectedKind.UIA_VALUE => ExpectedValuePresent(root, name, request.ExpectedValue!),
+            WindowExpectedKind.UIA_ENABLED => ExpectedEnabledPresent(root, name, true),
             WindowExpectedKind.WINDOW_TITLE => WindowTitlePresent(request.WindowId, name),
             WindowExpectedKind.PROCESS_NAME => ExternalStatePresent(request.ExpectedKind, name),
             _ => false
@@ -331,6 +374,28 @@ internal static class WindowAction
         return element is not null && element.GetRuntimeId().SequenceEqual(runtimeId) &&
             element.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var selected) &&
             selected is SelectionItemPattern item && item.Current.IsSelected;
+    }
+
+    private static bool TargetExpanded(IntPtr hwnd, int[] path, int[] runtimeId, WindowActionKind action)
+    {
+        var root = AutomationElement.FromHandle(hwnd);
+        var element = root is null ? null : WindowInspector.ResolvePath(root, TreeWalker.ControlViewWalker, path);
+        if (element is null || !element.GetRuntimeId().SequenceEqual(runtimeId) ||
+            !element.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out var expanded) ||
+            expanded is not ExpandCollapsePattern pattern) return false;
+        return pattern.Current.ExpandCollapseState == (action == WindowActionKind.EXPAND
+            ? ExpandCollapseState.Expanded : ExpandCollapseState.Collapsed);
+    }
+
+    private static bool TargetValue(IntPtr hwnd, int[] path, int[] runtimeId, string value)
+    {
+        var root = AutomationElement.FromHandle(hwnd);
+        var element = root is null ? null : WindowInspector.ResolvePath(root, TreeWalker.ControlViewWalker, path);
+        return element is not null && element.GetRuntimeId().SequenceEqual(runtimeId) &&
+            !element.Current.IsPassword &&
+            element.TryGetCurrentPattern(ValuePattern.Pattern, out var current) &&
+            current is ValuePattern pattern &&
+            string.Equals(pattern.Current.Value, value, StringComparison.Ordinal);
     }
 
     internal static bool WindowTitleMatches(string actual, string expected) =>
@@ -376,6 +441,7 @@ internal static class WindowAction
             WindowActionKind.SELECT when role == ControlType.ListItem ||
                 role == ControlType.TabItem || role == ControlType.RadioButton => SelectionItemPattern.Pattern,
             WindowActionKind.TOGGLE when role == ControlType.CheckBox => TogglePattern.Pattern,
+            WindowActionKind.EXPAND or WindowActionKind.COLLAPSE => ExpandCollapsePattern.Pattern,
             _ => null
         };
         return id is not null && element.TryGetCurrentPattern(id, out var value) ? value : null;
