@@ -16,6 +16,43 @@ internal static partial class WindowChromeCdp
     private sealed record TabElementRef(long Stamp, string TargetId, int BackendId, string LoaderId,
         string Digest);
 
+    // A single-threaded USER broker owns these across requests. Each request
+    // replaces the deadline, not the consented socket or tab attachment.
+    private static ClientWebSocket? _tabSocket;
+    private static Session? _tabSession;
+    private static Uri? _tabEndpoint;
+    private static readonly Dictionary<string, string> AttachedTabs = new(StringComparer.Ordinal);
+    private static bool TabConnected => _tabSocket?.State == WebSocketState.Open && _tabSession is not null;
+
+    private static async Task<Session> TabSessionAsync(Uri endpoint, CancellationToken deadline)
+    {
+        if (TabConnected && _tabEndpoint == endpoint)
+        {
+            _tabSession!.SetDeadline(deadline);
+            return _tabSession!;
+        }
+        CloseTabConnection();
+        var socket = new ClientWebSocket();
+        try
+        {
+            await socket.ConnectAsync(endpoint, deadline);
+            _tabSocket = socket;
+            _tabEndpoint = endpoint;
+            _tabSession = new Session(socket, deadline);
+            return _tabSession;
+        }
+        catch { socket.Dispose(); throw; }
+    }
+
+    internal static void CloseTabConnection()
+    {
+        AttachedTabs.Clear();
+        _tabSession = null;
+        _tabEndpoint = null;
+        _tabSocket?.Dispose();
+        _tabSocket = null;
+    }
+
     internal static bool ValidTargetId(string? id) => id is { Length: >= 16 and <= 64 } &&
         id.All(Uri.IsHexDigit);
 
@@ -217,6 +254,7 @@ internal static partial class WindowChromeCdp
             OperationCanceledException or InvalidOperationException or KeyNotFoundException or
             ArgumentException or Win32Exception)
         {
+            CloseTabConnection();
             return new(e is InvalidOperationException && e.Message == "CDP_WINDOW_NOT_UNIQUE"
                 ? WindowInspectCode.CDP_TARGET_AMBIGUOUS : WindowInspectCode.CDP_UNAVAILABLE,
                 [], Detail: e is InvalidOperationException ? e.Message : e.GetType().Name);
@@ -228,10 +266,8 @@ internal static partial class WindowChromeCdp
         string? nameFilter, WindowRoleFilter? roleFilter,
         string? expectedProfile, string? expectedOrigin, string? expectedUrl)
     {
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(4));
-        using var socket = new ClientWebSocket();
-        await socket.ConnectAsync(endpoint, timeout.Token);
-        var cdp = new Session(socket, timeout.Token);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(TabConnected ? 6 : 24));
+        var cdp = await TabSessionAsync(endpoint, timeout.Token);
         var tabs = await TargetsForWindow(cdp, hwnd);
         if (scope == WindowInspectScope.TABS)
         {
@@ -323,8 +359,11 @@ internal static partial class WindowChromeCdp
 
     private static async Task<string> Attach(Session cdp, string targetId)
     {
+        if (AttachedTabs.TryGetValue(targetId, out string? existing)) return existing;
         var response = await cdp.Call("Target.attachToTarget", new { targetId, flatten = true });
-        return response.GetProperty("sessionId").GetString()!;
+        string sessionId = response.GetProperty("sessionId").GetString()!;
+        AttachedTabs.Add(targetId, sessionId);
+        return sessionId;
     }
 
     private static async Task<string> Loader(Session cdp, string sessionId)
@@ -441,6 +480,7 @@ internal static partial class WindowChromeCdp
         catch (Exception e) when (e is WebSocketException or IOException or JsonException or
             OperationCanceledException or InvalidOperationException or KeyNotFoundException)
         {
+            CloseTabConnection();
             return new(WindowActionCode.CDP_UNAVAILABLE, FailureStage: WindowFailureStage.CDP_CONNECT,
                 ExceptionType: e.GetType().Name, ElapsedMs: clock.ElapsedMilliseconds);
         }
@@ -451,12 +491,10 @@ internal static partial class WindowChromeCdp
     {
         bool dispatched = false;
         using var timeout = new CancellationTokenSource(
-            TimeSpan.FromMilliseconds(request.ObservationTimeoutMs + 3000));
+            TimeSpan.FromMilliseconds(request.ObservationTimeoutMs + (TabConnected ? 3000 : 24000)));
         try
         {
-            using var socket = new ClientWebSocket();
-            await socket.ConnectAsync(endpoint, timeout.Token);
-            var cdp = new Session(socket, timeout.Token);
+            var cdp = await TabSessionAsync(endpoint, timeout.Token);
             var tabs = await TargetsForWindow(cdp, hwnd);
             var selected = tabs.SingleOrDefault(t => t.Id == target.TargetId);
             if (selected is null) return Rejected(WindowActionCode.CDP_TARGET_AMBIGUOUS);
@@ -587,6 +625,7 @@ internal static partial class WindowChromeCdp
         catch (Exception e) when (e is WebSocketException or IOException or JsonException or
             OperationCanceledException or InvalidOperationException or KeyNotFoundException)
         {
+            CloseTabConnection();
             return new(dispatched ? WindowActionCode.CDP_FAILED_UNKNOWN_EFFECT : WindowActionCode.CDP_UNAVAILABLE,
                 EffectUnknown: dispatched, FailureStage: dispatched ? WindowFailureStage.DISPATCH_INPUT :
                     WindowFailureStage.CDP_TARGET, ExceptionType: e.GetType().Name,

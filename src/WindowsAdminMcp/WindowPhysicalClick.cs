@@ -6,7 +6,7 @@ using System.Windows.Automation;
 // unexpected foreground window; UIA actions remain the background-first path.
 internal static class WindowPhysicalClick
 {
-    private const string ForegroundPolicy = "WINDOWS_FOREGROUND_POLICY_USE_UIA_OR_OPT_IN_CDP";
+    private const string ForegroundPolicy = "WINDOWS_FOREGROUND_POLICY_NOT_GRANTED";
     private const uint InputMouse = 0;
     private const uint LeftDown = 0x0002;
     private const uint LeftUp = 0x0004;
@@ -14,6 +14,38 @@ internal static class WindowPhysicalClick
     private const uint KeyUp = 0x0002;
     private const uint KeyUnicode = 0x0004;
     private const uint RootAncestor = 2;
+    private const uint PreviousZWindow = 3;
+
+    // Only a failure before any CDP dispatch may use the native path. An
+    // ambiguous browser action must never be replayed through SendInput.
+    internal static bool CanUseNativeFallback(WindowActionResult? background) =>
+        background is null || background.Status == WindowActionCode.CDP_UNAVAILABLE &&
+        !background.EffectUnknown && background.FailureStage == WindowFailureStage.CDP_CONNECT;
+
+    private static bool ActivateVerifiedWindow(IntPtr hwnd, AutomationElement target,
+        bool focusElement = true)
+    {
+        if (GetForegroundWindow() == hwnd) return true;
+        _ = SetForegroundWindow(hwnd);
+        if (GetForegroundWindow() == hwnd) return true;
+        // Chrome sometimes grants foreground only when the exact accessible
+        // control receives native UIA focus. This does not inject user input.
+        try
+        {
+            // Mouse input must not focus a covered target before hit testing:
+            // some providers raise its window and make an overlay appear absent.
+            if (focusElement && target.Current.IsKeyboardFocusable)
+                target.SetFocus();
+        }
+        catch (Exception e) when (e is COMException or ElementNotAvailableException or
+            InvalidOperationException) { return false; }
+        for (int i = 0; i < 4; i++)
+        {
+            if (GetForegroundWindow() == hwnd) return true;
+            Thread.Sleep(25);
+        }
+        return false;
+    }
 
     internal static WindowActionResult Click(IntPtr hwnd, AutomationElement target,
         WindowActionRequest request, Stopwatch clock)
@@ -36,17 +68,13 @@ internal static class WindowPhysicalClick
             // Chrome web content can be clicked through its explicitly opted-in
             // DevTools connection without stealing desktop focus or mouse position.
             var background = WindowChromeCdp.TryDispatch(hwnd, target, request, clock);
-            if (background is not null) return background;
+            if (!CanUseNativeFallback(background)) return background!;
 
             if (current.IsOffscreen || IsIconic(hwnd) || !IsWindowVisible(hwnd))
                 return new(WindowActionCode.WINDOW_NOT_VISIBLE, ElapsedMs: clock.ElapsedMilliseconds,
                     FailureStage: stage);
 
-            if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd))
-                return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
-                    ElapsedMs: clock.ElapsedMilliseconds, FailureStage: stage,
-                    Detail: ForegroundPolicy);
-            if (GetForegroundWindow() != hwnd)
+            if (!ActivateVerifiedWindow(hwnd, target, focusElement: false))
                 return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
                     ElapsedMs: clock.ElapsedMilliseconds, FailureStage: stage,
                     Detail: ForegroundPolicy);
@@ -125,18 +153,14 @@ internal static class WindowPhysicalClick
                     ElapsedMs: clock.ElapsedMilliseconds);
 
             var background = WindowChromeCdp.TryDispatch(hwnd, target, request, clock);
-            if (background is not null) return background;
+            if (!CanUseNativeFallback(background)) return background!;
 
             if (!target.Current.IsKeyboardFocusable || target.Current.IsOffscreen ||
                 IsIconic(hwnd) || !IsWindowVisible(hwnd))
                 return new(WindowActionCode.FOCUS_UNAVAILABLE, FailureStage: stage,
                     ElapsedMs: clock.ElapsedMilliseconds);
 
-            if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd))
-                return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
-                    FailureStage: WindowFailureStage.ACTIVATE_WINDOW,
-                    ElapsedMs: clock.ElapsedMilliseconds, Detail: ForegroundPolicy);
-            if (GetForegroundWindow() != hwnd)
+            if (!ActivateVerifiedWindow(hwnd, target))
                 return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
                     FailureStage: WindowFailureStage.ACTIVATE_WINDOW,
                     ElapsedMs: clock.ElapsedMilliseconds, Detail: ForegroundPolicy);
@@ -211,7 +235,7 @@ internal static class WindowPhysicalClick
     // ValuePattern.SetValue it uses one ordered Unicode SendInput batch, never
     // a sequence of unverified per-character clicks or global paste shortcuts.
     internal static WindowActionResult TypeText(IntPtr hwnd, AutomationElement target,
-        WindowActionRequest request, Stopwatch clock)
+        WindowActionRequest request, Stopwatch clock, bool allowCdp = true)
     {
         bool dispatched = false;
         var foregroundAtEntry = GetForegroundWindow();
@@ -220,16 +244,16 @@ internal static class WindowPhysicalClick
             if (request.Value is null || (target.Current.ControlType != ControlType.Edit &&
                 target.Current.ControlType != ControlType.ComboBox))
                 return new(WindowActionCode.UNSUPPORTED_ACTION, ElapsedMs: clock.ElapsedMilliseconds);
-            var background = WindowChromeCdp.TryDispatch(hwnd, target, request, clock);
-            if (background is not null) return background;
+            if (allowCdp)
+            {
+                var background = WindowChromeCdp.TryDispatch(hwnd, target, request, clock);
+                if (!CanUseNativeFallback(background)) return background!;
+            }
 
             if (!target.Current.IsKeyboardFocusable || target.Current.IsOffscreen ||
                 IsIconic(hwnd) || !IsWindowVisible(hwnd))
                 return new(WindowActionCode.FOCUS_UNAVAILABLE, FailureStage: WindowFailureStage.PREPARE_FOCUS);
-            if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd))
-                return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
-                    FailureStage: WindowFailureStage.ACTIVATE_WINDOW, Detail: ForegroundPolicy);
-            if (GetForegroundWindow() != hwnd)
+            if (!ActivateVerifiedWindow(hwnd, target))
                 return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
                     FailureStage: WindowFailureStage.ACTIVATE_WINDOW, Detail: ForegroundPolicy);
 
@@ -300,6 +324,22 @@ internal static class WindowPhysicalClick
 
     private static bool HitsTarget(IntPtr hwnd, AutomationElement target, Point pixel)
     {
+        // UIA and WindowFromPoint may report the covered child even while a
+        // separate topmost HWND physically occupies the same screen point.
+        // A native pointer must never pass through such an overlay.
+        IntPtr above = GetWindow(hwnd, PreviousZWindow);
+        for (int i = 0; above != IntPtr.Zero && i < 256; i++)
+        {
+            if (IsWindowVisible(above) && !IsIconic(above) &&
+                GetWindowRect(above, out var bounds) &&
+                pixel.X >= bounds.Left && pixel.X < bounds.Right &&
+                pixel.Y >= bounds.Top && pixel.Y < bounds.Bottom)
+                return false;
+            IntPtr next = GetWindow(above, PreviousZWindow);
+            if (next == above) return false;
+            above = next;
+        }
+        if (above != IntPtr.Zero) return false;
         var hitWindow = WindowFromPoint(pixel);
         if (hitWindow == IntPtr.Zero || GetAncestor(hitWindow, RootAncestor) != hwnd)
             return false;
@@ -319,6 +359,12 @@ internal static class WindowPhysicalClick
     {
         public readonly int X = x;
         public readonly int Y = y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Rect
+    {
+        public int Left, Top, Right, Bottom;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -368,6 +414,11 @@ internal static class WindowPhysicalClick
     private static extern IntPtr WindowFromPoint(Point point);
     [DllImport("user32.dll")]
     private static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetWindow(IntPtr hwnd, uint command);
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(IntPtr hwnd, out Rect rectangle);
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint inputs, [In] Input[] input, int size);
     [DllImport("user32.dll", EntryPoint = "SendInput", SetLastError = true)]

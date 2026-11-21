@@ -161,12 +161,11 @@ internal static partial class WindowChromeCdp
     {
         bool dispatched = false;
         var foregroundAtEntry = GetForegroundWindow();
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        using var deadline = new CancellationTokenSource(
+            TimeSpan.FromSeconds(TabConnected ? 6 : 24));
         try
         {
-            using var ws = new ClientWebSocket();
-            await ws.ConnectAsync(endpoint, deadline.Token);
-            var cdp = new Session(ws, deadline.Token);
+            var cdp = await TabSessionAsync(endpoint, deadline.Token);
             var targets = await cdp.Call("Target.getTargets", new { });
             string title = GetTitle(hwnd);
             if (string.IsNullOrWhiteSpace(title))
@@ -196,8 +195,7 @@ internal static partial class WindowChromeCdp
                     dpi == 0 ? 1 : dpi / 96.0)) candidates.Add(targetId);
             }
             if (candidates.Count != 1) return Rejected(WindowActionCode.CDP_TARGET_AMBIGUOUS);
-            var attach = await cdp.Call("Target.attachToTarget", new { targetId = candidates[0], flatten = true });
-            string sessionId = attach.GetProperty("sessionId").GetString()!;
+            string sessionId = await Attach(cdp, candidates[0]);
             var document = await cdp.Call("DOM.getDocument", new { depth = 0 }, sessionId);
             int nodeId = document.GetProperty("root").GetProperty("nodeId").GetInt32();
             var matches = await cdp.Call("Accessibility.queryAXTree",
@@ -293,6 +291,7 @@ internal static partial class WindowChromeCdp
         catch (Exception e) when (e is WebSocketException or IOException or JsonException or
                                    OperationCanceledException or InvalidOperationException or KeyNotFoundException)
         {
+            CloseTabConnection();
             return new(dispatched ? WindowActionCode.CDP_FAILED_UNKNOWN_EFFECT : WindowActionCode.CDP_UNAVAILABLE,
                 EffectUnknown: dispatched, FailureStage: dispatched ? WindowFailureStage.DISPATCH_INPUT :
                     WindowFailureStage.CDP_CONNECT, ExceptionType: e.GetType().Name,
@@ -306,13 +305,15 @@ internal static partial class WindowChromeCdp
     private sealed class Session(ClientWebSocket socket, CancellationToken cancellationToken)
     {
         private int _nextId;
+        private CancellationToken _deadline = cancellationToken;
+        internal void SetDeadline(CancellationToken deadline) => _deadline = deadline;
         internal async Task<JsonElement> Call(string method, object parameters, string? sessionId = null)
         {
             int id = ++_nextId;
             byte[] payload = JsonSerializer.SerializeToUtf8Bytes(new
                 { id, method, @params = parameters, sessionId },
                 new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull });
-            await socket.SendAsync(payload.AsMemory(), WebSocketMessageType.Text, true, cancellationToken);
+            await socket.SendAsync(payload.AsMemory(), WebSocketMessageType.Text, true, _deadline);
             var buffer = new byte[16384];
             using var stream = new MemoryStream();
             while (true)
@@ -321,7 +322,7 @@ internal static partial class WindowChromeCdp
                 WebSocketReceiveResult part;
                 do
                 {
-                    part = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
+                    part = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), _deadline);
                     if (part.MessageType != WebSocketMessageType.Text || stream.Length + part.Count > MaxMessageBytes)
                         throw new JsonException("CDP_MESSAGE_INVALID");
                     stream.Write(buffer, 0, part.Count);
