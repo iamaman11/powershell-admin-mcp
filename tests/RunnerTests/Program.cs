@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 
 static void Check(bool ok, string label)
 {
@@ -293,6 +295,21 @@ Check(WindowChromeCdp.TryReadEndpoint(
     !WindowChromeCdp.TryReadEndpoint(
         "99999\n/devtools/browser/01234567-89ab-cdef-0123-456789abcdef", out _),
     "chrome.cdp_local_opt_in_endpoint_only");
+using (var listener = new TcpListener(IPAddress.Loopback, 0))
+{
+    listener.Start();
+    int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+    Check(WindowChromeCdp.LoopbackPortOpen(port) &&
+        !WindowChromeCdp.LoopbackPortOpen(0),
+        "chrome.cdp_endpoint_checks_live_loopback_listener");
+    listener.Stop();
+    Check(!WindowChromeCdp.LoopbackPortOpen(port),
+        "chrome.cdp_stale_port_is_not_a_valid_endpoint");
+}
+Check(WindowPhysicalClick.SupportsPhysicalClickRole(System.Windows.Automation.ControlType.Edit) &&
+    WindowPhysicalClick.SupportsPhysicalClickRole(System.Windows.Automation.ControlType.Button) &&
+    !WindowPhysicalClick.SupportsPhysicalClickRole(System.Windows.Automation.ControlType.Pane),
+    "windows.physical_edit_click_supported_without_unsafe_generic_roles");
 Check(WindowChromeCdp.MatchesWindow("Profile Control Plane - Google Chrome (Valer)",
         "Profile Control Plane", new WindowBounds(100, 80, 1200, 800),
         new WindowBounds(80, 64, 960, 640), 1.25) &&
@@ -818,6 +835,17 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         var inputTree = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 50,
             realWindowId)).WaitAsync(TimeSpan.FromSeconds(5));
         var nativeTypingTarget = inputTree.Elements.Single(e => e.Role.Contains("Edit", StringComparison.Ordinal));
+        var editClick = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, nativeTypingTarget.ElementId,
+                WindowActionKind.CLICK, null, nativeTypingTarget.Path)))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        if (editClick.Status is WindowActionCode.FOREGROUND_UNAVAILABLE or
+            WindowActionCode.TARGET_OCCLUDED or WindowActionCode.CLICK_POINT_UNAVAILABLE)
+            Console.WriteLine($"NOT_TESTED windows.click_owned_edit status={editClick.Status}");
+        else
+            Check(editClick.Status == WindowActionCode.COMPLETED && editClick.TargetVerified &&
+                (bool)created.Form.Invoke(new Func<bool>(() => created.Input.Focused)),
+                "windows.click_owned_edit_focuses_exact_field");
         const string typedValue = "CI_UIA_NATIVE_TYPED";
         var typed = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, nativeTypingTarget.ElementId,

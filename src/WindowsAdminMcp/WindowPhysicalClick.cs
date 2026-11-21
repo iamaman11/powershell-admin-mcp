@@ -59,8 +59,14 @@ internal static class WindowPhysicalClick
         return actual is not null && actual.GetRuntimeId().SequenceEqual(target.GetRuntimeId());
     }
 
+    internal static bool SupportsPhysicalClickRole(ControlType role) =>
+        role == ControlType.Button || role == ControlType.Hyperlink ||
+        role == ControlType.MenuItem || role == ControlType.CheckBox ||
+        role == ControlType.RadioButton || role == ControlType.ListItem ||
+        role == ControlType.TabItem || role == ControlType.Edit;
+
     internal static WindowActionResult Click(IntPtr hwnd, AutomationElement target,
-        WindowActionRequest request, Stopwatch clock)
+        WindowActionRequest request, Stopwatch clock, bool allowCdp = true)
     {
         bool dispatched = false;
         var foregroundAtEntry = GetForegroundWindow();
@@ -68,18 +74,12 @@ internal static class WindowPhysicalClick
         try
         {
             var current = target.Current;
-            if (current.ControlType != ControlType.Button &&
-                current.ControlType != ControlType.Hyperlink &&
-                current.ControlType != ControlType.MenuItem &&
-                current.ControlType != ControlType.CheckBox &&
-                current.ControlType != ControlType.RadioButton &&
-                current.ControlType != ControlType.ListItem &&
-                current.ControlType != ControlType.TabItem)
+            if (!SupportsPhysicalClickRole(current.ControlType))
                 return new(WindowActionCode.UNSUPPORTED_ACTION, ElapsedMs: clock.ElapsedMilliseconds);
 
             // Chrome web content can be clicked through its explicitly opted-in
             // DevTools connection without stealing desktop focus or mouse position.
-            var background = WindowChromeCdp.TryDispatch(hwnd, target, request, clock);
+            var background = allowCdp ? WindowChromeCdp.TryDispatch(hwnd, target, request, clock) : null;
             if (!CanUseNativeFallback(background)) return background!;
 
             if (current.IsOffscreen || IsIconic(hwnd) || !IsWindowVisible(hwnd))
@@ -265,6 +265,17 @@ internal static class WindowPhysicalClick
             if (!ActivateVerifiedWindow(hwnd, target))
                 return new(WindowActionCode.FOREGROUND_UNAVAILABLE,
                     FailureStage: WindowFailureStage.ACTIVATE_WINDOW, Detail: ForegroundPolicy);
+
+            // Chromium sometimes reports UIA keyboard focus without delivering
+            // DOM focus to a React textbox. A physical, hit-tested click is
+            // required before SendInput for verified Chrome Edit elements.
+            // Never inject text if the field is covered by another window.
+            if (request.ExpectedProfile is not null && target.Current.ControlType == ControlType.Edit)
+            {
+                var click = Click(hwnd, target, request with { Action = WindowActionKind.CLICK },
+                    clock, allowCdp: false);
+                if (click.Status != WindowActionCode.COMPLETED) return click;
+            }
 
             if (!target.Current.HasKeyboardFocus) target.SetFocus();
             bool focused = false;
