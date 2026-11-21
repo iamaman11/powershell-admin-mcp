@@ -310,6 +310,11 @@ Check(WindowPhysicalClick.SupportsPhysicalClickRole(System.Windows.Automation.Co
     WindowPhysicalClick.SupportsPhysicalClickRole(System.Windows.Automation.ControlType.Button) &&
     !WindowPhysicalClick.SupportsPhysicalClickRole(System.Windows.Automation.ControlType.Pane),
     "windows.physical_edit_click_supported_without_unsafe_generic_roles");
+Check(WindowPhysicalClick.ChromeChunkUnits("abc", 0) == 1 &&
+    WindowPhysicalClick.ChromeChunkUnits("a🚀b", 1) == 2 &&
+    WindowPhysicalClick.ChromeChunkUnits(new string('a', 79) + "🚀z", 64) == 17 &&
+    WindowPhysicalClick.ChromeChunkUnits(new string('a', 96), 64) == 16,
+    "windows.chrome_unicode_pacing_preserves_surrogate_pairs_and_chunk_bound");
 Check(WindowChromeCdp.MatchesWindow("Profile Control Plane - Google Chrome (Valer)",
         "Profile Control Plane", new WindowBounds(100, 80, 1200, 800),
         new WindowBounds(80, 64, 960, 640), 1.25) &&
