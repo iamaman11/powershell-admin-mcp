@@ -26,6 +26,7 @@ internal static class WindowActionNoFocus
     private const int SelectionItemPatternId = 10010;
     private const int TogglePatternId = 10015;
     private const int ExpandCollapsePatternId = 10005;
+    private const int UiaElementNotEnabled = unchecked((int)0x80040200);
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int SetAutoFocus(IntPtr self, int enabled);
@@ -149,7 +150,8 @@ internal static class WindowActionNoFocus
                 changedDuringAction ? "FOREGROUND_ACTION" : null;
             return result < 0
                 ? new(WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
-                    ForegroundChanged: changed, Detail: result.ToString("X8") +
+                    ForegroundChanged: changed, Detail: (result == UiaElementNotEnabled
+                        ? "UIA_E_ELEMENTNOTENABLED:" : "") + result.ToString("X8") +
                         (focusDetail is null ? "" : ":" + focusDetail),
                     ElapsedMs: clock.ElapsedMilliseconds, TargetActivated: targetActivated,
                     FailureStage: stage, HResult: result.ToString("X8"),

@@ -140,7 +140,7 @@ internal static partial class WindowChromeCdp
         return true;
     }
 
-    private static bool IsInsideDocument(AutomationElement element)
+    internal static bool IsInsideDocument(AutomationElement element)
     {
         var walker = TreeWalker.ControlViewWalker;
         AutomationElement? cursor = element;
