@@ -328,8 +328,59 @@ internal static class WindowPhysicalClick
                 return new(WindowActionCode.FOCUS_UNAVAILABLE,
                     FailureStage: WindowFailureStage.PREPARE_FOCUS);
             dispatched = true;
-            uint inserted = SendKeyboardInput((uint)inputs.Count, [.. inputs],
-                Marshal.SizeOf<KeyboardEventInput>());
+            uint inserted;
+            if (request.ExpectedProfile is not null && target.Current.ControlType == ControlType.Edit &&
+                request.Value.Length > 0)
+            {
+                // A single large keyboard batch can race a clean React input's
+                // first controlled-state update. Prime the field with one real
+                // Unicode scalar, verify its exact UIA value, then deliver the
+                // remaining characters as one fast, ordered batch. This avoids
+                // per-character delays on long fields and never replays an
+                // ambiguous action after dispatch.
+                int leadLength = request.Value.Length > 1 &&
+                    char.IsSurrogatePair(request.Value, 0) ? 2 : 1;
+                var selection = inputs.GetRange(0, 4).ToArray();
+                var lead = inputs.GetRange(4, leadLength * 2).ToArray();
+                var tail = inputs.GetRange(4 + lead.Length, inputs.Count - 4 - lead.Length).ToArray();
+                int inputSize = Marshal.SizeOf<KeyboardEventInput>();
+                inserted = SendKeyboardInput((uint)selection.Length, selection, inputSize);
+                if (inserted == selection.Length)
+                {
+                    Thread.Sleep(95);
+                    if (GetForegroundWindow() != hwnd || !target.Current.HasKeyboardFocus)
+                        return new(WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
+                            FailureStage: WindowFailureStage.DISPATCH_INPUT,
+                            Detail: "FOCUS_LOST_AFTER_SELECT", ElapsedMs: clock.ElapsedMilliseconds);
+                    inserted += SendKeyboardInput((uint)lead.Length, lead, inputSize);
+                }
+                if (inserted == selection.Length + lead.Length)
+                {
+                    bool leadObserved = false;
+                    for (int attempt = 0; attempt < 5 && GetForegroundWindow() == hwnd; attempt++)
+                    {
+                        Thread.Sleep(attempt == 0 ? 130 : 60);
+                        if (target.TryGetCurrentPattern(ValuePattern.Pattern, out var value) &&
+                            value is ValuePattern pattern &&
+                            string.Equals(pattern.Current.Value, request.Value[..leadLength],
+                                StringComparison.Ordinal))
+                        {
+                            leadObserved = true;
+                            break;
+                        }
+                    }
+                    if (!leadObserved || GetForegroundWindow() != hwnd ||
+                        !target.Current.HasKeyboardFocus)
+                        return new(WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
+                            FailureStage: WindowFailureStage.DISPATCH_INPUT,
+                            Detail: "CHROME_REACT_PRIMER_NOT_OBSERVED", ElapsedMs: clock.ElapsedMilliseconds);
+                    if (tail.Length > 0)
+                        inserted += SendKeyboardInput((uint)tail.Length, tail, inputSize);
+                }
+            }
+            else
+                inserted = SendKeyboardInput((uint)inputs.Count, [.. inputs],
+                    Marshal.SizeOf<KeyboardEventInput>());
             bool changed = foregroundAtEntry != GetForegroundWindow();
             return inserted == inputs.Count && GetForegroundWindow() == hwnd
                 ? new(WindowActionCode.COMPLETED, ForegroundChanged: changed,
