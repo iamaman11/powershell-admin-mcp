@@ -356,6 +356,21 @@ Check(WindowAction.CanFallbackAfterNativeClick(new(WindowActionCode.UIA_UNAVAILA
         FailureStage: WindowFailureStage.DISPATCH_UIA)) &&
     !WindowAction.CanFallbackAfterNativeClick(new(WindowActionCode.COMPLETED)),
     "windows.semantic_click_only_falls_back_before_any_possible_dispatch");
+Check(WindowAction.CanFallbackToSemanticAfterPhysical(new(WindowActionCode.FOREGROUND_UNAVAILABLE,
+        FailureStage: WindowFailureStage.ACTIVATE_WINDOW)) &&
+    WindowAction.CanFallbackToSemanticAfterPhysical(new(WindowActionCode.TARGET_OCCLUDED,
+        FailureStage: WindowFailureStage.HIT_TEST)) &&
+    !WindowAction.CanFallbackToSemanticAfterPhysical(new(WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT,
+        EffectUnknown: true, FailureStage: WindowFailureStage.DISPATCH_INPUT)) &&
+    !WindowAction.CanFallbackToSemanticAfterPhysical(new(WindowActionCode.COMPLETED)) &&
+    !WindowAction.CanFallbackToSemanticAfterPhysical(new(WindowActionCode.STALE_ELEMENT)),
+    "windows.web_click_only_falls_back_to_semantic_before_physical_dispatch");
+Check(WindowAction.PreferPhysicalWebClick(WindowActionKind.INVOKE, true) &&
+    !WindowAction.PreferPhysicalWebClick(WindowActionKind.INVOKE, false) &&
+    !WindowAction.PreferPhysicalWebClick(WindowActionKind.EXPAND, true) &&
+    !WindowAction.PreferPhysicalWebClick(WindowActionKind.TOGGLE, true) &&
+    !WindowAction.PreferPhysicalWebClick(null, true),
+    "windows.web_invoke_precedes_unreliable_uia_provider_without_changing_native_disclosures");
 var expectedClick = new WindowActionRequest(testWindowId, freshElementId,
     WindowActionKind.CLICK, null, ExpectedName: "CI_CLICKED",
     ExpectedChange: WindowExpectedChange.APPEARS);

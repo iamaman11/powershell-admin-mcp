@@ -208,11 +208,21 @@ internal static class WindowAction
                     element.TryGetCurrentPattern(ValuePattern.Pattern, out _);
                 WindowActionResult ClickWithNativeFallback()
                 {
-                    // A semantic UIA action addresses the verified control without
-                    // requiring Windows to grant foreground activation. Chromium
-                    // advertises InvokePattern for ordinary web buttons even when
-                    // CDP is unavailable. Physical input remains the fallback for
-                    // controls that do not expose a matching UIA pattern.
+                    // Browser document buttons may advertise InvokePattern but
+                    // reject Invoke with UIA_E_ELEMENTNOTENABLED even while they
+                    // are visibly enabled. Prefer the existing CDP/verified real
+                    // pointer path for web Invoke controls. If no input was sent,
+                    // native UIA remains a background-capable fallback.
+                    if (semanticClick == WindowActionKind.INVOKE && PreferPhysicalWebClick(semanticClick,
+                        WindowChromeCdp.IsInsideDocument(element)))
+                    {
+                        var physical = WindowPhysicalClick.Click(hwnd, element, request, clock);
+                        if (!CanFallbackToSemanticAfterPhysical(physical)) return physical;
+                        return WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(),
+                            request with { Action = WindowActionKind.INVOKE }, clock);
+                    }
+                    // Other controls use the native control pattern first. No
+                    // alternate input method replays an uncertain provider result.
                     if (semanticClick is not null)
                     {
                         var native = WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(),
@@ -490,6 +500,15 @@ internal static class WindowAction
     internal static bool CanFallbackAfterNativeClick(WindowActionResult result) =>
         !result.EffectUnknown && result.FailureStage != WindowFailureStage.DISPATCH_UIA &&
         (result.Status is WindowActionCode.UIA_UNAVAILABLE or WindowActionCode.UNSUPPORTED_ACTION);
+
+    internal static bool CanFallbackToSemanticAfterPhysical(WindowActionResult result) =>
+        !result.EffectUnknown &&
+        (result.Status is WindowActionCode.FOREGROUND_UNAVAILABLE or
+            WindowActionCode.TARGET_OCCLUDED or WindowActionCode.CLICK_POINT_UNAVAILABLE or
+            WindowActionCode.WINDOW_NOT_VISIBLE);
+
+    internal static bool PreferPhysicalWebClick(WindowActionKind? semantic, bool insideDocument) =>
+        insideDocument && semantic == WindowActionKind.INVOKE;
 
     // SendInput returning a full insertion count means the OS queued keys;
     // it is not proof that Chrome/React changed an input. When the value or
