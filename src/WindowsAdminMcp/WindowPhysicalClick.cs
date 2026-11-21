@@ -47,6 +47,18 @@ internal static class WindowPhysicalClick
         return false;
     }
 
+    private static bool StableFocus(IntPtr hwnd, AutomationElement target, string? expectedProfile)
+    {
+        // A Chromium UIA provider may acknowledge focus before its renderer
+        // processes the corresponding DOM focus. Let the target consume that
+        // transition, then check both HWND and exact element again before input.
+        // Other native apps retain the zero-delay path.
+        if (expectedProfile is not null) Thread.Sleep(160);
+        if (GetForegroundWindow() != hwnd || !target.Current.HasKeyboardFocus) return false;
+        var actual = AutomationElement.FocusedElement;
+        return actual is not null && actual.GetRuntimeId().SequenceEqual(target.GetRuntimeId());
+    }
+
     internal static WindowActionResult Click(IntPtr hwnd, AutomationElement target,
         WindowActionRequest request, Stopwatch clock)
     {
@@ -201,10 +213,7 @@ internal static class WindowPhysicalClick
                 new KeyboardEventInput { Type = InputKeyboard, VirtualKey = virtualKey },
                 new KeyboardEventInput { Type = InputKeyboard, VirtualKey = virtualKey, Flags = KeyUp }
             };
-            var finalFocus = AutomationElement.FocusedElement;
-            if (GetForegroundWindow() != hwnd || !target.Current.HasKeyboardFocus ||
-                finalFocus is null ||
-                !finalFocus.GetRuntimeId().SequenceEqual(target.GetRuntimeId()) ||
+            if (!StableFocus(hwnd, target, request.ExpectedProfile) ||
                 WindowCatalog.ResolveId(request.WindowId, Process.GetCurrentProcess().SessionId,
                     out var finalHwnd) != WindowResolveCode.OK || finalHwnd != hwnd)
                 return new(WindowActionCode.FOCUS_UNAVAILABLE, FailureStage: stage,
@@ -292,10 +301,7 @@ internal static class WindowPhysicalClick
                 inputs.Add(new() { Type = InputKeyboard, Scan = ch, Flags = KeyUnicode });
                 inputs.Add(new() { Type = InputKeyboard, Scan = ch, Flags = KeyUnicode | KeyUp });
             }
-            var actualFocus = AutomationElement.FocusedElement;
-            if (GetForegroundWindow() != hwnd || !target.Current.HasKeyboardFocus ||
-                actualFocus is null ||
-                !actualFocus.GetRuntimeId().SequenceEqual(target.GetRuntimeId()) ||
+            if (!StableFocus(hwnd, target, request.ExpectedProfile) ||
                 WindowCatalog.ResolveId(request.WindowId, Process.GetCurrentProcess().SessionId,
                     out resolved) != WindowResolveCode.OK || resolved != hwnd)
                 return new(WindowActionCode.FOCUS_UNAVAILABLE,
