@@ -183,11 +183,8 @@ internal static class WindowChromeBroker
         {
             while (true)
             {
-                using var idle = new CancellationTokenSource();
                 Task<string?> read = Console.In.ReadLineAsync();
-                Task finished = await Task.WhenAny(read, parentExit,
-                    Task.Delay(TimeSpan.FromMinutes(5), idle.Token));
-                await idle.CancelAsync();
+                Task finished = await Task.WhenAny(read, parentExit);
                 if (finished != read) return;
                 string? json = await read;
                 if (json is null) return;
