@@ -56,9 +56,26 @@ public sealed class FileTools
             status.Frontend.Sid!=identity.User?.Value ||
             !new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
             return new(FileWriteCode.USER_CONTEXT_UNAVAILABLE,operation_id,execution_context,Stage:"VALIDATE");
+        // The SCM service is the single SQLite owner even for USER filesystem
+        // actions. Prepare the durable operation identity before any write;
+        // register the verified native outcome afterwards. The native sidecar
+        // remains the crash-recovery readback when this frontend disappears.
+        var preparation=await AdminTools.Call(new(AdminOperation.FileReceipt,
+            FileReceipt:FileReceiptRequest.From(request,FileReceiptPhase.PREPARE)),cancellationToken);
+        if(preparation.FileReceipt is not {Code:FileReceiptCode.READY})
+            return new(preparation.FileReceipt?.AsFileCode()??FileWriteCode.SERVICE_UNAVAILABLE,
+                operation_id,execution_context,Stage:"SQLITE_PREPARE");
         using var deadline=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromSeconds(30));
-        return await Task.Run(()=>NativeFileWriter.Execute(request,deadline.Token),deadline.Token);
+        FileWriteReply result;
+        try{result=await Task.Run(()=>NativeFileWriter.Execute(request,deadline.Token),deadline.Token);}
+        catch(OperationCanceledException){result=new(FileWriteCode.EFFECT_UNKNOWN,operation_id,
+            execution_context,EffectState:WindowEffectState.EFFECT_UNKNOWN,Stage:"TIMEOUT");}
+        var observed=await AdminTools.Call(new(AdminOperation.FileReceipt,
+            FileReceipt:FileReceiptRequest.From(request,FileReceiptPhase.OBSERVE,result)),CancellationToken.None);
+        return observed.FileReceipt is {Code:FileReceiptCode.READY}?result:
+            result with {Status=FileWriteCode.EFFECT_UNKNOWN,EffectState=WindowEffectState.EFFECT_UNKNOWN,
+                Stage="SQLITE_PERSIST"};
     }
 
     private static async Task<NativeFileReply> Dispatch(NativeFileRequest request, CancellationToken ct)

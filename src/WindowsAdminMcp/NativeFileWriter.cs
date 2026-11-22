@@ -94,6 +94,9 @@ internal static class NativeFileWriter
     internal static FileWriteReply Execute(FileWriteRequest request,CancellationToken ct=default)
     {
         bool targetMayHaveChanged=false;
+        bool sidecarMayHaveChanged=false;
+        void Persist(string path,Journal value)
+        {sidecarMayHaveChanged=true;Save(path,value);}
         FileWriteReply Reply(FileWriteCode status,Journal? state=null,string? stage=null,int? native=null)=>
             new(status,request.OperationId,request.ExecutionContext,state?.Received,state?.Length,
                 state?.Sha256,status==FileWriteCode.COMMITTED?WindowEffectState.EFFECT_VERIFIED:
@@ -148,13 +151,16 @@ internal static class NativeFileWriter
                     var journal=new Journal(1,request.OperationId,full,request.ExecutionContext,
                         request.ExpectedBytes!.Value,request.ExpectedSha256!.ToUpperInvariant(),
                         request.OverwritePolicy,request.ExpectedVersion,request.OriginalSha256?.ToUpperInvariant(),0,"STAGED");
-                    Save(paths.Journal,journal);
+                    Persist(paths.Journal,journal);
                     using(var stage=new FileStream(paths.Stage,FileMode.CreateNew,FileAccess.Write,FileShare.None))stage.Flush(true);
                     return Reply(FileWriteCode.STAGED,journal);
                 }
                 var saved=Read(paths.Journal);
                 if(saved.OperationId!=request.OperationId || saved.Path!=full || saved.Context!=request.ExecutionContext)
                     return Reply(FileWriteCode.CONFLICT,saved,stage:"VALIDATE");
+                if(File.Exists(paths.Stage) &&
+                    (File.GetAttributes(paths.Stage)&FileAttributes.ReparsePoint)!=0)
+                    return Reply(FileWriteCode.REPARSE_POINT,saved,stage:"VALIDATE");
                 if(request.Action==FileWriteAction.STATUS || saved.State=="COMMITTED" || saved.State=="ABORTED")
                 {
                     // Never infer an operation committed merely because an unrelated
@@ -163,7 +169,29 @@ internal static class NativeFileWriter
                     if(saved.State=="COMMITTING" && !File.Exists(paths.Stage) && File.Exists(full) &&
                         string.Equals(HashFile(full),saved.Sha256,StringComparison.OrdinalIgnoreCase))
                     {
-                        saved=saved with {State="COMMITTED",Received=saved.Length};Save(paths.Journal,saved);
+                        saved=saved with {State="COMMITTED",Received=saved.Length};Persist(paths.Journal,saved);
+                    }
+                    // Atomic Move/Replace consumes the staged file on success.
+                    // If it is still present and the original is demonstrably
+                    // intact, no replacement occurred; the caller can safely
+                    // prepare a *new* explicit commit after this STATUS readback.
+                    else if(saved.State=="COMMITTING" && File.Exists(paths.Stage) &&
+                        new FileInfo(paths.Stage).Length==saved.Length &&
+                        string.Equals(HashFile(paths.Stage),saved.Sha256,StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool unchanged=saved.Policy==FileOverwritePolicy.FAIL_IF_EXISTS
+                            ?!File.Exists(full):false;
+                        if(saved.Policy==FileOverwritePolicy.REPLACE_IF_MATCH && File.Exists(full))
+                        {
+                            var stat=NativeFileReader.ExecuteAsync(new(NativeFileAction.STAT,full,
+                                saved.Context,IncludeSha256:true),ct).GetAwaiter().GetResult();
+                            unchanged=stat.Status==NativeFileCode.COMPLETED &&
+                                stat.Info?.Version==saved.OriginalVersion &&
+                                string.Equals(stat.Info?.Sha256,saved.OriginalSha256,
+                                    StringComparison.OrdinalIgnoreCase);
+                        }
+                        if(unchanged)
+                        {saved=saved with {State="STAGED"};Persist(paths.Journal,saved);}
                     }
                     if(saved.State=="COMMITTING" || saved.State=="STAGED" && !File.Exists(paths.Stage))
                         return Reply(FileWriteCode.EFFECT_UNKNOWN,saved,stage:"READBACK");
@@ -172,8 +200,11 @@ internal static class NativeFileWriter
                 }
                 if(request.Action==FileWriteAction.ABORT)
                 {
-                    if(File.Exists(paths.Stage))File.Delete(paths.Stage);
-                    saved=saved with {State="ABORTED"};Save(paths.Journal,saved);
+                    if(saved.State=="COMMITTING")
+                        return Reply(FileWriteCode.EFFECT_UNKNOWN,saved,stage:"VERIFY");
+                    if(File.Exists(paths.Stage))
+                    {sidecarMayHaveChanged=true;File.Delete(paths.Stage);}
+                    saved=saved with {State="ABORTED"};Persist(paths.Journal,saved);
                     return Reply(FileWriteCode.ABORTED,saved);
                 }
                 if(!File.Exists(paths.Stage))return Reply(FileWriteCode.EFFECT_UNKNOWN,saved,stage:"READBACK");
@@ -203,12 +234,13 @@ internal static class NativeFileWriter
                     }
                     else if(stage.Length==saved.Received)
                     {
+                        sidecarMayHaveChanged=true;
                         stage.Position=saved.Received;stage.Write(bytes);stage.Flush(true);
                     }
                     else return Reply(FileWriteCode.EFFECT_UNKNOWN,saved,stage:"READBACK");
                     saved=saved with {Received=saved.Received+bytes.Length,LastOffset=request.Offset.Value,
                         LastChunkHash=request.ChunkSha256!.ToUpperInvariant()};
-                    Save(paths.Journal,saved);
+                    Persist(paths.Journal,saved);
                     return Reply(FileWriteCode.STAGED,saved);
                 }
                 if(request.Action==FileWriteAction.COMMIT)
@@ -221,7 +253,7 @@ internal static class NativeFileWriter
                     {
                         if(File.Exists(full))return Reply(FileWriteCode.CONFLICT,saved,stage:"VERIFY");
                         if(saved.State!="COMMITTING")
-                        { saved=saved with {State="COMMITTING"};Save(paths.Journal,saved); }
+                        { saved=saved with {State="COMMITTING"};Persist(paths.Journal,saved); }
                         targetMayHaveChanged=true;
                         File.Move(paths.Stage,full); // no replace: atomic same-volume rename
                     }
@@ -239,12 +271,12 @@ internal static class NativeFileWriter
                                 return Reply(FileWriteCode.CONFLICT,saved,stage:"VERIFY");
                             // Windows ReplaceFileW is atomic on the same volume.
                             if(saved.State!="COMMITTING")
-                            { saved=saved with {State="COMMITTING"};Save(paths.Journal,saved); }
+                            { saved=saved with {State="COMMITTING"};Persist(paths.Journal,saved); }
                             targetMayHaveChanged=true;
                             File.Replace(paths.Stage,full,null,ignoreMetadataErrors:false);
                         }
                     }
-                    saved=saved with {State="COMMITTED"};Save(paths.Journal,saved);
+                    saved=saved with {State="COMMITTED"};Persist(paths.Journal,saved);
                     return Reply(FileWriteCode.COMMITTED,saved,stage:"VERIFY");
                 }
                 return Reply(FileWriteCode.INVALID_ARGUMENT,saved,stage:"VALIDATE");
@@ -252,14 +284,14 @@ internal static class NativeFileWriter
             finally {mutex.ReleaseMutex();}
         }
         catch(FileWriteFailure e){return Reply(e.Code);}
-        catch(UnauthorizedAccessException){return Reply(targetMayHaveChanged?FileWriteCode.EFFECT_UNKNOWN:FileWriteCode.ACCESS_DENIED);}
-        catch(System.Security.SecurityException){return Reply(targetMayHaveChanged?FileWriteCode.EFFECT_UNKNOWN:FileWriteCode.ACCESS_DENIED);}
-        catch(Win32Exception e){return Reply(targetMayHaveChanged?FileWriteCode.EFFECT_UNKNOWN:
+        catch(UnauthorizedAccessException){return Reply(targetMayHaveChanged||sidecarMayHaveChanged?FileWriteCode.EFFECT_UNKNOWN:FileWriteCode.ACCESS_DENIED);}
+        catch(System.Security.SecurityException){return Reply(targetMayHaveChanged||sidecarMayHaveChanged?FileWriteCode.EFFECT_UNKNOWN:FileWriteCode.ACCESS_DENIED);}
+        catch(Win32Exception e){return Reply(targetMayHaveChanged||sidecarMayHaveChanged?FileWriteCode.EFFECT_UNKNOWN:
             e.NativeErrorCode is 32 or 33 ? FileWriteCode.SHARING_VIOLATION:
             FileWriteCode.IO_ERROR,native:e.NativeErrorCode);}
         catch(OperationCanceledException){return Reply(FileWriteCode.EFFECT_UNKNOWN,stage:"TIMEOUT");}
         catch(Exception e) when(e is IOException or JsonException or ArgumentException or NotSupportedException)
-        {return Reply(targetMayHaveChanged?FileWriteCode.EFFECT_UNKNOWN:
+        {return Reply(targetMayHaveChanged||sidecarMayHaveChanged?FileWriteCode.EFFECT_UNKNOWN:
             e is IOException && (e.HResult&0xffff) is 32 or 33 ? FileWriteCode.SHARING_VIOLATION:
             FileWriteCode.IO_ERROR);}
     }

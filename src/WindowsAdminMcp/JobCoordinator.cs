@@ -5,7 +5,7 @@ using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 
-internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposable
+internal sealed partial class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposable
 {
     private readonly object gate = new();
     private readonly SemaphoreSlim wake = new(0, 1);
@@ -83,6 +83,16 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                   PRIMARY KEY(job_id,step_index));
                 CREATE INDEX IF NOT EXISTS ix_jobs_state_seq ON jobs(state,seq);
                 CREATE INDEX IF NOT EXISTS ix_jobs_detail_retention ON jobs(updated_utc,seq) WHERE history_pruned_utc IS NULL;
+                CREATE TABLE IF NOT EXISTS file_receipts(
+                  operation_id TEXT PRIMARY KEY, actor_sid TEXT NOT NULL,
+                  target_hash TEXT NOT NULL, context TEXT NOT NULL,
+                  total_bytes INTEGER NOT NULL CHECK(total_bytes BETWEEN 0 AND 67108864),
+                  sha256 TEXT NOT NULL, policy TEXT NOT NULL,
+                  original_version TEXT, original_sha256 TEXT,
+                  state TEXT NOT NULL CHECK(state IN ('STAGED','COMMITTING','COMMITTED','ABORTED','EFFECT_UNKNOWN')),
+                  received_bytes INTEGER NOT NULL CHECK(received_bytes BETWEEN 0 AND 67108864),
+                  created_utc TEXT NOT NULL, updated_utc TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS ix_file_receipts_state ON file_receipts(state,updated_utc);
                 """,tx))schema.ExecuteNonQuery();
             if(migrating)
             {
@@ -166,9 +176,10 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
     // database connection and readback failure does not hide the queue itself.
     private StoreStorageSummary ReadStorage(SqliteTransaction? tx,long total)
     {
-        long? tombstoned=null, pages=null, free=null, dbBytes=null, walBytes=null;
+        long? tombstoned=null, pages=null, free=null, dbBytes=null, walBytes=null, receipts=null;
         try
         {
+            using(var count=Command("SELECT count(*) FROM file_receipts",tx))receipts=(long)count.ExecuteScalar()!;
             using(var count=Command("""
                 SELECT count(*) FROM jobs j WHERE j.history_pruned_utc IS NOT NULL
                   AND j.state IN ('COMPLETED','FAILED','CANCELLED','RECONCILED')
@@ -186,10 +197,10 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
             InvalidOperationException or System.Security.SecurityException)
         {
             return new(null,null,null,null,tombstoned,MetadataLimit,DatabaseBytesLimit,
-                TombstoneDays,StoreStorageState.READBACK_FAILED);
+                TombstoneDays,StoreStorageState.READBACK_FAILED,receipts,receipts is null?null:total+receipts);
         }
         return new(dbBytes,walBytes,pages,free,tombstoned,MetadataLimit,DatabaseBytesLimit,
-            TombstoneDays,ClassifyStorage(total,dbBytes,walBytes));
+            TombstoneDays,ClassifyStorage(total+receipts!.Value,dbBytes,walBytes),receipts,total+receipts);
     }
 
     // Hard upper bound on metadata and SQLite bytes. Exhaustion is a typed
@@ -211,7 +222,7 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
     // every successful command. Full typed metrics remain on status/list.
     private StoreStorageState AdmissionCapacity(SqliteTransaction tx)
     {
-        using var count=Command("SELECT count(*) FROM jobs",tx);
+        using var count=Command("SELECT (SELECT count(*) FROM jobs)+(SELECT count(*) FROM file_receipts)",tx);
         long total=(long)count.ExecuteScalar()!;
         try
         {

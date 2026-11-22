@@ -27,7 +27,15 @@ public sealed record WindowManageResult(
     [property:JsonPropertyName("foreground_changed")] bool? ForegroundChanged=null,
     [property:JsonPropertyName("effect_state")] WindowEffectState EffectState=WindowEffectState.NO_EFFECT,
     [property:JsonPropertyName("native_error")] int? NativeError=null,
-    [property:JsonPropertyName("elapsed_ms")] long? ElapsedMs=null);
+    [property:JsonPropertyName("elapsed_ms")] long? ElapsedMs=null)
+{
+    [JsonPropertyName("safe_to_retry")]
+    public bool SafeToRetry=>EffectState==WindowEffectState.NO_EFFECT &&
+        Status is WindowManageCode.INVALID_ARGUMENT or WindowManageCode.SERVICE_UNAVAILABLE or
+            WindowManageCode.USER_CONTEXT_UNAVAILABLE or WindowManageCode.DESKTOP_UNAVAILABLE or
+            WindowManageCode.STALE_WINDOW or WindowManageCode.ACCESS_DENIED or
+            WindowManageCode.WINDOW_NOT_VISIBLE or WindowManageCode.AUDIT_UNAVAILABLE;
+}
 
 public sealed record WindowGeometry(int X,int Y,int Width,int Height,bool Minimized,bool Maximized,bool Foreground);
 

@@ -25,7 +25,13 @@ public sealed record FileWriteReply(
     [property:JsonPropertyName("effect_state")] WindowEffectState EffectState=WindowEffectState.NO_EFFECT,
     [property:JsonPropertyName("stage")] string? Stage=null,
     [property:JsonPropertyName("observed_at")] DateTimeOffset? ObservedAt=null,
-    [property:JsonPropertyName("native_error")] int? NativeError=null);
+    [property:JsonPropertyName("native_error")] int? NativeError=null)
+{
+    [JsonPropertyName("safe_to_retry")]
+    public bool SafeToRetry=>EffectState==WindowEffectState.NO_EFFECT &&
+        Status is FileWriteCode.INVALID_ARGUMENT or FileWriteCode.ACCESS_DENIED or FileWriteCode.STORE_FULL or
+            FileWriteCode.SERVICE_UNAVAILABLE or FileWriteCode.USER_CONTEXT_UNAVAILABLE;
+}
 
 internal sealed record FileWriteRequest(FileWriteAction Action,string Path,string OperationId,
     CommandContext ExecutionContext,long? ExpectedBytes=null,string? ExpectedSha256=null,

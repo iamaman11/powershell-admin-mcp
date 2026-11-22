@@ -99,6 +99,13 @@ public sealed record WindowActionResult(
     [property: JsonPropertyName("execution_method"), JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)]
         WindowExecutionMethod? ExecutionMethod = null)
 {
+    [JsonPropertyName("safe_to_retry")]
+    public bool SafeToRetry => EffectState==WindowEffectState.NO_EFFECT &&
+        Status is WindowActionCode.INVALID_ARGUMENT or WindowActionCode.CONFIRMATION_REQUIRED or
+            WindowActionCode.STALE_WINDOW or WindowActionCode.STALE_ELEMENT or
+            WindowActionCode.LOCATOR_NOT_FOUND or WindowActionCode.LOCATOR_AMBIGUOUS or
+            WindowActionCode.AUDIT_UNAVAILABLE;
+
     // A successful provider call is dispatch acknowledgement, NOT proof that the UI changed.
     [JsonPropertyName("effect_state")]
     public WindowEffectState EffectState => ExpectedStateObserved == true

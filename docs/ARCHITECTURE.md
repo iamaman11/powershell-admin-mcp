@@ -54,13 +54,16 @@ frontend, not a separate permanent browser manager. No extra HTTP API.
   Directory pagination fingerprints the observed directory and returns
   `CHANGED_SINCE_LIST` rather than continuing from an invalidated cursor.
 - **Native file write (P0-A):** MCP `windows.file_write` receives one durable
-  `operation_id` with typed `BEGIN/APPEND/COMMIT/ABORT/STATUS`. It keeps a
-  bounded (1024 per directory) same-volume sidecar journal and staged bytes
-  under the actual USER or SYSTEM token. A `COMMITTING` receipt is flushed
-  before the atomic target rename. After a transport drop, query `STATUS`
-  rather than attempting an unconfirmed second write. The primary job SQLite
-  store is **not** yet the source of these upload receipts; shared owner
-  integration and physical power-loss fault tests remain unaccepted.
+  `operation_id` with typed `BEGIN/APPEND/COMMIT/ABORT/STATUS`. The existing
+  SYSTEM `JobCoordinator` now owns its immutable operation/actor/target-hash
+  SQLite row and PREPARE/OBSERVE state transition for USER and SYSTEM tools.
+  The global 100,000-row/512-MiB admission cap covers jobs **and** file receipts;
+  no second SQLite writer or separate service exists. Actual USER/SYSTEM
+  filesystem effects retain their bounded (1024 per directory) same-volume
+  sidecar journal and stage. Both SQLite intent and a local `COMMITTING`
+  receipt are flushed before atomic rename. On a lost answer, `STATUS` performs
+  native readback and reconciles SQLite. Unknown effects block an unverified
+  second COMMIT. Physical service-kill/power-loss tests remain unaccepted.
 - **Window operations (P0-B):** MCP `windows.manage_window` resolves a fresh
   HWND/process/session, calls Win32 once and compares geometry/foreground
   readback. UIA actions accept bounded `SCROLL`, `HOVER`, `DRAG` and native
@@ -103,6 +106,6 @@ bounded smoke and injected failure checks remain mandatory.
 
 Issue #56 CI fixtures exercise binary exactness (5 MiB + tail), zero bytes,
 stale version CAS, duplicate chunks, missing staging state, unique UIA locator,
-Win32 geometry, and 20,000 SQLite WAL updates with `integrity_check` and
-reopen. They do not substitute for remote installed package or real service
+Win32 geometry, and 20,000 SQLite WAL updates plus 100,000 metadata rows,
+`integrity_check`, receipt crash-recovery and reopen. They do not substitute for remote installed package or real service
 kill/power-loss evidence.
