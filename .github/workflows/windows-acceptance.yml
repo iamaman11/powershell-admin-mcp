@@ -107,6 +107,7 @@ jobs:
             if($LASTEXITCODE -ne 0){throw "NUGET_LOCK_RESTORE_FAILED: $project"}
             Write-Host ("NUGET_LOCK_GRAPH {0} {1}" -f $project,(Get-FileHash -LiteralPath $lock -Algorithm SHA256).Hash)
           }
+          ./tests/Test-NuGetLock.ps1
       - name: Exercise actual bounded PowerShell runner and typed UI contract
         if: github.event_name != 'push' || steps.provenance.outputs.full == 'true'
         shell: pwsh
