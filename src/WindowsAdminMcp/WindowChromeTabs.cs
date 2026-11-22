@@ -198,6 +198,7 @@ internal static partial class WindowChromeCdp
             return ChromeConnectionState.CONSENT_WINDOW_UNAVAILABLE;
         }
         CloseTabConnection();
+        _lastFailure = null; // A new pending handshake is not a failed attempt.
         _pendingSocket = new ClientWebSocket();
         _pendingEndpoint = endpoint;
         _pendingDeadline = new CancellationTokenSource(ConsentTimeout);
