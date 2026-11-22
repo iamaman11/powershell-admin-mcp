@@ -21,6 +21,8 @@ try {
     $result=(& dotnet restore (Join-Path $app 'WindowsAdminMcp.csproj') -r win-x64 --locked-mode -p:EnableWindowsTargeting=true 2>&1|Out-String)
     if($LASTEXITCODE -eq 0 -or $result -notmatch 'NU1004') {throw 'CHANGED_CENTRAL_PROPS_NOT_REJECTED_BY_LOCK'}
     Write-Host 'NUGET_MUTATED_PROPS_LOCK_REJECTED=PASS (NU1004)'
+    # A deliberately failing child must not become the caller's final exit code.
+    $global:LASTEXITCODE=0
 } finally {
     if(Test-Path -LiteralPath $fixture){Remove-Item -LiteralPath $fixture -Recurse -Force}
 }

@@ -4,6 +4,10 @@
 *.psd1 text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+*.json text eol=lf
+*.csproj text eol=lf
+*.props text eol=lf
+*.cs text eol=lf
 *.md text eol=lf
 .gitignore text eol=lf
 .gitattributes text eol=lf
