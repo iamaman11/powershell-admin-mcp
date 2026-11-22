@@ -75,8 +75,15 @@ try{
             @(@('window_id','element_id','action','value','confirm','element_path','expected_name','expected_change','key','expected_kind','expected_value','expected_profile','expected_origin','expected_url','observation_timeout_ms')|Where-Object {-not $actionTool[0].inputSchema.properties.Contains($_)}).Count -eq 0) 'r5.actual_tools_list_exposes_typed_semantic_uia_contract'
         $updateTool=@($list.tools|Where-Object name -eq 'powershell_update')
         Assert ($updateTool.Count -eq 1 -and $updateTool[0].inputSchema.properties.Contains('action') -and
+            $updateTool[0].inputSchema.properties.Contains('remote_acceptance_confirmed') -and
+            $updateTool[0].inputSchema.properties.Contains('expected_commit') -and
             $updateTool[0].outputSchema.properties.Contains('operation_id') -and
-            $updateTool[0].outputSchema.properties.Contains('installed_commit')) 'r5.typed_independent_operator_update_contract'
+            $updateTool[0].outputSchema.properties.Contains('installed_commit') -and
+            $updateTool[0].outputSchema.properties.Contains('operation_action')) 'r5.typed_independent_operator_update_contract'
+        Send $p 75 'tools/call' @{name='powershell_update';arguments=@{action='ACCEPT';expected_commit=('a'*40)};_meta=$meta}
+        $invalidAccept=(Receive $p 75).structuredContent
+        Assert ($invalidAccept.status -eq 'INVALID_ARGUMENT' -and
+            $invalidAccept.detail -eq 'INVALID_ACTION_ARGUMENTS') 'r5.accept_without_explicit_confirmation_denied'
         Assert ($actionTool[0].outputSchema.properties.Contains('foreground_changed') -and
             $actionTool[0].outputSchema.properties.Contains('target_activated') -and
             $actionTool[0].outputSchema.properties.Contains('effect_state') -and

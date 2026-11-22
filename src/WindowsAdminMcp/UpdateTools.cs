@@ -6,14 +6,14 @@ using System.Text.Json.Serialization;
 using ModelContextProtocol.Server;
 
 [JsonConverter(typeof(JsonStringEnumConverter<UpdateToolAction>))]
-public enum UpdateToolAction { REQUEST, STATUS }
+public enum UpdateToolAction { REQUEST, STATUS, ACCEPT }
 
 [JsonConverter(typeof(JsonStringEnumConverter<UpdateToolCode>))]
 public enum UpdateToolCode
 {
     REQUESTED, RUNNING, COMPLETED, NO_UPDATE, FAILED, NOT_REQUESTED,
     REQUEST_UNKNOWN, UNAUTHORIZED, SERVICE_UNAVAILABLE, PACKAGE_UNVERIFIED,
-    OPERATOR_UNAVAILABLE, OPERATOR_FAILED
+    OPERATOR_UNAVAILABLE, OPERATOR_FAILED, INVALID_ARGUMENT, CONFLICT, NO_PENDING_ACCEPTANCE
 }
 
 public sealed record UpdateToolResult(
@@ -25,7 +25,9 @@ public sealed record UpdateToolResult(
     [property: JsonPropertyName("rollback_pending")] bool? RollbackPending = null,
     [property: JsonPropertyName("task_state")] string? TaskState = null,
     [property: JsonPropertyName("last_task_result")] int? LastTaskResult = null,
-    [property: JsonPropertyName("detail")] string? Detail = null);
+    [property: JsonPropertyName("detail")] string? Detail = null,
+    [property: JsonPropertyName("operation_action"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        UpdateToolAction? OperationAction = null);
 
 internal sealed record UpdateTaskWire(
     [property: JsonPropertyName("status")] string Status,
@@ -36,17 +38,20 @@ internal sealed record UpdateTaskWire(
     [property: JsonPropertyName("rollback_pending")] bool? RollbackPending = null,
     [property: JsonPropertyName("task_state")] string? TaskState = null,
     [property: JsonPropertyName("task")] string? Task = null,
-    [property: JsonPropertyName("last_task_result")] int? LastTaskResult = null);
+    [property: JsonPropertyName("last_task_result")] int? LastTaskResult = null,
+    [property: JsonPropertyName("operation_action")] UpdateToolAction? OperationAction = null);
 
 [McpServerToolType]
 public sealed class UpdateTools
 {
     [McpServerTool(Name = "powershell_update", UseStructuredContent = true),
-     Description("Request a verified independent Scheduler update or read its durable outcome after reconnect.")]
+     Description("Request a verified Scheduler update, explicitly accept an exact installed commit, or read the durable outcome.")]
     public static async Task<UpdateToolResult> Update(UpdateToolAction action,
+        bool remote_acceptance_confirmed = false, string? expected_commit = null,
         CancellationToken cancellationToken = default)
     {
-        if (!Enum.IsDefined(action)) return new(UpdateToolCode.OPERATOR_FAILED, Detail: "INVALID_ACTION");
+        if (!ValidArguments(action, remote_acceptance_confirmed, expected_commit))
+            return new(UpdateToolCode.INVALID_ARGUMENT, Detail: "INVALID_ACTION_ARGUMENTS");
         string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
             "WindowsAdminMCP");
         string native = Path.Combine(root, "native", "WindowsAdminMCP.exe");
@@ -65,7 +70,16 @@ public sealed class UpdateTools
             return new(UpdateToolCode.PACKAGE_UNVERIFIED, RollbackPending: pending,
                 Detail: package.Status.ToString());
 
-        if (action == UpdateToolAction.REQUEST)
+        if (action == UpdateToolAction.ACCEPT)
+        {
+            if (!string.Equals(expected_commit, package.Commit, StringComparison.Ordinal))
+                return new(UpdateToolCode.CONFLICT, InstalledCommit: package.Commit,
+                    RollbackPending: pending, Detail: "EXPECTED_COMMIT_MISMATCH");
+            if (!pending)
+                return new(UpdateToolCode.NO_PENDING_ACCEPTANCE, InstalledCommit: package.Commit,
+                    RollbackPending: false);
+        }
+        if (action is UpdateToolAction.REQUEST or UpdateToolAction.ACCEPT)
         {
             var service = await AdminTools.Status(cancellationToken: cancellationToken);
             if (service.Status != StatusCode.OK || service.ExecutionContext != CommandContext.USER ||
@@ -77,7 +91,7 @@ public sealed class UpdateTools
         if (!File.Exists(script) || !File.Exists(PowerShellRunner.Executable))
             return new(UpdateToolCode.OPERATOR_UNAVAILABLE, InstalledCommit: package.Commit,
                 RollbackPending: pending);
-        string? operationId = action == UpdateToolAction.REQUEST ? Guid.NewGuid().ToString("N") : null;
+        string? operationId = action == UpdateToolAction.STATUS ? null : Guid.NewGuid().ToString("N");
         using var process = new Process();
         var start = new ProcessStartInfo(PowerShellRunner.Executable)
         {
@@ -85,12 +99,20 @@ public sealed class UpdateTools
             RedirectStandardError = true, WorkingDirectory = root
         };
         foreach (string arg in new[] { "-NoProfile", "-NonInteractive", "-File", script,
-                     "-Action", action == UpdateToolAction.REQUEST ? "Start" : "Status" })
+                      "-Action", action == UpdateToolAction.STATUS ? "Status" : "Start" })
             start.ArgumentList.Add(arg);
         if (operationId is not null)
         {
             start.ArgumentList.Add("-OperationId");
             start.ArgumentList.Add(operationId);
+        }
+        if (action == UpdateToolAction.ACCEPT)
+        {
+            start.ArgumentList.Add("-Operation");
+            start.ArgumentList.Add("accept");
+            start.ArgumentList.Add("-ExpectedCommit");
+            start.ArgumentList.Add(expected_commit!);
+            start.ArgumentList.Add("-RemoteAcceptanceConfirmed");
         }
         start.Environment.Remove("CONTROL_PLANE_API_KEY");
         start.Environment.Remove("OPENAI_API_KEY");
@@ -109,25 +131,38 @@ public sealed class UpdateTools
             {
                 string detail = System.Text.RegularExpressions.Regex.Match(errors,
                     @"UPDATE_[A-Z0-9_]+", System.Text.RegularExpressions.RegexOptions.CultureInvariant).Value;
-                return new(action == UpdateToolAction.REQUEST ? UpdateToolCode.REQUEST_UNKNOWN :
+                return new(action != UpdateToolAction.STATUS ? UpdateToolCode.REQUEST_UNKNOWN :
                     UpdateToolCode.OPERATOR_FAILED, operationId, InstalledCommit: package.Commit,
-                    RollbackPending: pending, Detail: detail.Length == 0 ? "OPERATOR_FAILED" : detail);
+                    RollbackPending: pending, Detail: detail.Length == 0 ? "OPERATOR_FAILED" : detail,
+                    OperationAction: action == UpdateToolAction.STATUS ? null : action);
             }
             var wire = JsonSerializer.Deserialize<UpdateTaskWire>(response, PipeWire.Json);
             if (wire is null || !Enum.TryParse<UpdateToolCode>(wire.Status, false, out var code))
                 return new(UpdateToolCode.OPERATOR_FAILED, operationId, InstalledCommit: package.Commit,
                     Detail: "OPERATOR_PROTOCOL_ERROR");
             return new(code, wire.OperationId ?? operationId, wire.Stage, package.Commit,
-                wire.Commit, wire.RollbackPending ?? pending, wire.TaskState, wire.LastTaskResult, wire.Reason);
+                wire.Commit, wire.RollbackPending ?? pending, wire.TaskState, wire.LastTaskResult, wire.Reason,
+                wire.OperationAction ?? (action == UpdateToolAction.STATUS ? null : action));
         }
         catch (Exception e) when (e is OperationCanceledException or IOException or
                                   Win32Exception or JsonException or InvalidOperationException)
         {
             try { if (!process.HasExited) process.Kill(true); }
             catch (Exception x) when (x is InvalidOperationException or Win32Exception) { }
-            return new(action == UpdateToolAction.REQUEST ? UpdateToolCode.REQUEST_UNKNOWN :
+            return new(action != UpdateToolAction.STATUS ? UpdateToolCode.REQUEST_UNKNOWN :
                 UpdateToolCode.OPERATOR_UNAVAILABLE, operationId, InstalledCommit: package.Commit,
-                RollbackPending: pending, Detail: e.GetType().Name);
+                RollbackPending: pending, Detail: e.GetType().Name,
+                OperationAction: action == UpdateToolAction.STATUS ? null : action);
         }
     }
+
+    internal static bool ValidArguments(UpdateToolAction action, bool confirmed, string? commit) =>
+        action switch
+        {
+            UpdateToolAction.REQUEST or UpdateToolAction.STATUS => !confirmed && commit is null,
+            UpdateToolAction.ACCEPT => confirmed && commit is not null &&
+                System.Text.RegularExpressions.Regex.IsMatch(commit, "^[a-f0-9]{40}$",
+                    System.Text.RegularExpressions.RegexOptions.CultureInvariant),
+            _ => false
+        };
 }
