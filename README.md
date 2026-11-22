@@ -1,7 +1,7 @@
 # WindowsAdminMCP — native Windows administration
 
 Canonical source: [iamaman11/powershell-admin-mcp](https://github.com/iamaman11/powershell-admin-mcp).
-Candidate native MCP 0.8.1-dev; .NET 10 LTS (10.0.15); MCP SDK 2.4.0; official OpenAI tunnel-client 0.0.21; SQLite schema 4. The installed commit and version must be read back from the actual service. CI success is not remote acceptance. All directly referenced NuGet versions are pinned in the standard `Directory.Packages.props`; change them deliberately and run Windows PR CI before updating the installed exact-commit package. The newer .NET 11 STS major is not an automatic upgrade from the supported .NET 10 LTS branch.
+Candidate native MCP 0.8.1-dev; .NET 10 LTS (current runtime 10.0.15, build SDK 10.0.404); MCP SDK 2.4.0; official OpenAI tunnel-client 0.0.21; SQLite schema 4. The installed commit and version must be read back from the actual service. CI success is not remote acceptance. All NuGet dependencies are pinned centrally in `Directory.Packages.props` and in **four tracked `packages.lock.json` project graphs**, with an exact `global.json` SDK and a single generated tunnel vendor lock. See [dependency inventory and update rules](docs/DEPENDENCIES.md). The newer .NET 11 STS major is not an automatic upgrade from the supported .NET 10 LTS branch.
 
 ## Architecture and execution context
 

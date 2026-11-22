@@ -242,7 +242,8 @@ function Assert-InstalledUpdateSource([string]$scriptDirectory,[string]$installR
     # of the verified package before relaxing the source-checkout requirement.
     foreach($relative in @('native/installer/Install-Native.ps1',
                            'native/installer/Update-Native.ps1',
-                           'native/installer/NativeFileSwap.ps1')){
+                           'native/installer/NativeFileSwap.ps1',
+                           'native/installer/VendorLock.Generated.ps1')){
         $entry=$manifest.files.PSObject.Properties[$relative]
         if($null -eq $entry -or [string]$entry.Value -cnotmatch '^[A-Fa-f0-9]{64}$'){
             throw 'UPDATE_INSTALLED_HELPER_NOT_IN_MANIFEST'

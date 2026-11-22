@@ -45,7 +45,7 @@ internal static class PackageIntegrity
             if(m.ValueKind!=JsonValueKind.Object ||
                 !m.TryGetProperty("schema",out var schema) || schema.ValueKind!=JsonValueKind.Number || !schema.TryGetInt32(out int v) || v!=1 ||
                 !m.TryGetProperty("commit",out var commitEl) || commitEl.ValueKind!=JsonValueKind.String ||
-                !m.TryGetProperty("vendor_version",out var version) || version.ValueKind!=JsonValueKind.String || version.GetString()!="0.0.21" ||
+                !m.TryGetProperty("vendor_version",out var version) || version.ValueKind!=JsonValueKind.String || version.GetString()!=VendorLock.Version ||
                 !m.TryGetProperty("files",out var names) || names.ValueKind!=JsonValueKind.Object)
                 return new(PackageCode.INVALID_MANIFEST);
             string? commit=commitEl.GetString();
@@ -61,7 +61,14 @@ internal static class PackageIntegrity
             }
             if(!expected.ContainsKey("native/WindowsAdminMCP.exe") ||
                 !expected.ContainsKey("native/NativeStartup.ps1") ||
-                !expected.TryGetValue("client/tunnel-client-runtime.exe",out var vendor) || vendor!=TunnelHost.VendorSha256)
+                !expected.TryGetValue("client/tunnel-client-runtime.exe",out var vendor) || vendor!=VendorLock.ExecutableSha256)
+                return new(PackageCode.INVALID_MANIFEST,commit);
+            if(m.TryGetProperty("vendor_zip_sha256",out var archiveSha))
+            {
+                if(archiveSha.ValueKind!=JsonValueKind.String || archiveSha.GetString()!=VendorLock.ZipSha256)
+                    return new(PackageCode.INVALID_MANIFEST,commit);
+            }
+            else if(expected.ContainsKey("native/installer/VendorLock.Generated.ps1"))
                 return new(PackageCode.INVALID_MANIFEST,commit);
             var visited=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var pending=new Stack<DirectoryInfo>();

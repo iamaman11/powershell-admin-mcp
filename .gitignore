@@ -11,5 +11,7 @@ client.zip
 *.exe
 *.log
 *.jsonl
+**/bin/
+**/obj/
 *secret*
 *token*

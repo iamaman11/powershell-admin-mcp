@@ -17,5 +17,5 @@ internal static class BuildIdentity
         ??throw new InvalidOperationException("Assembly informational version missing.");
     internal static string McpVersion=>InformationalVersion.Split('+')[0];
     internal static VersionIdentity Observe()=>new(McpVersion,Assembly.GetName().Version?.ToString()??"",
-        InformationalVersion,RuntimeInformation.FrameworkDescription,"0.0.21",StoreSchema.Current);
+        InformationalVersion,RuntimeInformation.FrameworkDescription,VendorLock.Version,StoreSchema.Current);
 }

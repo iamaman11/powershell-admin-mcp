@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "name": "openai/tunnel-client",
+  "version": "0.0.21",
+  "asset": "tunnel-client-runtime-v0.0.21-windows-amd64.zip",
+  "source": "https://github.com/openai/tunnel-client/releases/download/v0.0.21/tunnel-client-runtime-v0.0.21-windows-amd64.zip",
+  "zip_sha256": "D991623BD171049E2100B402D72AF7EBC8EDF558051AE8FC924173373D1611A8",
+  "executable": "tunnel-client-runtime.exe",
+  "exe_sha256": "DB590A52993C830A4C806108C3F25345EA986C6248210B86DF640E5081FF6A0B"
+}

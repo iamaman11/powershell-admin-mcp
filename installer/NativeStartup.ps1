@@ -8,6 +8,10 @@ param([ValidateSet('Plan','Prepare','Accept','RemoveTrial','Status','Start','Sto
       [switch]$RemoteAcceptanceConfirmed)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
+# Source layout: installer/*.ps1. Installed layout: native/NativeStartup.ps1.
+$pinFile=Join-Path $PSScriptRoot 'VendorLock.Generated.ps1'
+if(-not(Test-Path -LiteralPath $pinFile -PathType Leaf)){$pinFile=Join-Path $PSScriptRoot 'installer/VendorLock.Generated.ps1'}
+. $pinFile
 $root=Join-Path $env:ProgramFiles 'WindowsAdminMCP'
 $native=Join-Path $root 'native\WindowsAdminMCP.exe'
 $vendor=Join-Path $root 'client\tunnel-client-runtime.exe'
@@ -42,7 +46,7 @@ function Get-State {
 function Assert-Installed {
     if(-not $ExpectedNativeSha256){throw 'EXPECTED_NATIVE_DIGEST_REQUIRED'}
     if((Get-FileHash -LiteralPath $native -Algorithm SHA256).Hash -ne $ExpectedNativeSha256 -or
-        (Get-FileHash -LiteralPath $vendor -Algorithm SHA256).Hash -ne 'DB590A52993C830A4C806108C3F25345EA986C6248210B86DF640E5081FF6A0B'){throw 'INSTALLATION_HASH_MISMATCH'}
+        (Get-FileHash -LiteralPath $vendor -Algorithm SHA256).Hash -cne $VendorLockExeSha256){throw 'INSTALLATION_HASH_MISMATCH'}
     $svc=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
     if(-not $svc -or $svc.PathName -ine ('"'+$native+'" service') -or $svc.StartName -ne 'LocalSystem'){throw 'SCM_IDENTITY_MISMATCH'}
     return $svc
@@ -92,7 +96,7 @@ function Assert-RemoteEvidence {
             $health=$response.Content.ReadAsStringAsync().GetAwaiter().GetResult()|ConvertFrom-Json -AsHashtable
         }finally{$response.Dispose()}
     }finally{$http.Dispose()}
-    if($health.schema_version -ne 1 -or $health.ready -ne $true -or $health.runtime.version -notmatch '^0\.0\.21(?:\+|$)'){throw 'TRIAL_HEALTH_INVALID'}
+    if($health.schema_version -ne 1 -or $health.ready -ne $true -or $health.runtime.version -notmatch ('^'+[regex]::Escape($VendorLockVersion)+'(?:\+|$)')){throw 'TRIAL_HEALTH_INVALID'}
     $m=$health.components['mcp']
     $c=$health.components['control-plane']
     $delivery=$health.components['response-delivery']

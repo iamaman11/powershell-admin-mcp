@@ -10,6 +10,7 @@ param([ValidateSet('Verify','Install','Rollback','Prepare','Accept','Maintenance
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
 if($ReplaceUnaccepted -and $Action -ne 'Install'){throw 'REPLACE_UNACCEPTED_INSTALL_ONLY'}
 . (Join-Path $PSScriptRoot 'NativeFileSwap.ps1')
+. (Join-Path $PSScriptRoot 'VendorLock.Generated.ps1')
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
 if(-not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'ADMIN_REQUIRED'}
 if($PSVersionTable.PSVersion.Major -lt 7 -or [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64'){throw 'WINDOWS_X64_PWSH7_REQUIRED'}
@@ -46,7 +47,11 @@ function Read-Manifest($dir){
     $p=Join-Path $dir 'manifest.json'
     Assert-Protected $p
     $m=Get-Content -LiteralPath $p -Raw|ConvertFrom-Json -AsHashtable
-    if($m.schema -ne 1 -or $m.vendor_version -ne '0.0.21' -or $m.commit -cnotmatch '^[a-f0-9]{40}$' -or $m.files -isnot [Collections.IDictionary]){throw 'MANIFEST_INVALID'}
+    if($m.schema -ne 1 -or $m.vendor_version -cne $VendorLockVersion -or $m.commit -cnotmatch '^[a-f0-9]{40}$' -or $m.files -isnot [Collections.IDictionary]){throw 'MANIFEST_INVALID'}
+    # Existing rollback backups predate the lock; all new lock-bearing packages must include it.
+    $hasPin=$m.files -is [Collections.IDictionary] -and $m.files.Contains('native/installer/VendorLock.Generated.ps1')
+    if(($hasPin -and -not $m.Contains('vendor_zip_sha256')) -or
+       ($m.Contains('vendor_zip_sha256') -and $m.vendor_zip_sha256 -cne $VendorLockZipSha256)){throw 'VENDOR_ZIP_LOCK_MISMATCH'}
     if($m.Contains('store_schema') -and $m.store_schema -notin @(2,3,4)){throw 'MANIFEST_STORE_SCHEMA_INVALID'}
     if($m.files.Count -lt 3 -or $m.files.Count -gt 2000){throw 'MANIFEST_SIZE_INVALID'}
     $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -60,7 +65,7 @@ function Read-Manifest($dir){
     foreach($required in @('native/WindowsAdminMCP.exe','native/NativeStartup.ps1','client/tunnel-client-runtime.exe')){
         if(-not $m.files.Contains($required)){throw 'PACKAGE_REQUIRED_FILE_MISSING'}
     }
-    if($m.files['client/tunnel-client-runtime.exe'] -ne 'DB590A52993C830A4C806108C3F25345EA986C6248210B86DF640E5081FF6A0B'){throw 'VENDOR_HASH_INVALID'}
+    if($m.files['client/tunnel-client-runtime.exe'] -cne $VendorLockExeSha256){throw 'VENDOR_HASH_INVALID'}
     foreach($sub in @('native','client')){
         $path=Join-Path $dir $sub
         Assert-Protected $path

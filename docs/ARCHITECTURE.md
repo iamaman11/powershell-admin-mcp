@@ -70,7 +70,8 @@ uses one transaction/FK owner, no external writer or auto-replay.
 ## Current version and test references
 
 Baseline before #56: `605abdbe`; first accepted cleanup commit: `d656b7b`, SDK ModelContextProtocol `2.4.0`,
-.NET 10 LTS, tunnel runtime `0.0.21`, PowerShell 7.6 LTS.
+.NET 10 LTS (build SDK pinned to `10.0.404`), tunnel runtime `0.0.21`, PowerShell 7.6 LTS.
+Version provenance and explicit upgrade/rollback rules live in [`DEPENDENCIES.md`](DEPENDENCIES.md).
 CI workflow: `.github/workflows/windows-acceptance.yml`. Exact installed
 package/physical acceptance is separate from Windows CI. `NOT_TESTED` must not
 be rendered as PASS or FAIL. The 24-hour soak is outside the required scope;
