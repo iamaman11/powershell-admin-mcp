@@ -76,6 +76,7 @@ internal static class WindowPhysicalClick
         WindowFailureStage stage = WindowFailureStage.ACTIVATE_WINDOW;
         try
         {
+            var current = target.Current;
             // Chrome web content can be clicked through its explicitly opted-in
             // DevTools connection without stealing desktop focus or mouse position.
             var background = allowCdp ? WindowChromeCdp.TryDispatch(hwnd, target, request, clock) : null;
