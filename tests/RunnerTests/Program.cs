@@ -241,10 +241,27 @@ using (var profileFixture = System.Text.Json.JsonDocument.Parse("""
         ChromeProfileCatalog.MatchesSelector(new(null, signedIn.Id, signedIn.Name,
             signedIn.Email, signedIn.Source, null, null), "Profile 5"),
         "chrome.profile_selection_uses_exact_native_identity_and_email_provenance");
+
+    var openProfiles = new ChromeProfileInfo[]
+    {
+        new(testWindowId, "Profile 5", "Valer", "pvisakp@gmail.com",
+            ChromeProfileEmailSource.SIGNED_IN_ACCOUNT, 4242, 1),
+        new(WindowCatalog.FormatId(testWindowIdentity with { Handle = 0x22222 }),
+            "Profile 9", "Valer", "other@domain.test",
+            ChromeProfileEmailSource.SIGNED_IN_ACCOUNT, 4242, 1),
+        new(null, "Profile 8", "Closed", "closed@domain.test",
+            ChromeProfileEmailSource.SIGNED_IN_ACCOUNT, null, null)
+    };
+    Check(ChromeProfileCatalog.OpenMatches(openProfiles, "pvisakp@gmail.com").Length == 1 &&
+        ChromeProfileCatalog.OpenMatches(openProfiles, "Valer").Length == 2 &&
+        ChromeProfileCatalog.OpenMatches(openProfiles, "closed@domain.test").Length == 0,
+        "chrome.email_selector_only_uses_unique_open_windows");
 }
 Check(ChromeConnectionTools.ValidArguments(ChromeConnectionAction.LIST, null, null) &&
     !ChromeConnectionTools.ValidArguments(ChromeConnectionAction.LIST, testWindowId, "Valer") &&
     ChromeConnectionTools.ValidArguments(ChromeConnectionAction.REQUEST, testWindowId, "Valer") &&
+    ChromeConnectionTools.ValidArguments(ChromeConnectionAction.REQUEST, null, "pvisakp@gmail.com") &&
+    ChromeConnectionTools.ValidArguments(ChromeConnectionAction.STATUS, null, "pvisakp@gmail.com") &&
     ChromeConnectionTools.ValidArguments(ChromeConnectionAction.STATUS, testWindowId, "Valer") &&
     ChromeConnectionTools.ValidArguments(ChromeConnectionAction.DISCONNECT, testWindowId, "Valer") &&
     !ChromeConnectionTools.ValidArguments(ChromeConnectionAction.REQUEST, testWindowId, null) &&
@@ -267,6 +284,9 @@ Check(new ChromeBrokerRequest(Connection: connectRequest).Valid &&
     System.Text.Json.JsonSerializer.Deserialize<ChromeConnectionState>(
         "\"CONSENT_WINDOW_UNAVAILABLE\"", PipeWire.Json) ==
         ChromeConnectionState.CONSENT_WINDOW_UNAVAILABLE &&
+    System.Text.Json.JsonSerializer.Deserialize<ChromeConnectionState>(
+        "\"CONSENT_TIMED_OUT\"", PipeWire.Json) == ChromeConnectionState.CONSENT_TIMED_OUT &&
+    WindowChromeCdp.ConsentTimeout == TimeSpan.FromMinutes(5) &&
     connectReply.NextAction == ChromeConnectionNextAction.ALLOW_CHROME_PROMPT,
     "chrome.connection_consent_pending_is_typed_and_not_a_grant");
 Check(WindowAction.WindowTitleMatches("Example Domain — Camoufox", "Example Domain") &&
@@ -297,6 +317,22 @@ var chromeAction = new WindowActionRequest(testWindowId, freshTabRef,
     WindowActionKind.CLICK, null, ExpectedProfile: "Valer");
 var chromeUiaAction = new WindowActionRequest(testWindowId, freshElementId,
     WindowActionKind.CLICK, null, ExpectedProfile: "Valer");
+string expiredStamp = DateTimeOffset.UtcNow.AddMinutes(-1).ToUnixTimeMilliseconds().ToString("x");
+string staleElementId = "e1:" + expiredStamp + ":0123456789abcdef0123456789abcdef";
+string staleTabRef = "c1:" + expiredStamp +
+    ":0123456789abcdef0123456789abcdef:1:loader:0123456789abcdef0123456789abcdef";
+Check(!WindowInspector.TryParseElementRef(staleElementId, out _) &&
+    WindowInspector.WellFormedElementRef(staleElementId, out _) &&
+    !WindowChromeCdp.ValidTabElementRef(staleTabRef) &&
+    WindowChromeCdp.WellFormedTabElementRef(staleTabRef) &&
+    WindowAction.InvalidCode(chromeUiaAction with { ElementId = staleElementId }) ==
+        WindowActionCode.STALE_ELEMENT &&
+    WindowAction.InvalidCode(chromeAction with { ElementId = staleTabRef }) ==
+        WindowActionCode.STALE_ELEMENT &&
+    WindowAction.InvalidCode(chromeAction with { ElementId = "broken" }) ==
+        WindowActionCode.INVALID_ARGUMENT &&
+    new ChromeBrokerRequest(Action: chromeAction with { ElementId = staleTabRef }).Valid,
+    "windows.expired_element_refs_are_stale_not_invalid_arguments");
 Check(WindowChromeCdp.ValidTabElementRef(freshTabRef) && WindowAction.Valid(chromeAction) &&
     !WindowAction.Valid(chromeAction with { ExpectedProfile = null }) &&
     new ChromeBrokerRequest(Action: chromeAction).Valid &&

@@ -139,7 +139,7 @@ public sealed class WindowTools
             element_path, expected_name, expected_change, key, expected_kind,
             expected_value, expected_profile, expected_origin, expected_url, observation_timeout_ms,
             expected_enabled_name, expected_enabled);
-        if (!WindowAction.Valid(request)) return new(WindowActionCode.INVALID_ARGUMENT);
+        if (!WindowAction.Valid(request)) return new(WindowAction.InvalidCode(request));
         if (!confirm) return new(WindowActionCode.CONFIRMATION_REQUIRED);
 
         var status = await AdminTools.Status(cancellationToken: cancellationToken);

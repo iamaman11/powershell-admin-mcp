@@ -95,16 +95,27 @@ public sealed record WindowActionResult(
 // provider can still change focus on its own; report the observed result.
 internal static class WindowAction
 {
-    internal static bool Valid(WindowActionRequest request) =>
+    internal static bool Valid(WindowActionRequest request) => ValidCore(request, requireFresh: true);
+
+    internal static WindowActionCode InvalidCode(WindowActionRequest request) =>
+        ValidCore(request, requireFresh: false) ? WindowActionCode.STALE_ELEMENT :
+            WindowActionCode.INVALID_ARGUMENT;
+
+    private static bool ValidCore(WindowActionRequest request, bool requireFresh)
+    {
+        bool uiaRef = requireFresh ? WindowInspector.TryParseElementRef(request.ElementId, out _) :
+            WindowInspector.WellFormedElementRef(request.ElementId, out _);
+        bool tabRef = requireFresh ? WindowChromeCdp.ValidTabElementRef(request.ElementId) :
+            WindowChromeCdp.WellFormedTabElementRef(request.ElementId);
+        return
         WindowCatalog.TryParseId(request.WindowId, out _) &&
         WindowChromeCdp.ContextArgumentError(request.ExpectedProfile, request.ExpectedOrigin,
             request.ExpectedUrl) is null &&
-        (!WindowChromeCdp.ValidTabElementRef(request.ElementId) || request.ExpectedProfile is not null) &&
-        (WindowChromeCdp.ValidTabElementRef(request.ElementId) ||
+        (!tabRef || request.ExpectedProfile is not null) &&
+        (tabRef ||
             request.ExpectedOrigin is null && request.ExpectedUrl is null) &&
-        (WindowInspector.TryParseElementRef(request.ElementId, out _) ||
-         WindowChromeCdp.ValidTabElementRef(request.ElementId)) &&
-        (request.ElementPath is null || WindowInspector.TryParseElementRef(request.ElementId, out _) &&
+        (uiaRef || tabRef) &&
+        (request.ElementPath is null || uiaRef &&
          WindowInspector.TryParsePath(request.ElementPath, out _)) &&
         Enum.IsDefined(request.Action) &&
         Enum.IsDefined(request.ExpectedKind) &&
@@ -130,10 +141,11 @@ internal static class WindowAction
         (request.Action is WindowActionKind.SET_VALUE or WindowActionKind.TYPE_TEXT ?
             request.Value is { Length: <= 4096 } && request.Value?.Contains('\0') == false :
             request.Value is null);
+    }
 
     internal static WindowActionResult InvokeInWorker(WindowActionRequest request)
     {
-        if (!Valid(request)) return new(WindowActionCode.INVALID_ARGUMENT);
+        if (!Valid(request)) return new(InvalidCode(request));
         using var self = Process.GetCurrentProcess();
         var desktop = DesktopCapture.ObserveDesktop(self.SessionId);
         if (desktop.Code != CaptureCode.COMPLETED)
@@ -150,8 +162,9 @@ internal static class WindowAction
     {
         var clock = Stopwatch.StartNew();
         if (hwnd == IntPtr.Zero || !Valid(request))
-            return new(WindowActionCode.INVALID_ARGUMENT, ElapsedMs: clock.ElapsedMilliseconds);
-        if (WindowChromeCdp.ValidTabElementRef(request.ElementId))
+            return new(hwnd == IntPtr.Zero ? WindowActionCode.INVALID_ARGUMENT : InvalidCode(request),
+                ElapsedMs: clock.ElapsedMilliseconds);
+        if (WindowChromeCdp.WellFormedTabElementRef(request.ElementId))
         {
             if (!WindowChromeCdp.VerifiedChromeProfile(hwnd, request.ExpectedProfile!))
                 return new(WindowActionCode.CDP_CONTEXT_MISMATCH,

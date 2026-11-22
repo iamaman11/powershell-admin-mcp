@@ -146,7 +146,11 @@ try{
     Assert ($badAction.status -eq 'INVALID_ARGUMENT' -and -not $badAction.effect_unknown) 'windows.mcp_invalid_action_ref'
     Send $a 36 'tools/call' @{name='windows.invoke_element';arguments=@{window_id='w1:7fffffffffffffff:1092:1dbaf8d88b62800:1';element_id='e1:1:00000000000000000000000000000000';action='INVOKE';confirm=$false};_meta=$meta}
     $unconfirmedAction=(Receive $a 36).structuredContent
-    Assert ($unconfirmedAction.status -in @('INVALID_ARGUMENT','CONFIRMATION_REQUIRED')) 'windows.action_requires_confirmation'
+    Assert ($unconfirmedAction.status -eq 'STALE_ELEMENT') 'windows.expired_element_is_typed_before_confirmation'
+    $freshRef='e1:'+([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds().ToString('x'))+':00000000000000000000000000000000'
+    Send $a 90 'tools/call' @{name='windows.invoke_element';arguments=@{window_id='w1:7fffffffffffffff:1092:1dbaf8d88b62800:1';element_id=$freshRef;action='INVOKE';confirm=$false};_meta=$meta}
+    $unconfirmedFresh=(Receive $a 90).structuredContent
+    Assert ($unconfirmedFresh.status -eq 'CONFIRMATION_REQUIRED') 'windows.action_requires_confirmation'
     $invalidActionWorker=('{}' | & $Exe window-action-worker | ConvertFrom-Json)
     Assert ($invalidActionWorker.status -eq 'INVALID_ARGUMENT') 'windows.invalid_worker_payload'
     $inspectorWorker=(& $Exe window-inspect-worker 'bad' 3 60 | ConvertFrom-Json)
