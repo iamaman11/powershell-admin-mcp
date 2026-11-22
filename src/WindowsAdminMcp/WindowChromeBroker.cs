@@ -2,9 +2,9 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Text.Json;
 
-// A single USER-session child owns Chrome's consented CDP connection across
-// MCP calls. It cannot serve a different browser process/profile without a
-// fresh, explicitly named request and a new connection. No service or listener.
+// One USER-session child owns Chrome's consented CDP connection. Profiles in
+// the same browser process share that connection; each request still verifies
+// its own native window and explicit profile selector. No extra service.
 internal sealed record ChromeBrokerRequest(WindowInspectRequest? Inspect = null,
     WindowActionRequest? Action = null, ChromeConnectionRequest? Connection = null)
 {
@@ -34,19 +34,16 @@ internal static class WindowChromeBroker
 
     static WindowChromeBroker() => AppDomain.CurrentDomain.ProcessExit += (_, _) => Stop();
 
-    internal static bool SameBinding(string windowId, string profile,
-        string otherWindowId, string otherProfile) =>
+    internal static bool SameBrowser(string windowId, string otherWindowId) =>
         WindowCatalog.TryParseId(windowId, out var first) &&
         WindowCatalog.TryParseId(otherWindowId, out var second) &&
         first.ProcessId == second.ProcessId && first.StartFileTimeUtc == second.StartFileTimeUtc &&
-        first.SessionId == second.SessionId &&
-        string.Equals(profile, otherProfile, StringComparison.OrdinalIgnoreCase);
+        first.SessionId == second.SessionId;
 
     private static string Binding(ChromeBrokerRequest request)
     {
         WindowCatalog.TryParseId(request.WindowId, out var id);
-        return $"{id.ProcessId:x}:{id.StartFileTimeUtc:x}:{id.SessionId:x}:" +
-            request.Profile!.ToUpperInvariant();
+        return $"{id.ProcessId:x}:{id.StartFileTimeUtc:x}:{id.SessionId:x}";
     }
 
     internal static bool ReplyMatches(ChromeBrokerRequest request, ChromeBrokerReply? reply) =>
@@ -181,16 +178,13 @@ internal static class WindowChromeBroker
         using var parent = TryParent(parentPid);
         if (parent is null) return;
         Task parentExit = parent.WaitForExitAsync();
-        string? boundWindow = null, boundProfile = null;
+        string? boundWindow = null;
         try
         {
             while (true)
             {
-                using var idle = new CancellationTokenSource();
                 Task<string?> read = Console.In.ReadLineAsync();
-                Task finished = await Task.WhenAny(read, parentExit,
-                    Task.Delay(TimeSpan.FromMinutes(5), idle.Token));
-                await idle.CancelAsync();
+                Task finished = await Task.WhenAny(read, parentExit);
                 if (finished != read) return;
                 string? json = await read;
                 if (json is null) return;
@@ -200,12 +194,11 @@ internal static class WindowChromeBroker
                     var request = json.Length <= 30000
                         ? JsonSerializer.Deserialize<ChromeBrokerRequest>(json, PipeWire.Json) : null;
                     if (request is null || !request.Valid || boundWindow is not null &&
-                        !SameBinding(boundWindow, boundProfile!, request.WindowId, request.Profile!))
+                        !SameBrowser(boundWindow, request.WindowId))
                         reply = new(Inspect: new(WindowInspectCode.INVALID_ARGUMENT, []));
                     else
                     {
                         boundWindow ??= request.WindowId;
-                        boundProfile ??= request.Profile;
                         reply = request.Connection is { } connection
                             ? new(Connection: WindowChromeCdp.ConnectInWorker(connection))
                             : request.Inspect is { } inspect
