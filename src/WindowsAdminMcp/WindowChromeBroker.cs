@@ -31,6 +31,8 @@ internal static class WindowChromeBroker
     private static Process? _worker;
     private static string? _binding;
     private static bool _firstExchange;
+    private static bool _hadConnected;
+    private static string? _lastConnectedBinding;
 
     static WindowChromeBroker() => AppDomain.CurrentDomain.ProcessExit += (_, _) => Stop();
 
@@ -64,7 +66,12 @@ internal static class WindowChromeBroker
             { return new(ChromeConnectionCode.WORKER_FAILED, ChromeConnectionState.NOT_REQUESTED); }
             try
             {
-                if (_binding == Binding(new(Connection: request))) Stop();
+                if (_binding == Binding(new(Connection: request)))
+                {
+                    Stop();
+                    _hadConnected = false;
+                    _lastConnectedBinding = null;
+                }
                 return new(ChromeConnectionCode.OK, ChromeConnectionState.DISCONNECTED);
             }
             finally { Gate.Release(); }
@@ -102,9 +109,20 @@ internal static class WindowChromeBroker
             if (request.Connection?.Action == ChromeConnectionAction.STATUS &&
                 (_worker is null || _worker.HasExited || _binding != binding))
                 return new(Connection: new(ChromeConnectionCode.OK,
-                    ChromeConnectionState.NOT_REQUESTED, ChromeConnectionNextAction.RETRY_CONNECTION));
+                    _hadConnected && _lastConnectedBinding == binding ? ChromeConnectionState.CONNECTION_LOST :
+                        ChromeConnectionState.NOT_REQUESTED,
+                    ChromeConnectionNextAction.RETRY_CONNECTION,
+                    FailureReason: _hadConnected && _lastConnectedBinding == binding
+                        ? ChromeConnectionFailureReason.BROKER_EXITED : null,
+                    LastLossReason: _hadConnected && _lastConnectedBinding == binding
+                        ? ChromeConnectionFailureReason.BROKER_EXITED : null));
             if (_worker is null || _worker.HasExited || _binding != binding)
             {
+                if (_binding is not null && _binding != binding)
+                {
+                    _hadConnected = false;
+                    _lastConnectedBinding = null;
+                }
                 Stop();
                 _worker = Start();
                 _binding = _worker is null ? null : binding;
@@ -126,6 +144,13 @@ internal static class WindowChromeBroker
                     throw new JsonException("CDP_BROKER_OUTPUT_INVALID");
                 var reply = JsonSerializer.Deserialize<ChromeBrokerReply>(json, PipeWire.Json);
                 if (!ReplyMatches(request, reply)) throw new JsonException("CDP_BROKER_REPLY_MISMATCH");
+                if (reply?.Connection?.State == ChromeConnectionState.CONNECTED ||
+                    reply?.Inspect?.Status == WindowInspectCode.COMPLETED ||
+                    reply?.Action?.ExecutionMethod == WindowExecutionMethod.CHROME_CDP)
+                {
+                    _hadConnected = true;
+                    _lastConnectedBinding = binding;
+                }
                 _firstExchange = false;
                 return reply;
             }

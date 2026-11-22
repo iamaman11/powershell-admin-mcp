@@ -22,7 +22,15 @@ public enum ChromeConnectionState
 {
     NOT_REQUESTED, DEBUGGING_UNAVAILABLE, CONSENT_PENDING, CONNECTED,
     CONSENT_NOT_CONFIRMED, CONSENT_TIMED_OUT, CONNECTION_FAILED,
-    CONSENT_WINDOW_UNAVAILABLE, DISCONNECTED
+    CONSENT_WINDOW_UNAVAILABLE, DISCONNECTED, CONNECTION_LOST
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<ChromeConnectionFailureReason>))]
+public enum ChromeConnectionFailureReason
+{
+    SOCKET_CLOSED, TRANSPORT_ERROR, TIMEOUT, PROTOCOL_ERROR, BROKER_EXITED,
+    WINDOW_HIDDEN, WINDOW_MINIMIZED, FOREGROUND_DENIED,
+    CONSENT_TIMEOUT, HANDSHAKE_FAILED
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<ChromeConnectionNextAction>))]
@@ -55,7 +63,11 @@ public sealed record ChromeConnectionResult(
     [property: JsonPropertyName("profiles"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         ChromeProfileInfo[]? Profiles = null,
     [property: JsonPropertyName("detail"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        string? Detail = null);
+        string? Detail = null,
+    [property: JsonPropertyName("failure_reason"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        ChromeConnectionFailureReason? FailureReason = null,
+    [property: JsonPropertyName("last_loss_reason"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        ChromeConnectionFailureReason? LastLossReason = null);
 
 internal sealed record ChromeConnectionRequest(string WindowId, string ExpectedProfile,
     ChromeConnectionAction Action);
