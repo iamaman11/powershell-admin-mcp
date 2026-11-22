@@ -65,11 +65,15 @@ try{
         Send $p 1 'tools/list' @{_meta=$meta}
         $list=Receive $p 1
         $names=@($list.tools|ForEach-Object {$_.name})
-        $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element','powershell_update')
+        $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element','windows.chrome_connection','powershell_update')
         Assert (@($required|Where-Object {$_ -notin $names}).Count -eq 0 -and $names.Count -eq @($names|Select-Object -Unique).Count) 'r5.required_window_tools_without_duplicates'
         $inspectTool=@($list.tools|Where-Object name -eq 'windows.inspect_window')
         $actionTool=@($list.tools|Where-Object name -eq 'windows.invoke_element')
         $statusTool=@($list.tools|Where-Object name -eq 'powershell_status')
+        $chromeTool=@($list.tools|Where-Object name -eq 'windows.chrome_connection')
+        Assert ($chromeTool.Count -eq 1 -and
+            @(@('action','window_id','expected_profile')|Where-Object {-not $chromeTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
+            @(@('status','state','next_action','profile','profiles')|Where-Object {-not $chromeTool[0].outputSchema.properties.Contains($_)}).Count -eq 0) 'chrome.typed_multi_profile_and_consent_lifecycle'
         Assert ($inspectTool.Count -eq 1 -and $actionTool.Count -eq 1 -and
             @(@('window_id','max_depth','max_elements','start_path','start_element_id','offset','include_details','name_contains','role_filter','wait_ms','scope','tab_id','expected_profile','expected_origin','expected_url')|Where-Object {-not $inspectTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
             @(@('window_id','element_id','action','value','confirm','element_path','expected_name','expected_change','key','expected_kind','expected_value','expected_profile','expected_origin','expected_url','observation_timeout_ms')|Where-Object {-not $actionTool[0].inputSchema.properties.Contains($_)}).Count -eq 0) 'r5.actual_tools_list_exposes_typed_semantic_uia_contract'
@@ -94,9 +98,8 @@ try{
             $statusTool[0].outputSchema.properties.Contains('diagnostics')) 'r5.optional_typed_doctor_without_new_tool'
         $schemaBytes=[Text.Encoding]::UTF8.GetByteCount(($list|ConvertTo-Json -Depth 30 -Compress))
         Write-Host "MCP_TOOLS_LIST_BYTES=$schemaBytes"
-        # The optional doctor summary adds typed component/reason/next-action enums
-        # to the existing nine-tool catalog; keep its total output bounded.
-        Assert ($schemaBytes -le 31000) 'r5.typed_tool_schema_under_31kib'
+        # Typed Chrome profile discovery and consent states increase the catalog.
+        Assert ($schemaBytes -le 37000) 'r6.typed_tool_schema_under_37kib'
         Assert (@($list.tools|Where-Object {$_.name -eq 'powershell_status' -and $_.Contains('outputSchema')}).Count -eq 1) 'r1.typed_status_schema'
         $v=Wait-Status $p 'OK'
         Assert ($v.service_pid -eq $svc.ProcessId -and $v.execution_sid -eq 'S-1-5-18' -and $v.elevated) 'r1.scm_pid_and_real_execution_identity'
@@ -112,6 +115,12 @@ try{
     Send $a 31 'tools/call' @{name='windows.list_windows';arguments=@{max_windows=0};_meta=$meta}
     $invalidWindowList=(Receive $a 31).structuredContent
     Assert ($invalidWindowList.status -eq 'INVALID_ARGUMENT' -and @($invalidWindowList.windows).Count -eq 0) 'windows.mcp_invalid_limit'
+    Send $a 76 'tools/call' @{name='windows.chrome_connection';arguments=@{action='REQUEST';window_id='bad';expected_profile='Profile 5'};_meta=$meta}
+    $badConnection=(Receive $a 76).structuredContent
+    Assert ($badConnection.status -eq 'INVALID_ARGUMENT' -and $badConnection.state -eq 'NOT_REQUESTED') 'chrome.invalid_window_cannot_request_consent'
+    Send $a 77 'tools/call' @{name='windows.chrome_connection';arguments=@{action='LIST'};_meta=$meta}
+    $restrictedProfiles=(Receive $a 77).structuredContent
+    Assert ($restrictedProfiles.status -eq 'USER_CONTEXT_UNAVAILABLE' -and $restrictedProfiles.state -eq 'NOT_REQUESTED') 'chrome.no_profile_enumeration_without_user_context'
     Send $a 32 'tools/call' @{name='windows.list_windows';arguments=@{max_windows=1};_meta=$meta}
     $restrictedWindowList=(Receive $a 32).structuredContent
     Assert ($restrictedWindowList.status -eq 'USER_CONTEXT_UNAVAILABLE' -and @($restrictedWindowList.windows).Count -eq 0) 'windows.reject_unbound_ci_frontend'

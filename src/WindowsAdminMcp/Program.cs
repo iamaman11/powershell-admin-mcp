@@ -156,6 +156,13 @@ else if (args is ["window-cdp-worker", var parentPid] &&
     // credential access; exits when the MCP frontend exits.
     await WindowChromeBroker.RunWorkerAsync(cdpParentPid);
 }
+else if (args is ["window-chrome-profiles-worker"])
+{
+    // No CDP access or permission request: only read the native Chrome avatar
+    // labels on the current USER desktop in a bounded disposable process.
+    var profiles = ChromeProfileCatalog.ListInWorker();
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(profiles, PipeWire.Json));
+}
 else if (args is ["stdio"])
 {
     // The SDK frontend is not a runtime credential owner.
@@ -167,7 +174,8 @@ else if (args is ["stdio"])
     builder.Services.AddMcpServer(options =>
     {
         options.ServerInfo = new() { Name = "windows-admin-mcp", Version = BuildIdentity.McpVersion };
-    }).WithStdioServerTransport().WithTools<AdminTools>().WithTools<WindowTools>().WithTools<UpdateTools>();
+    }).WithStdioServerTransport().WithTools<AdminTools>().WithTools<WindowTools>()
+      .WithTools<ChromeConnectionTools>().WithTools<UpdateTools>();
     await builder.Build().RunAsync();
 }
 else
