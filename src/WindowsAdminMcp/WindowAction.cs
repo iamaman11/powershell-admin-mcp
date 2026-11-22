@@ -182,12 +182,7 @@ internal static class WindowAction
             WindowActionResult ActOnMatch(AutomationElement element, int[] path)
             {
                 var current = element.Current;
-                if (current.IsPassword) return new(WindowActionCode.PASSWORD_DENIED);
                 if (!current.IsEnabled) return new(WindowActionCode.DISABLED);
-                if (request.Action is not (WindowActionKind.CLICK or WindowActionKind.KEY_PRESS or
-                    WindowActionKind.TYPE_TEXT or WindowActionKind.SET_VALUE) &&
-                    Pattern(element, current.ControlType, request.Action) is null)
-                    return new(WindowActionCode.UNSUPPORTED_ACTION);
                 // Creation checks compare identities, not a boolean "process exists":
                 // another Camoufox instance may already be running.
                 WindowEffectBaseline baseline;
@@ -278,6 +273,10 @@ internal static class WindowAction
                     ? WindowPhysicalClick.TypeText(hwnd, element, request, clock)
                     : request.Action == WindowActionKind.SET_VALUE
                     ? SetValueWithNativeFallback()
+                    : Pattern(element, current.ControlType, request.Action) is null &&
+                      WindowChromeCdp.PointerAction(request.Action)
+                    ? WindowPhysicalClick.Click(hwnd, element,
+                        request with { Action = WindowActionKind.CLICK }, clock)
                     : WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(), request,
                         clock, radioInvoke);
                 result = result with { TargetVerified = true, TargetIdentity = request.ElementId };
@@ -560,6 +559,12 @@ internal static class WindowAction
                 ExpandCollapseState.Expanded or ExpandCollapseState.PartiallyExpanded => WindowActionKind.COLLAPSE,
                 _ => null
             };
+        if (Pattern(element, role, WindowActionKind.INVOKE) is not null)
+            return WindowActionKind.INVOKE;
+        if (Pattern(element, role, WindowActionKind.TOGGLE) is not null)
+            return WindowActionKind.TOGGLE;
+        if (Pattern(element, role, WindowActionKind.SELECT) is not null)
+            return WindowActionKind.SELECT;
         return null;
     }
 
@@ -567,13 +572,10 @@ internal static class WindowAction
     {
         AutomationPattern? id = kind switch
         {
-            WindowActionKind.INVOKE when role == ControlType.Button ||
-                role == ControlType.Hyperlink || role == ControlType.MenuItem => InvokePattern.Pattern,
-            WindowActionKind.SET_VALUE when role == ControlType.Edit || role == ControlType.ComboBox => ValuePattern.Pattern,
-            WindowActionKind.SELECT when role == ControlType.ListItem ||
-                role == ControlType.TabItem || role == ControlType.RadioButton => SelectionItemPattern.Pattern,
-            // TogglePattern is implemented by toggle buttons as well as checkboxes.
-            // Trust the actual advertised UIA pattern, not a single control role.
+            // Actual provider patterns, not UIA role names, define native abilities.
+            WindowActionKind.INVOKE => InvokePattern.Pattern,
+            WindowActionKind.SET_VALUE => ValuePattern.Pattern,
+            WindowActionKind.SELECT => SelectionItemPattern.Pattern,
             WindowActionKind.TOGGLE => TogglePattern.Pattern,
             WindowActionKind.EXPAND or WindowActionKind.COLLAPSE => ExpandCollapsePattern.Pattern,
             _ => null

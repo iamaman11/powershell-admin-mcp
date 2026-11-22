@@ -496,12 +496,12 @@ internal static partial class WindowChromeCdp
                 backendValue.ValueKind == JsonValueKind.Number ? backendValue.GetInt32() : 0;
             bool password = IsProtectedAx(node);
             bool hiddenName = role is "textbox" or "searchbox" or "combobox" or "RootWebArea";
-            string token = backend > 0 && !password ? ElementToken(stamp, windowId, selected.Id, backend,
+            string token = backend > 0 ? ElementToken(stamp, windowId, selected.Id, backend,
                 loader, selected.Url, role, name) : "";
             elements.Add(new($"0.{position - 1}", null, 1, "ControlType." + RoleName(role),
                 hiddenName ? "[redacted]" : name.Length > 128 ? name[..128] : name,
                 "", true, false, password,
-                backend > 0 && !password ? ["CDP"] : [], token));
+                backend > 0 ? ["CDP"] : [], token));
         }
         return new(WindowInspectCode.COMPLETED, [.. elements], more,
             ElementRefExpiresUtc: DateTimeOffset.FromUnixTimeMilliseconds(stamp).AddSeconds(30),
@@ -619,6 +619,53 @@ internal static partial class WindowChromeCdp
             _ => HasAxName(ax, request.ExpectedName!)
         };
 
+    // AX roles describe accessibility, not the browser's ability to receive
+    // pointer input. In particular a clickable <summary>, custom widget or
+    // editable field may be exposed as "generic" or "textbox". Route every
+    // pointer-like action through the same verified DOM hit test.
+    internal static bool PointerAction(WindowActionKind action) => action is
+        WindowActionKind.CLICK or WindowActionKind.INVOKE or WindowActionKind.SELECT or
+        WindowActionKind.TOGGLE or WindowActionKind.EXPAND or WindowActionKind.COLLAPSE;
+
+    internal static bool? AxActionState(JsonElement node, WindowActionKind action)
+    {
+        string? property = action switch
+        {
+            WindowActionKind.EXPAND or WindowActionKind.COLLAPSE => "expanded",
+            WindowActionKind.SELECT => "selected",
+            WindowActionKind.TOGGLE => "checked",
+            _ => null
+        };
+        if (property is null || !node.TryGetProperty("properties", out var properties)) return null;
+        foreach (var item in properties.EnumerateArray())
+        {
+            if (!item.TryGetProperty("name", out var name) ||
+                name.GetString() != property &&
+                !(action == WindowActionKind.TOGGLE && name.GetString() == "pressed") ||
+                !item.TryGetProperty("value", out var value) ||
+                !value.TryGetProperty("value", out var state)) continue;
+            if (state.ValueKind == JsonValueKind.True) return true;
+            if (state.ValueKind == JsonValueKind.False) return false;
+            if (state.ValueKind == JsonValueKind.String &&
+                bool.TryParse(state.GetString(), out bool parsed)) return parsed;
+        }
+        return null;
+    }
+
+    private static async Task<bool> EditableDomNode(Session cdp, string sessionId, int backendNodeId)
+    {
+        var resolved = await cdp.Call("DOM.resolveNode", new { backendNodeId }, sessionId);
+        string objectId = resolved.GetProperty("object").GetProperty("objectId").GetString()!;
+        var editable = await cdp.Call("Runtime.callFunctionOn", new
+        {
+            objectId,
+            functionDeclaration = "function(){const e=this;return e instanceof Element && !e.closest('[inert]') && (e.isContentEditable || (e instanceof HTMLInputElement && !['button','checkbox','color','file','hidden','image','radio','range','reset','submit'].includes(e.type) && !e.readOnly && !e.disabled) || (e instanceof HTMLTextAreaElement && !e.readOnly && !e.disabled));}",
+            returnByValue = true, silent = true
+        }, sessionId);
+        return editable.GetProperty("result").TryGetProperty("value", out var value) &&
+            value.ValueKind == JsonValueKind.True;
+    }
+
     private static async Task ReplaceFocusedText(Session cdp, string sessionId, string value)
     {
         // Chrome receives the same replacement gesture for foreground and
@@ -649,11 +696,13 @@ internal static partial class WindowChromeCdp
         var readback = await cdp.Call("Runtime.callFunctionOn", new
         {
             objectId,
-            functionDeclaration = "function(){return 'value' in this ? this.value : this.textContent;}",
+            // Only a boolean leaves the page, including for password inputs.
+            functionDeclaration = "function(expected){return ('value' in this ? this.value : this.textContent) === expected;}",
+            arguments = new[] { new { value = expectedValue } },
             returnByValue = true, silent = true
         }, sessionId);
         return readback.GetProperty("result").TryGetProperty("value", out var value) &&
-            value.ValueKind == JsonValueKind.String && value.GetString() == expectedValue;
+            value.ValueKind == JsonValueKind.True;
     }
 
     internal static WindowActionResult InvokeTab(IntPtr hwnd, WindowActionRequest request,
@@ -710,7 +759,8 @@ internal static partial class WindowChromeCdp
                 backend.ValueKind == JsonValueKind.Number && backend.GetInt32() == target.BackendId &&
                 !(node.TryGetProperty("ignored", out var ignored) && ignored.GetBoolean())).ToArray();
             if (nodeMatches.Length != 1) return Rejected(WindowActionCode.STALE_ELEMENT);
-            if (IsProtectedAx(nodeMatches[0])) return Rejected(WindowActionCode.PASSWORD_DENIED);
+            // Protected fields remain redacted in inspection, but an explicit
+            // action on their fresh element reference may still enter text.
             if (AxDisabled(nodeMatches[0])) return Rejected(WindowActionCode.DISABLED);
             string role = AxValue(nodeMatches[0], "role"), name = AxValue(nodeMatches[0], "name");
             if (!string.Equals(ElementDigest(request.WindowId, selected.Id, target.BackendId,
@@ -727,11 +777,20 @@ internal static partial class WindowChromeCdp
                      HasAxEnabled(ax, request.ExpectedEnabledName, request.ExpectedEnabled)))
                     return Rejected(WindowActionCode.EXPECTED_STATE_ALREADY_TRUE);
             }
-            string provider = "CDP_BACKGROUND";
-            if (request.Action == WindowActionKind.CLICK)
+            bool? stateBefore = AxActionState(nodeMatches[0], request.Action);
+            bool? desiredState = request.Action switch
             {
-                if (role is not ("button" or "link" or "checkbox" or "radio" or "tab" or
-                    "listitem" or "menuitem")) return Rejected(WindowActionCode.UNSUPPORTED_ACTION);
+                WindowActionKind.EXPAND => true,
+                WindowActionKind.COLLAPSE => false,
+                WindowActionKind.SELECT => true,
+                WindowActionKind.TOGGLE when stateBefore is not null => !stateBefore.Value,
+                _ => null
+            };
+            if (desiredState is not null && stateBefore == desiredState)
+                return Rejected(WindowActionCode.EXPECTED_STATE_ALREADY_TRUE);
+            string provider = "CDP_BACKGROUND";
+            if (PointerAction(request.Action))
+            {
                 var box = await cdp.Call("DOM.getBoxModel", new { backendNodeId = target.BackendId }, sessionId);
                 var metrics = await cdp.Call("Page.getLayoutMetrics", new { }, sessionId);
                 if (!TryPoint(box.GetProperty("model").GetProperty("content"),
@@ -758,7 +817,7 @@ internal static partial class WindowChromeCdp
                      WindowActionKind.SET_VALUE)
             {
                 if ((request.Action is WindowActionKind.TYPE_TEXT or WindowActionKind.SET_VALUE) &&
-                    role is not ("textbox" or "searchbox" or "combobox"))
+                    !await EditableDomNode(cdp, sessionId, target.BackendId))
                     return Rejected(WindowActionCode.UNSUPPORTED_ACTION);
                 await cdp.Call("DOM.focus", new { backendNodeId = target.BackendId }, sessionId);
                 if (request.Action is WindowActionKind.TYPE_TEXT or WindowActionKind.SET_VALUE)
@@ -787,12 +846,13 @@ internal static partial class WindowChromeCdp
             bool? effect = null;
             bool? enabledObserved = null;
             if (request.ExpectedName is not null || request.ExpectedEnabledName is not null ||
+                desiredState is not null ||
                 (request.Action is WindowActionKind.TYPE_TEXT or WindowActionKind.SET_VALUE))
             {
                 var observation = Stopwatch.StartNew();
                 do
                 {
-                    bool needsAx = request.ExpectedEnabledName is not null ||
+                    bool needsAx = desiredState is not null || request.ExpectedEnabledName is not null ||
                         (request.ExpectedName is not null && request.ExpectedKind is
                             (WindowExpectedKind.UIA_ELEMENT or WindowExpectedKind.UIA_VALUE or
                                 WindowExpectedKind.UIA_ENABLED));
@@ -810,7 +870,13 @@ internal static partial class WindowChromeCdp
                             : true;
                     enabledObserved = request.ExpectedEnabledName is null ? null :
                         HasAxEnabled(latestAx, request.ExpectedEnabledName, request.ExpectedEnabled);
-                    effect = primary && enabledObserved != false;
+                    bool semanticObserved = desiredState is null ||
+                        latestAx.GetProperty("nodes").EnumerateArray().Any(node =>
+                            node.TryGetProperty("backendDOMNodeId", out var backend) &&
+                            backend.ValueKind == JsonValueKind.Number &&
+                            backend.GetInt32() == target.BackendId &&
+                            AxActionState(node, request.Action) == desiredState);
+                    effect = primary && semanticObserved && enabledObserved != false;
                     if (effect == true) break;
                     await Task.Delay(100, timeout.Token);
                 } while (observation.ElapsedMilliseconds < request.ObservationTimeoutMs);
