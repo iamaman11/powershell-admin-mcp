@@ -23,6 +23,19 @@ $task=[pscustomobject]@{State='Running';Principal=[pscustomobject]@{UserId='ACME
 Check (Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript) 'operator.strict_interactive_scheduler_definition'
 Check (Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript $operatorId) 'operator.updater_checks_running_task_and_operation'
 Check (-not(Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript ('b'*32))) 'operator.rejects_foreign_operation'
+$acceptCommit='b'*40
+$acceptArguments=New-OperatorArguments $operatorScript 'accept' $operatorId $acceptCommit
+$action.Arguments=$acceptArguments
+Check ((Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript) -and
+    (Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript $operatorId '' '' 'accept' $acceptCommit)) 'operator.explicit_accept_definition_and_exact_commit'
+Check (-not(Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript $operatorId '' '' 'accept' ('c'*40)) -and
+    -not(Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript $operatorId)) 'operator.accept_rejects_other_commit_or_mode'
+$action.Arguments=$acceptArguments.Replace(' -RemoteAcceptanceConfirmed','')
+Check (-not(Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript) -and
+    -not(Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript $operatorId '' '' 'accept' $acceptCommit)) 'operator.accept_requires_confirmation'
+$action.Arguments=$acceptArguments+' -Unexpected'
+Check (-not(Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript)) 'operator.rejects_appended_task_arguments'
+$action.Arguments=New-OperatorArguments $operatorScript 'update' $operatorId
 $actual=[Security.Principal.WindowsIdentity]::GetCurrent()
 $task.Principal.UserId=$actual.User.Translate([Security.Principal.NTAccount]).Value
 Check (Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript $actual.User.Value) 'operator.scheduler_alias_resolves_exact_sid'

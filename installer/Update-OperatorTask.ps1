@@ -2,7 +2,10 @@
 # the interactive administrator, not by the bounded PowerShell job or SCM.
 [CmdletBinding()]
 param([ValidateSet('Start','Status')][string]$Action='Status',
-      [ValidatePattern('^[a-f0-9]{32}$')][string]$OperationId)
+      [ValidatePattern('^[a-f0-9]{32}$')][string]$OperationId,
+      [ValidateSet('update','accept')][string]$Operation='update',
+      [ValidatePattern('^[a-f0-9]{40}$')][string]$ExpectedCommit,
+      [switch]$RemoteAcceptanceConfirmed)
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
 $taskName='WindowsAdminMCP-OperatorUpdate'
 $root=Join-Path $env:ProgramFiles 'WindowsAdminMCP'
@@ -19,15 +22,26 @@ function Test-OperatorPrincipal([string]$userId,[string]$account,[string]$sid=''
         return $resolved.Value -ceq $sid
     }catch{return $false}
 }
+function New-OperatorArguments([string]$script,[string]$mode,[string]$id,[string]$commit=''){
+    $verb=if($mode -ceq 'accept'){
+        '-Action accept -RemoteAcceptanceConfirmed -ExpectedCommit '+$commit
+    }else{'-Action update'}
+    return '-NoProfile -NonInteractive -File "'+$script+'" '+$verb+' -ScheduledOperator -OperationId '+$id
+}
 function Test-OperatorDefinition($task,[string]$account,[string]$executable,[string]$script,[string]$sid=''){
     if($null -eq $task){return $false}
     if(-not(Test-OperatorPrincipal $task.Principal.UserId $account $sid) -or
         $task.Principal.LogonType.ToString() -ne 'Interactive' -or
         $task.Principal.RunLevel.ToString() -ne 'Highest' -or @($task.Actions).Count -ne 1){return $false}
     $a=$task.Actions[0]
-    return $a.Execute -ieq $executable -and $a.Arguments -match '\-NoProfile\s+\-NonInteractive\s+\-File' -and
-        $a.Arguments.Contains(('"'+$script+'"')) -and
-        $a.Arguments -match '\-Action\s+update\s+\-ScheduledOperator\s+\-OperationId\s+[a-f0-9]{32}$'
+    if($a.Execute -ine $executable){return $false}
+    $pattern='^-NoProfile -NonInteractive -File "'+[regex]::Escape($script)+
+        '" -Action (update|accept)(?: -RemoteAcceptanceConfirmed -ExpectedCommit ([a-f0-9]{40}))? -ScheduledOperator -OperationId ([a-f0-9]{32})$'
+    $match=[regex]::Match($a.Arguments,$pattern,[Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    if(-not $match.Success){return $false}
+    $mode=$match.Groups[1].Value
+    if(($mode -ceq 'accept') -ne $match.Groups[2].Success){return $false}
+    return $a.Arguments -ceq (New-OperatorArguments $script $mode $match.Groups[3].Value $match.Groups[2].Value)
 }
 function Get-OperatorReceipt {
     if(-not(Test-Path -LiteralPath $receipt -PathType Leaf)){return $null}
@@ -35,9 +49,11 @@ function Get-OperatorReceipt {
     $value=Get-Content -LiteralPath $receipt -Raw|ConvertFrom-Json -AsHashtable
     if($value.schema -ne 1 -or $value.operation_id -cnotmatch '^[a-f0-9]{32}$' -or
        $value.state -notin @('RUNNING','NO_UPDATE','COMPLETED','FAILED') -or
-       $value.stage -cnotmatch '^[a-z_]{1,32}$'){
+       $value.stage -cnotmatch '^[a-z_]{1,32}$' -or
+       ($value.ContainsKey('operation_action') -and $value.operation_action -cnotin @('REQUEST','ACCEPT'))){
         throw 'UPDATE_RECEIPT_UNTRUSTED'
     }
+    if(-not $value.ContainsKey('operation_action')){$value.operation_action='REQUEST'}
     return $value
 }
 # Dot-source for deterministic contract tests; never register a task on import.
@@ -54,6 +70,13 @@ if($Action -eq 'Start'){
         [IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
     try{
     if(-not $OperationId){throw 'UPDATE_OPERATION_ID_REQUIRED'}
+    if($Operation -eq 'accept'){
+        if(-not $RemoteAcceptanceConfirmed -or -not $ExpectedCommit){
+            throw 'UPDATE_ACCEPT_ARGUMENTS_REQUIRED'
+        }
+    }elseif($RemoteAcceptanceConfirmed -or $ExpectedCommit){
+        throw 'UPDATE_UNEXPECTED_ACCEPT_ARGUMENTS'
+    }
     if(-not(Test-Path -LiteralPath $updater -PathType Leaf) -or
        -not(Test-Path -LiteralPath $pwsh -PathType Leaf)){throw 'UPDATE_INSTALLED_HELPER_MISSING'}
     if($task -and $task.State.ToString() -eq 'Running'){throw 'UPDATE_OPERATOR_BUSY'}
@@ -66,7 +89,7 @@ if($Action -eq 'Start'){
         }
         Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
     }
-    $args='-NoProfile -NonInteractive -File "'+$updater+'" -Action update -ScheduledOperator -OperationId '+$OperationId
+    $args=New-OperatorArguments $updater $Operation $OperationId $ExpectedCommit
     # PowerShell variable names are case-insensitive: $action would overwrite
     # the validated -Action Start|Status parameter and fail before registration.
     $taskAction=New-ScheduledTaskAction -Execute $pwsh -Argument $args
@@ -77,7 +100,8 @@ if($Action -eq 'Start'){
     if(-not(Test-OperatorDefinition $task $identity.Name $pwsh $updater $identity.User.Value)){throw 'UPDATE_OPERATOR_READBACK_FAILED'}
     # The receipt is created only by the independently scheduled updater.
     Start-ScheduledTask -TaskName $taskName
-    [pscustomobject]@{status='REQUESTED';operation_id=$OperationId;task=$taskName}|ConvertTo-Json -Compress
+    [pscustomobject]@{status='REQUESTED';operation_id=$OperationId;task=$taskName;
+        operation_action=if($Operation -eq 'accept'){'ACCEPT'}else{'REQUEST'}}|ConvertTo-Json -Compress
     return
     }finally{$taskLock.Dispose()}
 }
@@ -91,11 +115,14 @@ if($task){
     }
     $taskId=([regex]::Match($task.Actions[0].Arguments,'-OperationId\s+([a-f0-9]{32})$')).Groups[1].Value
     if($record -and $record.operation_id -cne $taskId){throw 'UPDATE_STATUS_TASK_MISMATCH'}
+    $taskOperation=if($task.Actions[0].Arguments.Contains(' -Action accept ')){'ACCEPT'}else{'REQUEST'}
+    if($record -and $record.operation_action -cne $taskOperation){throw 'UPDATE_STATUS_TASK_MISMATCH'}
 }
 [pscustomobject]@{status=if($record){$record.state}elseif($task){'REQUESTED'}else{'NOT_REQUESTED'};
     operation_id=if($record){$record.operation_id}else{$taskId};
     stage=if($record){$record.stage}else{$null};
     commit=if($record){$record.commit}else{$null};
     reason=if($record){$record.reason}else{$null};
+    operation_action=if($record){$record.operation_action}elseif($task){$taskOperation}else{$null};
     rollback_pending=if($record){$record.rollback_pending}else{$null};
     task_state=$state;last_task_result=if($info){$info.LastTaskResult}else{$null}}|ConvertTo-Json -Compress

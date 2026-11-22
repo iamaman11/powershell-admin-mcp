@@ -31,6 +31,15 @@ using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent())
 }
 Check(AdminTools.ExecWaitBudget(120)==TimeSpan.FromSeconds(90) && AdminTools.ExecWaitBudget(85)==TimeSpan.FromSeconds(90) &&
     AdminTools.ExecWaitBudget(10)==TimeSpan.FromSeconds(15), "transport.exec_wait_budget");
+Check(UpdateTools.ValidArguments(UpdateToolAction.REQUEST, false, null) &&
+    UpdateTools.ValidArguments(UpdateToolAction.STATUS, false, null) &&
+    UpdateTools.ValidArguments(UpdateToolAction.ACCEPT, true, new string('a', 40)) &&
+    !UpdateTools.ValidArguments(UpdateToolAction.ACCEPT, false, new string('a', 40)) &&
+    !UpdateTools.ValidArguments(UpdateToolAction.ACCEPT, true, null) &&
+    !UpdateTools.ValidArguments(UpdateToolAction.ACCEPT, true, new string('z', 40)) &&
+    !UpdateTools.ValidArguments(UpdateToolAction.REQUEST, true, null) &&
+    !UpdateTools.ValidArguments(UpdateToolAction.STATUS, false, new string('a', 40)),
+    "update.explicit_accept_confirmation_and_exact_sha");
 var doctorSnapshot = new DoctorSnapshot(DoctorState.DEGRADED,
     [new DoctorCheck(DoctorComponent.Store, DoctorState.DEGRADED,
         DoctorReason.RECONCILIATION_REQUIRED, DoctorAction.INSPECT_JOBS)],
@@ -209,8 +218,12 @@ var updateRequested = System.Text.Json.JsonSerializer.Deserialize<UpdateTaskWire
     """{"status":"REQUESTED","operation_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","task":"WindowsAdminMCP-OperatorUpdate"}""", PipeWire.Json);
 var updateIdle = System.Text.Json.JsonSerializer.Deserialize<UpdateTaskWire>(
     """{"status":"NOT_REQUESTED","operation_id":null,"stage":null,"commit":null,"reason":null,"rollback_pending":null,"task_state":"Absent","last_task_result":null}""", PipeWire.Json);
+var updateAccept = System.Text.Json.JsonSerializer.Deserialize<UpdateTaskWire>(
+    """{"status":"COMPLETED","operation_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","stage":"accepted","operation_action":"ACCEPT","rollback_pending":false}""", PipeWire.Json);
 Check(updateRequested?.Status == "REQUESTED" && updateRequested.Task == "WindowsAdminMCP-OperatorUpdate" &&
-    updateIdle?.Status == "NOT_REQUESTED" && updateIdle.TaskState == "Absent" && updateIdle.LastTaskResult is null,
+    updateIdle?.Status == "NOT_REQUESTED" && updateIdle.TaskState == "Absent" && updateIdle.LastTaskResult is null &&
+    updateAccept?.OperationAction == UpdateToolAction.ACCEPT && updateAccept.Stage == "accepted" &&
+    updateAccept.RollbackPending == false,
     "operator.strict_json_accepts_request_and_status_receipts");
 Check(WindowChromeCdp.ValidTargetId("0123456789abcdef0123456789abcdef") &&
     !WindowChromeCdp.ValidTargetId("https://example.com") &&

@@ -4,7 +4,8 @@
 param([ValidateSet('update','rollback','accept')][string]$Action='update',
       [switch]$RemoteAcceptanceConfirmed,
       [switch]$ScheduledOperator,
-      [ValidatePattern('^[a-f0-9]{32}$')][string]$OperationId)
+       [ValidatePattern('^[a-f0-9]{32}$')][string]$OperationId,
+       [ValidatePattern('^[a-f0-9]{40}$')][string]$ExpectedCommit)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 function Select-UpdateRun($runs,[string]$commit){
@@ -275,14 +276,21 @@ function Test-UpdaterPrincipal([string]$userId,[string]$account,[string]$sid='')
     }catch{return $false}
 }
 function Test-ScheduledUpdateIdentity($task,[string]$account,[string]$updater,[string]$operation,
-                                      [string]$sid='',[string]$pwsh=''){
+                                       [string]$sid='',[string]$pwsh='',
+                                       [string]$mode='update',[string]$expectedCommit=''){
+    $verb=if($mode -ceq 'accept'){
+        '-Action accept -RemoteAcceptanceConfirmed -ExpectedCommit '+$expectedCommit
+    }elseif($mode -ceq 'update' -and -not $expectedCommit){
+        '-Action update'
+    }else{return $false}
+    $expectedArguments='-NoProfile -NonInteractive -File "'+$updater+'" '+$verb+
+        ' -ScheduledOperator -OperationId '+$operation
     return $null -ne $task -and $task.State.ToString() -eq 'Running' -and
         (Test-UpdaterPrincipal $task.Principal.UserId $account $sid) -and
         ($pwsh -eq '' -or $task.Actions[0].Execute -ieq $pwsh) -and
         $task.Principal.LogonType.ToString() -eq 'Interactive' -and
         $task.Principal.RunLevel.ToString() -eq 'Highest' -and @($task.Actions).Count -eq 1 -and
-        $task.Actions[0].Arguments.Contains(('"'+$updater+'"')) -and
-        $task.Actions[0].Arguments.EndsWith(('-ScheduledOperator -OperationId '+$operation),[StringComparison]::Ordinal)
+        $task.Actions[0].Arguments -ceq $expectedArguments
 }
 # Dot-sourcing exposes only the pure checks for isolated CI, not a way around
 # the public local-console guard.
@@ -293,9 +301,13 @@ if(-not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProc
     throw 'UPDATE_LOCAL_INTERACTIVE_ADMIN_REQUIRED'
 }
 if($ScheduledOperator){
-    if($Action -ne 'update' -or -not $OperationId){throw 'UPDATE_SCHEDULED_OPERATION_INVALID'}
+    if($Action -notin @('update','accept') -or -not $OperationId -or
+       ($Action -eq 'accept' -and (-not $RemoteAcceptanceConfirmed -or -not $ExpectedCommit)) -or
+       ($Action -eq 'update' -and ($RemoteAcceptanceConfirmed -or $ExpectedCommit))){
+        throw 'UPDATE_SCHEDULED_OPERATION_INVALID'
+    }
     $operatorTask=Get-ScheduledTask -TaskName 'WindowsAdminMCP-OperatorUpdate' -ErrorAction SilentlyContinue
-    $verifiedOperator=Test-ScheduledUpdateIdentity $operatorTask $identity.Name $PSCommandPath $OperationId $identity.User.Value (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe')
+    $verifiedOperator=Test-ScheduledUpdateIdentity $operatorTask $identity.Name $PSCommandPath $OperationId $identity.User.Value (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe') $Action $ExpectedCommit
     if(-not $verifiedOperator){
         throw 'UPDATE_SCHEDULED_TASK_NOT_CONFIRMED'
     }
@@ -308,7 +320,7 @@ $startup=Join-Path $root 'native\NativeStartup.ps1'
 $installer=Join-Path $PSScriptRoot 'Install-Native.ps1'
 $repo='iamaman11/powershell-admin-mcp'
 $checkout=Split-Path -Parent $PSScriptRoot
-$stage='preflight'
+$stage=if($Action -eq 'accept'){'accept_preflight'}else{'preflight'}
 $download=$null
 $stopping=$false
 $maintenance=$false
@@ -327,6 +339,7 @@ function Write-OperatorStage([string]$state,[string]$reason=''){
     $temp=Join-Path $root ('.operator-update-'+$OperationId+'.tmp')
     $commit=if($null -ne $current){$current.commit}elseif($null -ne $installed){$installed.commit}else{$null}
     $status=[ordered]@{schema=1;operation_id=$OperationId;state=$state;stage=$stage;
+        operation_action=if($Action -eq 'accept'){'ACCEPT'}else{'REQUEST'};
         commit=$commit;reason=$reason;rollback_pending=(Test-Path -LiteralPath (Join-Path $root '.rollback\journal.json'));
         updated_utc=[DateTimeOffset]::UtcNow.ToString('o')}
     [IO.File]::WriteAllText($temp,($status|ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
@@ -439,7 +452,27 @@ try{
     $installed=Read-Manifest
     if($Action -eq 'accept'){
         if(-not $RemoteAcceptanceConfirmed){throw 'REMOTE_ACCEPTANCE_REQUIRED'}
-        & $installer -Action Accept -ExpectedCommit $installed.commit -RemoteAcceptanceConfirmed
+        if($ScheduledOperator -and $installed.commit -cne $ExpectedCommit){
+            throw 'UPDATE_ACCEPT_COMMIT_MISMATCH'
+        }
+        if(-not(Test-Path -LiteralPath (Join-Path $root '.rollback\journal.json') -PathType Leaf)){
+            throw 'UPDATE_ACCEPT_NO_PENDING_JOURNAL'
+        }
+        $d=Read-InstalledDoctor
+        if($d.package.commit -cne $installed.commit -or
+           -not $d.localOperationalReady -or -not $d.userWorkerReady -or
+           -not $d.service.versions.informational_version.EndsWith('+'+$installed.commit)){
+            throw 'UPDATE_ACCEPT_NOT_READY'
+        }
+        $stage='accept'
+        Write-OperatorStage 'RUNNING'
+        $accepted=& $installer -Action Accept -ExpectedCommit $installed.commit -RemoteAcceptanceConfirmed|ConvertFrom-Json
+        if($accepted.status -cne 'ACCEPTED' -or $accepted.commit -cne $installed.commit){
+            throw 'UPDATE_ACCEPT_OUTCOME_UNCONFIRMED'
+        }
+        $stage='accepted'
+        Write-OperatorStage 'COMPLETED'
+        $accepted|ConvertTo-Json -Compress
         return
     }
     $d=Read-InstalledDoctor
@@ -588,7 +621,7 @@ try{
         closed_local_clients=$closedClients;closed_blocking_launchers=$closedLaunchers;
         cancelled_queued=$cancelledQueued;cancel_requested=$cancelRequested;
         needs_reconciliation=$after.store.needsReconciliation;
-        next_action='verify eight MCP tools externally, then use -Action accept -RemoteAcceptanceConfirmed'}|ConvertTo-Json -Compress
+        next_action='verify all nine MCP tools externally, then use powershell_update ACCEPT with confirmed exact commit'}|ConvertTo-Json -Compress
 }catch{
     $reason=if($_.Exception.Message -match '^UPDATE_[A-Z0-9_]+$'){$_.Exception.Message}else{$_.Exception.GetType().Name}
     # Restore transport only when no maintenance/swap was attempted. Once
