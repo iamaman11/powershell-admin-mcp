@@ -353,6 +353,32 @@ Check(WindowChromeCdp.ValidTabElementRef(freshTabRef) && WindowAction.Valid(chro
     !WindowChromeBroker.ReplyMatches(new(Action: chromeAction),
         new(Inspect: new(WindowInspectCode.COMPLETED, []))),
     "chrome.browser_bound_broker_reuses_connection_across_profiles");
+Check(Enum.GetValues<WindowActionKind>().Where(WindowChromeCdp.PointerAction).ToHashSet().SetEquals(
+        [WindowActionKind.CLICK, WindowActionKind.INVOKE, WindowActionKind.SELECT,
+         WindowActionKind.TOGGLE, WindowActionKind.EXPAND, WindowActionKind.COLLAPSE]) &&
+    !WindowChromeCdp.PointerAction(WindowActionKind.SET_VALUE) &&
+    !WindowChromeCdp.PointerAction(WindowActionKind.TYPE_TEXT) &&
+    !WindowChromeCdp.PointerAction(WindowActionKind.KEY_PRESS),
+    "chrome.cdp_all_semantic_pointer_actions_ignore_ax_role_whitelist");
+using (var states = System.Text.Json.JsonDocument.Parse("""
+    {"nodes":[{"properties":[{"name":"expanded","value":{"value":false}},
+                               {"name":"selected","value":{"value":true}},
+                               {"name":"checked","value":{"value":"true"}}]},
+              {"properties":[{"name":"pressed","value":{"value":true}}]}]}
+    """))
+{
+    var node = states.RootElement.GetProperty("nodes")[0];
+    Check(WindowChromeCdp.AxActionState(node, WindowActionKind.EXPAND) == false &&
+        WindowChromeCdp.AxActionState(node, WindowActionKind.COLLAPSE) == false &&
+        WindowChromeCdp.AxActionState(node, WindowActionKind.SELECT) == true &&
+        WindowChromeCdp.AxActionState(node, WindowActionKind.TOGGLE) == true &&
+        WindowChromeCdp.AxActionState(node, WindowActionKind.CLICK) is null &&
+        WindowChromeCdp.AxActionState(states.RootElement.GetProperty("nodes")[1],
+            WindowActionKind.TOGGLE) == true &&
+        WindowChromeCdp.AxActionState(states.RootElement.GetProperty("nodes")[1],
+            WindowActionKind.EXPAND) is null,
+        "chrome.cdp_semantic_actions_observe_actual_ax_state");
+}
 var matchingCdpWindow = WindowChromeCdp.UniqueWindowContext(new (int WindowId, string ContextId)[]
     { (12, "profile5"), (12, "profile5") });
 Check(matchingCdpWindow.HasValue && matchingCdpWindow.Value.WindowId == 12 &&
@@ -388,7 +414,7 @@ Check(textUnverified.Status == WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT &&
 using (var protectedNode = System.Text.Json.JsonDocument.Parse(
     "{\"properties\":[{\"name\":\"protected\",\"value\":{\"value\":true}}]}"))
     Check(WindowChromeCdp.IsProtectedAx(protectedNode.RootElement),
-        "chrome.cdp_protected_fields_are_not_actionable");
+        "chrome.cdp_protected_fields_stay_redacted_during_inspection");
 using (var ax = System.Text.Json.JsonDocument.Parse("""
     {"nodes":[{"name":{"value":"test field"},"value":{"value":"updated"}},
               {"name":{"value":"Save"}},
@@ -449,10 +475,10 @@ using (var listener = new TcpListener(IPAddress.Loopback, 0))
     Check(!WindowChromeCdp.LoopbackPortOpen(port),
         "chrome.cdp_stale_port_is_not_a_valid_endpoint");
 }
-Check(WindowPhysicalClick.SupportsPhysicalClickRole(System.Windows.Automation.ControlType.Edit) &&
-    WindowPhysicalClick.SupportsPhysicalClickRole(System.Windows.Automation.ControlType.Button) &&
-    !WindowPhysicalClick.SupportsPhysicalClickRole(System.Windows.Automation.ControlType.Pane),
-    "windows.physical_edit_click_supported_without_unsafe_generic_roles");
+Check(!WindowPhysicalClick.CanUseNativeFallback(new(WindowActionCode.TARGET_OCCLUDED)) &&
+    WindowPhysicalClick.CanUseNativeFallback(new(WindowActionCode.CDP_UNAVAILABLE,
+        FailureStage: WindowFailureStage.CDP_CONNECT)),
+    "windows.physical_click_uses_actual_hit_test_not_role_restrictions");
 Check(WindowPhysicalClick.ChromeChunkUnits("abc", 0) == 1 &&
     WindowPhysicalClick.ChromeChunkUnits("a🚀b", 1) == 2 &&
     WindowPhysicalClick.ChromeChunkUnits(new string('a', 79) + "🚀z", 64) == 17 &&
@@ -758,8 +784,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             new WindowActionRequest(realWindowId, delayed.Elements[0].ElementId,
                 WindowActionKind.TYPE_TEXT, "test"), Stopwatch.StartNew()))
             .WaitAsync(TimeSpan.FromSeconds(5));
-        Check(rejectedText.Status == WindowActionCode.UNSUPPORTED_ACTION,
-            "windows.type_text_rejects_unrelated_control_without_input");
+        Check(rejectedText.Status == WindowActionCode.FOCUS_UNAVAILABLE,
+            "windows.type_text_requires_exact_focus_not_a_role_whitelist");
         if (Windows.Graphics.Capture.GraphicsCaptureSession.IsSupported())
         {
             var image = await WindowCapture.CaptureCoreAsync(created.Handle, realWindowId, 640)

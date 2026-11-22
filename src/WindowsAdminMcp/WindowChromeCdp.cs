@@ -85,8 +85,6 @@ internal static partial class WindowChromeCdp
             WindowActionKind.TYPE_TEXT or WindowActionKind.SET_VALUE) ||
             !TryWebRole(target, out string? role, out string? name) ||
             !GetWindowRect(hwnd, out var rect)) return null;
-        if (request.Action == WindowActionKind.SET_VALUE && role is not ("textbox" or "combobox"))
-            return null;
         WindowCatalog.TryParseId(request.WindowId, out var identity);
         try
         {
@@ -132,7 +130,7 @@ internal static partial class WindowChromeCdp
     {
         role = name = null;
         var current = element.Current;
-        if (current.IsPassword || !current.IsEnabled ||
+        if (!current.IsEnabled ||
             string.IsNullOrWhiteSpace(current.Name) || current.Name.Length > 128)
             return false;
         role = current.ControlType == ControlType.Button ? "button" :
@@ -144,7 +142,7 @@ internal static partial class WindowChromeCdp
             current.ControlType == ControlType.MenuItem ? "menuitem" :
             current.ControlType == ControlType.ListItem ? "listitem" :
             current.ControlType == ControlType.TabItem ? "tab" : null;
-        if (role is null || !IsInsideDocument(element)) return false;
+        if (!IsInsideDocument(element)) return false;
         name = current.Name;
         return true;
     }
@@ -163,7 +161,7 @@ internal static partial class WindowChromeCdp
     }
 
     private static async Task<WindowActionResult> DispatchAsync(Uri endpoint, IntPtr hwnd,
-        AutomationElement element, WindowBounds nativeBounds, string name, string role,
+        AutomationElement element, WindowBounds nativeBounds, string name, string? role,
         WindowActionRequest request, Stopwatch clock)
     {
         bool dispatched = false;
@@ -205,8 +203,9 @@ internal static partial class WindowChromeCdp
             string sessionId = await Attach(cdp, candidates[0]);
             var document = await cdp.Call("DOM.getDocument", new { depth = 0 }, sessionId);
             int nodeId = document.GetProperty("root").GetProperty("nodeId").GetInt32();
-            var matches = await cdp.Call("Accessibility.queryAXTree",
-                new { nodeId, accessibleName = name, role }, sessionId);
+            var matches = role is null
+                ? await cdp.Call("Accessibility.queryAXTree", new { nodeId, accessibleName = name }, sessionId)
+                : await cdp.Call("Accessibility.queryAXTree", new { nodeId, accessibleName = name, role }, sessionId);
             var ids = new List<int>();
             foreach (var node in matches.GetProperty("nodes").EnumerateArray())
             {
@@ -216,7 +215,7 @@ internal static partial class WindowChromeCdp
                     nodeNameValue.GetString() != name ||
                     !node.TryGetProperty("role", out var nodeRole) ||
                     !nodeRole.TryGetProperty("value", out var nodeRoleValue) ||
-                    nodeRoleValue.GetString() != role ||
+                    role is not null && nodeRoleValue.GetString() != role ||
                     !node.TryGetProperty("backendDOMNodeId", out var backend)) continue;
                 int backendId = backend.GetInt32();
                 if (backendId > 0 && !ids.Contains(backendId)) ids.Add(backendId);
@@ -266,6 +265,8 @@ internal static partial class WindowChromeCdp
             }
             else if (request.Action is WindowActionKind.TYPE_TEXT or WindowActionKind.SET_VALUE)
             {
+                if (!await EditableDomNode(cdp, sessionId, backendNodeId))
+                    return Rejected(WindowActionCode.UNSUPPORTED_ACTION);
                 await cdp.Call("DOM.focus", new { backendNodeId }, sessionId);
                 dispatched = true;
                 await ReplaceFocusedText(cdp, sessionId, request.Value!);

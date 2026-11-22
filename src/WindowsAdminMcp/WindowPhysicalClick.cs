@@ -59,12 +59,6 @@ internal static class WindowPhysicalClick
         return actual is not null && actual.GetRuntimeId().SequenceEqual(target.GetRuntimeId());
     }
 
-    internal static bool SupportsPhysicalClickRole(ControlType role) =>
-        role == ControlType.Button || role == ControlType.Hyperlink ||
-        role == ControlType.MenuItem || role == ControlType.CheckBox ||
-        role == ControlType.RadioButton || role == ControlType.ListItem ||
-        role == ControlType.TabItem || role == ControlType.Edit;
-
     internal static int ChromeChunkUnits(string value, int offset)
     {
         if (offset < 0 || offset >= value.Length) throw new ArgumentOutOfRangeException(nameof(offset));
@@ -82,10 +76,6 @@ internal static class WindowPhysicalClick
         WindowFailureStage stage = WindowFailureStage.ACTIVATE_WINDOW;
         try
         {
-            var current = target.Current;
-            if (!SupportsPhysicalClickRole(current.ControlType))
-                return new(WindowActionCode.UNSUPPORTED_ACTION, ElapsedMs: clock.ElapsedMilliseconds);
-
             // Chrome web content can be clicked through its explicitly opted-in
             // DevTools connection without stealing desktop focus or mouse position.
             var background = allowCdp ? WindowChromeCdp.TryDispatch(hwnd, target, request, clock) : null;
@@ -255,8 +245,8 @@ internal static class WindowPhysicalClick
         }
     }
 
-    // TYPE_TEXT replaces an Edit/ComboBox value. For providers without
-    // ValuePattern.SetValue it uses one ordered Unicode SendInput batch, never
+    // TYPE_TEXT replaces the value of the specifically focused element. For
+    // providers without ValuePattern.SetValue it uses Unicode SendInput, never
     // a sequence of unverified per-character clicks or global paste shortcuts.
     internal static WindowActionResult TypeText(IntPtr hwnd, AutomationElement target,
         WindowActionRequest request, Stopwatch clock, bool allowCdp = true)
@@ -265,9 +255,8 @@ internal static class WindowPhysicalClick
         var foregroundAtEntry = GetForegroundWindow();
         try
         {
-            if (request.Value is null || (target.Current.ControlType != ControlType.Edit &&
-                target.Current.ControlType != ControlType.ComboBox))
-                return new(WindowActionCode.UNSUPPORTED_ACTION, ElapsedMs: clock.ElapsedMilliseconds);
+            if (request.Value is null)
+                return new(WindowActionCode.INVALID_ARGUMENT, ElapsedMs: clock.ElapsedMilliseconds);
             if (allowCdp)
             {
                 var background = WindowChromeCdp.TryDispatch(hwnd, target, request, clock);
@@ -282,10 +271,10 @@ internal static class WindowPhysicalClick
                     FailureStage: WindowFailureStage.ACTIVATE_WINDOW, Detail: ForegroundPolicy);
 
             // Chromium sometimes reports UIA keyboard focus without delivering
-            // DOM focus to a React textbox. A physical, hit-tested click is
-            // required before SendInput for verified Chrome Edit elements.
+            // DOM focus to a React input or contenteditable widget. A physical,
+            // hit-tested click is required before SendInput for verified Chrome.
             // Never inject text if the field is covered by another window.
-            if (request.ExpectedProfile is not null && target.Current.ControlType == ControlType.Edit)
+            if (request.ExpectedProfile is not null)
             {
                 var click = Click(hwnd, target, request with { Action = WindowActionKind.CLICK },
                     clock, allowCdp: false);
@@ -344,7 +333,7 @@ internal static class WindowPhysicalClick
                     FailureStage: WindowFailureStage.PREPARE_FOCUS);
             dispatched = true;
             uint inserted;
-            if (request.ExpectedProfile is not null && target.Current.ControlType == ControlType.Edit &&
+            if (request.ExpectedProfile is not null &&
                 request.Value.Length > 0)
             {
                 // Chromium's controlled React inputs can discard a fast batch
