@@ -30,6 +30,18 @@ else if (args is ["maintenance", "store-schema"])
     Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(schema,PipeWire.Json));
     Environment.ExitCode=schema.Status==StoreSchemaCode.READBACK_FAILED?1:0;
 }
+else if (args is ["maintenance", "legacy-unknown", "plan"])
+{
+    var result = LegacyUnknownCleanup.Execute(apply: false, fingerprint: null);
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, PipeWire.Json));
+    Environment.ExitCode = result.Status is LegacyCleanupCode.READY or LegacyCleanupCode.ALREADY_CLEARED ? 0 : 1;
+}
+else if (args is ["maintenance", "legacy-unknown", "apply", var expectedFingerprint])
+{
+    var result = LegacyUnknownCleanup.Execute(apply: true, fingerprint: expectedFingerprint);
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, PipeWire.Json));
+    Environment.ExitCode = result.Status == LegacyCleanupCode.CLEARED ? 0 : 1;
+}
 else if(args is ["maintenance", "drain"] || args is ["maintenance", "resume"])
 {
     var result=await MaintenanceDrain.ExecuteAsync(args[1]=="drain"?MaintenanceAction.Drain:MaintenanceAction.Resume);
@@ -152,7 +164,7 @@ else if (args is ["window-action-worker"])
 else if (args is ["window-cdp-worker", var parentPid] &&
     int.TryParse(parentPid, out int cdpParentPid) && cdpParentPid > 0)
 {
-    // User-session, short-idle-lived broker. No listener, Chrome restart or
+    // User-session broker lives with its parent. No listener, Chrome restart or
     // credential access; exits when the MCP frontend exits.
     await WindowChromeBroker.RunWorkerAsync(cdpParentPid);
 }
@@ -180,6 +192,6 @@ else if (args is ["stdio"])
 }
 else
 {
-    Console.Error.WriteLine("Usage: WindowsAdminMCP.exe service|stdio|tunnel|doctor [boot|--evidence path]|maintenance store-schema|drain|resume|recovery|configure-recovery");
+    Console.Error.WriteLine("Usage: WindowsAdminMCP.exe service|stdio|tunnel|doctor [boot|--evidence path]|maintenance store-schema|legacy-unknown plan|legacy-unknown apply <fingerprint>|drain|resume|recovery|configure-recovery");
     Environment.ExitCode = 2;
 }
