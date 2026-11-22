@@ -110,7 +110,7 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                         request.Worker is null && request.StepIndex is null && request.ExpectedCompletedSteps is null &&
                         request.StateFilter is null && request.PageSize is null && request.BeforeSeq is null &&
                         request.Decision is null && request.Evidence is null && request.RetainDays is null &&
-                        !request.IncludeInterruptedCommand && request.ResourceKey is null)
+                        !request.IncludeInterruptedCommand && request.ResourceKey is null && request.File is null)
                     {
                         try
                         {
@@ -128,7 +128,8 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                             response=new(StatusCode.STORE_UNAVAILABLE,correlation);
                         }
                     }
-                    else if (request?.Operation == AdminOperation.Job && request.Worker is null && request.Maintenance is null)
+                    else if (request?.Operation == AdminOperation.Job && request.Worker is null &&
+                        request.Maintenance is null && request.File is null)
                     {
                         try
                         {
@@ -142,13 +143,30 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                             response=new(code,correlation,Job:new(code,correlation,OperationKey:request.Key,NativeError:e.SqliteErrorCode));
                         }
                     }
+                    else if (request?.Operation == AdminOperation.File && request.File is {} file &&
+                        file.ExecutionContext == CommandContext.SYSTEM && request.Action is null &&
+                        request.ExecutionContext is null &&
+                        request.Key is null && request.JobId is null && request.Command is null &&
+                        request.Steps is null && request.WorkingDirectory is null && request.Worker is null &&
+                        request.Maintenance is null && request.ResourceKey is null &&
+                        request.StepIndex is null && request.ExpectedCompletedSteps is null &&
+                        request.StateFilter is null && request.BeforeSeq is null && request.PageSize is null &&
+                        request.Decision is null && request.Evidence is null && request.RetainDays is null &&
+                        !request.IncludeInterruptedCommand)
+                    {
+                        deadline.CancelAfter(TimeSpan.FromSeconds(30));
+                        var fileReply = await NativeFileReader.ExecuteAsync(file, deadline.Token);
+                        response = new(fileReply.Status == NativeFileCode.COMPLETED ? StatusCode.OK :
+                            fileReply.Status == NativeFileCode.INVALID_ARGUMENT ? StatusCode.INVALID_ARGUMENT :
+                            StatusCode.IPC_FAILED, correlation, File:fileReply);
+                    }
                     else if(request?.Operation==AdminOperation.UserWorker && request.Worker is {} worker &&
                         request.Action is null && request.ExecutionContext is null && request.Key is null && request.JobId is null &&
                         request.Command is null && request.Steps is null && request.WorkingDirectory is null &&
                         request.StepIndex is null && request.ExpectedCompletedSteps is null && request.StateFilter is null &&
                         request.PageSize is null && request.BeforeSeq is null && request.Decision is null &&
                         request.Evidence is null && request.RetainDays is null && !request.IncludeInterruptedCommand && request.ResourceKey is null &&
-                        request.Maintenance is null && user is not null)
+                        request.Maintenance is null && request.File is null && user is not null)
                     {
                         try
                         {
@@ -167,7 +185,7 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                         request.StateFilter is null && request.PageSize is null && request.BeforeSeq is null &&
                         request.Decision is null && request.Evidence is null && request.RetainDays is null &&
                         request.ExecutionContext is null && request.Worker is null && !request.IncludeInterruptedCommand && request.ResourceKey is null &&
-                        request.Maintenance is null)
+                        request.Maintenance is null && request.File is null)
                     {
                         using var actual = WindowsIdentity.GetCurrent();
                         var status = new AdminStatus(StatusCode.OK, correlation, Environment.ProcessId, Environment.MachineName,

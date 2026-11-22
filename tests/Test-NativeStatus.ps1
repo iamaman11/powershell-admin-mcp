@@ -65,12 +65,18 @@ try{
         Send $p 1 'tools/list' @{_meta=$meta}
         $list=Receive $p 1
         $names=@($list.tools|ForEach-Object {$_.name})
-        $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element','windows.chrome_connection','powershell_update')
+        $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element','windows.chrome_connection','powershell_update','windows.file_query','windows.file_read_chunk')
         Assert (@($required|Where-Object {$_ -notin $names}).Count -eq 0 -and $names.Count -eq @($names|Select-Object -Unique).Count) 'r5.required_window_tools_without_duplicates'
         $inspectTool=@($list.tools|Where-Object name -eq 'windows.inspect_window')
         $actionTool=@($list.tools|Where-Object name -eq 'windows.invoke_element')
         $statusTool=@($list.tools|Where-Object name -eq 'powershell_status')
         $chromeTool=@($list.tools|Where-Object name -eq 'windows.chrome_connection')
+        $fileQuery=@($list.tools|Where-Object name -eq 'windows.file_query')
+        $fileRead=@($list.tools|Where-Object name -eq 'windows.file_read_chunk')
+        Assert ($fileQuery.Count -eq 1 -and $fileRead.Count -eq 1 -and
+            @(@('action','path','page_size','cursor','include_sha256','execution_context')|Where-Object {-not $fileQuery[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
+            @(@('path','offset','length','expected_version','execution_context')|Where-Object {-not $fileRead[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
+            $fileQuery[0].Contains('outputSchema') -and $fileRead[0].Contains('outputSchema')) 'files.two_typed_native_mcp_contracts'
         Assert ($chromeTool.Count -eq 1 -and
             @(@('action','window_id','expected_profile')|Where-Object {-not $chromeTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
             @(@('status','state','next_action','profile','profiles')|Where-Object {-not $chromeTool[0].outputSchema.properties.Contains($_)}).Count -eq 0) 'chrome.typed_multi_profile_and_consent_lifecycle'
@@ -99,7 +105,7 @@ try{
         $schemaBytes=[Text.Encoding]::UTF8.GetByteCount(($list|ConvertTo-Json -Depth 30 -Compress))
         Write-Host "MCP_TOOLS_LIST_BYTES=$schemaBytes"
         # Typed Chrome profile discovery and consent states increase the catalog.
-        Assert ($schemaBytes -le 37000) 'r6.typed_tool_schema_under_37kib'
+        Assert ($schemaBytes -le 45000) 'r6.typed_tool_schema_under_45kib'
         Assert (@($list.tools|Where-Object {$_.name -eq 'powershell_status' -and $_.Contains('outputSchema')}).Count -eq 1) 'r1.typed_status_schema'
         $v=Wait-Status $p 'OK'
         Assert ($v.service_pid -eq $svc.ProcessId -and $v.execution_sid -eq 'S-1-5-18' -and $v.elevated) 'r1.scm_pid_and_real_execution_identity'
@@ -176,6 +182,31 @@ try{
         Send $p $id 'tools/call' @{name=$tool;arguments=$arguments;_meta=$meta}
         return (Receive $p $id).structuredContent
     }
+    $fileFixture=Join-Path $env:ProgramData ('wmcp-native-read-'+[Guid]::NewGuid().ToString('N'))
+    $null=New-Item -ItemType Directory -Path $fileFixture -Force
+    try {
+        $filePath=Join-Path $fileFixture 'binary.bin'
+        $bytes=[byte[]]::new(262145)
+        [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+        [IO.File]::WriteAllBytes($filePath,$bytes)
+        $stat=ToolCall $a 701 'windows.file_query' @{action='STAT';path=$filePath;execution_context='SYSTEM';include_sha256=$true}
+        $expectedHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+        Assert ($stat.status -eq 'COMPLETED' -and $stat.execution_context -eq 'SYSTEM' -and
+            $stat.info.size -eq $bytes.Length -and $stat.info.sha256 -eq $expectedHash -and
+            -not [string]::IsNullOrWhiteSpace($stat.info.version)) 'files.system_native_stat_hash_and_version'
+        $read=ToolCall $a 702 'windows.file_read_chunk' @{path=$filePath;offset=0;length=262144;expected_version=$stat.info.version;execution_context='SYSTEM'}
+        $expectedChunkHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]]$bytes[0..262143]))
+        Assert ($read.status -eq 'COMPLETED' -and $read.actual_length -eq 262144 -and
+            $read.eof -eq $false -and $read.chunk_sha256 -ceq $expectedChunkHash -and
+            [Convert]::FromBase64String($read.data_base64).Length -eq 262144) 'files.system_exact_max_binary_frame'
+        $tail=ToolCall $a 703 'windows.file_read_chunk' @{path=$filePath;offset=262144;length=262144;expected_version=$stat.info.version;execution_context='SYSTEM'}
+        Assert ($tail.status -eq 'COMPLETED' -and $tail.eof -eq $true -and
+            $tail.actual_length -eq 1 -and [Convert]::FromBase64String($tail.data_base64)[0] -eq $bytes[262144]) 'files.system_tail_and_eof'
+        $invalid=ToolCall $a 704 'windows.file_read_chunk' @{path=$filePath;offset=-1;execution_context='SYSTEM'}
+        Assert ($invalid.status -eq 'INVALID_ARGUMENT') 'files.reject_negative_offset_without_side_effect'
+        $notUser=ToolCall $a 705 'windows.file_query' @{action='STAT';path=$filePath;execution_context='USER'}
+        Assert ($notUser.status -eq 'USER_CONTEXT_UNAVAILABLE') 'files.no_implicit_system_fallback_for_user'
+    } finally {Remove-Item -LiteralPath $fileFixture -Recurse -Force}
     function Job($p,$id,$arguments){return (ToolCall $p $id 'powershell_job' $arguments)}
     function Wait-JobState($p,$jobId,$state){
         $clock=[Diagnostics.Stopwatch]::StartNew();$id=2000
