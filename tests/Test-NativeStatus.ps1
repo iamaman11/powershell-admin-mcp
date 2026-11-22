@@ -65,7 +65,7 @@ try{
         Send $p 1 'tools/list' @{_meta=$meta}
         $list=Receive $p 1
         $names=@($list.tools|ForEach-Object {$_.name})
-        $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element','windows.chrome_connection','powershell_update','windows.file_query','windows.file_read_chunk')
+        $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element','windows.invoke_locator','windows.manage_window','windows.chrome_connection','powershell_update','windows.file_query','windows.file_read_chunk','windows.file_write')
         Assert (@($required|Where-Object {$_ -notin $names}).Count -eq 0 -and $names.Count -eq @($names|Select-Object -Unique).Count) 'r5.required_window_tools_without_duplicates'
         $inspectTool=@($list.tools|Where-Object name -eq 'windows.inspect_window')
         $actionTool=@($list.tools|Where-Object name -eq 'windows.invoke_element')
@@ -73,6 +73,17 @@ try{
         $chromeTool=@($list.tools|Where-Object name -eq 'windows.chrome_connection')
         $fileQuery=@($list.tools|Where-Object name -eq 'windows.file_query')
         $fileRead=@($list.tools|Where-Object name -eq 'windows.file_read_chunk')
+        $fileWrite=@($list.tools|Where-Object name -eq 'windows.file_write')
+        $locator=@($list.tools|Where-Object name -eq 'windows.invoke_locator')
+        $manage=@($list.tools|Where-Object name -eq 'windows.manage_window')
+        Assert ($fileWrite.Count -eq 1 -and $locator.Count -eq 1 -and $manage.Count -eq 1 -and
+            @(@('action','path','operation_id','expected_bytes','expected_sha256','offset','data_base64','chunk_sha256','execution_context')|Where-Object {-not $fileWrite[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
+            @(@('status','operation_id','effect_state','received_bytes','safe_to_retry')|Where-Object {-not $fileWrite[0].outputSchema.properties.Contains($_)}).Count -eq 0 -and
+            @(@('window_id','action','automation_id','name','role','confirm')|Where-Object {-not $locator[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
+            @(@('window_id','action','x','y','width','height')|Where-Object {-not $manage[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
+            $manage[0].outputSchema.properties.Contains('effect_state') -and
+            $manage[0].outputSchema.properties.Contains('safe_to_retry') -and
+            $actionTool[0].outputSchema.properties.Contains('safe_to_retry')) 'issue56.typed_filewrite_locator_and_window_manager'
         Assert ($fileQuery.Count -eq 1 -and $fileRead.Count -eq 1 -and
             @(@('action','path','page_size','cursor','include_sha256','execution_context')|Where-Object {-not $fileQuery[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
             @(@('path','offset','length','expected_version','execution_context')|Where-Object {-not $fileRead[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
@@ -105,7 +116,7 @@ try{
         $schemaBytes=[Text.Encoding]::UTF8.GetByteCount(($list|ConvertTo-Json -Depth 30 -Compress))
         Write-Host "MCP_TOOLS_LIST_BYTES=$schemaBytes"
         # Typed Chrome profile discovery and consent states increase the catalog.
-        Assert ($schemaBytes -le 45000) 'r6.typed_tool_schema_under_45kib'
+        Assert ($schemaBytes -le 65536) 'issue56.typed_tool_schema_under_64kib'
         Assert (@($list.tools|Where-Object {$_.name -eq 'powershell_status' -and $_.Contains('outputSchema')}).Count -eq 1) 'r1.typed_status_schema'
         $v=Wait-Status $p 'OK'
         Assert ($v.service_pid -eq $svc.ProcessId -and $v.execution_sid -eq 'S-1-5-18' -and $v.elevated) 'r1.scm_pid_and_real_execution_identity'
@@ -121,6 +132,15 @@ try{
     Send $a 31 'tools/call' @{name='windows.list_windows';arguments=@{max_windows=0};_meta=$meta}
     $invalidWindowList=(Receive $a 31).structuredContent
     Assert ($invalidWindowList.status -eq 'INVALID_ARGUMENT' -and @($invalidWindowList.windows).Count -eq 0) 'windows.mcp_invalid_limit'
+    Send $a 201 'tools/call' @{name='windows.file_write';arguments=@{action='BEGIN';path='relative';operation_id='invalid'};_meta=$meta}
+    $invalidWrite=(Receive $a 201).structuredContent
+    Assert ($invalidWrite.status -eq 'INVALID_ARGUMENT') 'issue56.filewrite_rejects_invalid_before_io'
+    Send $a 202 'tools/call' @{name='windows.manage_window';arguments=@{window_id='bad';action='MOVE';x=1;y=2};_meta=$meta}
+    $invalidManage=(Receive $a 202).structuredContent
+    Assert ($invalidManage.status -eq 'INVALID_ARGUMENT') 'issue56.window_manage_rejects_stale_id'
+    Send $a 203 'tools/call' @{name='windows.invoke_locator';arguments=@{window_id='bad';action='INVOKE';name='OK'};_meta=$meta}
+    $invalidLocator=(Receive $a 203).structuredContent
+    Assert ($invalidLocator.status -eq 'INVALID_ARGUMENT') 'issue56.locator_rejects_bad_window'
     Send $a 76 'tools/call' @{name='windows.chrome_connection';arguments=@{action='REQUEST';window_id='bad';expected_profile='Profile 5'};_meta=$meta}
     $badConnection=(Receive $a 76).structuredContent
     Assert ($badConnection.status -eq 'INVALID_ARGUMENT' -and $badConnection.state -eq 'NOT_REQUESTED') 'chrome.invalid_window_cannot_request_consent'
@@ -207,6 +227,44 @@ try{
         $realUser=ToolCall $a 705 'windows.file_query' @{action='STAT';path=$filePath;execution_context='USER'}
         Assert ($realUser.status -eq 'COMPLETED' -and $realUser.execution_context -eq 'USER' -and
             $realUser.info.size -eq $bytes.Length) 'files.real_elevated_user_without_worker_dependency'
+        # Real SCM pipe + one SQLite receipt owner. Kill/restart the service
+        # after APPEND, then STATUS before an explicit single COMMIT.
+        $writePath=Join-Path $fileFixture 'atomic-system.bin'
+        $writeId=[Guid]::NewGuid().ToString('N')
+        $writeBytes=[Text.Encoding]::UTF8.GetBytes('native staged write and sqlite receipt 🌍')
+        $writeHash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($writeBytes))
+        $startWrite=ToolCall $a 706 'windows.file_write' @{action='BEGIN';path=$writePath;
+            operation_id=$writeId;expected_bytes=$writeBytes.Length;expected_sha256=$writeHash;
+            execution_context='SYSTEM'}
+        Assert ($startWrite.status -eq 'STAGED' -and -not (Test-Path -LiteralPath $writePath)) 'fileledger.system_begin_before_target_effect'
+        $appendWrite=ToolCall $a 707 'windows.file_write' @{action='APPEND';path=$writePath;
+            operation_id=$writeId;offset=0;data_base64=[Convert]::ToBase64String($writeBytes);
+            chunk_sha256=$writeHash;execution_context='SYSTEM'}
+        Assert ($appendWrite.status -eq 'STAGED' -and $appendWrite.received_bytes -eq $writeBytes.Length) 'fileledger.system_chunk_receipt_staged'
+        Stop-Service $name
+        Start-Service $name
+        $restarted=Wait-Status $a 'OK'
+        Assert ($restarted.status -eq 'OK') 'fileledger.scm_restarted_between_append_and_commit'
+        $beforeCommit=ToolCall $a 708 'windows.file_write' @{action='STATUS';path=$writePath;
+            operation_id=$writeId;execution_context='SYSTEM'}
+        Assert ($beforeCommit.status -eq 'STAGED' -and $beforeCommit.received_bytes -eq $writeBytes.Length) 'fileledger.system_after_restart_exact_staged_readback'
+        $committedWrite=ToolCall $a 709 'windows.file_write' @{action='COMMIT';path=$writePath;
+            operation_id=$writeId;execution_context='SYSTEM'}
+        Assert ($committedWrite.status -eq 'COMMITTED' -and $committedWrite.effect_state -eq 'EFFECT_VERIFIED' -and
+            [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($writePath))) -ceq $writeHash) 'fileledger.system_atomic_commit_exact_bytes'
+        $afterCommit=ToolCall $b 710 'windows.file_write' @{action='STATUS';path=$writePath;
+            operation_id=$writeId;execution_context='SYSTEM'}
+        Assert ($afterCommit.status -eq 'COMMITTED' -and -not $afterCommit.safe_to_retry) 'fileledger.system_cross_frontend_lost_ack_receipt'
+        $userPath=Join-Path $fileFixture 'atomic-user.bin'
+        $userWriteId=[Guid]::NewGuid().ToString('N')
+        $userStart=ToolCall $b 711 'windows.file_write' @{action='BEGIN';path=$userPath;
+            operation_id=$userWriteId;expected_bytes=0;
+            expected_sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([byte[]]@()));
+            execution_context='USER'}
+        $userCommit=ToolCall $c 712 'windows.file_write' @{action='COMMIT';path=$userPath;
+            operation_id=$userWriteId;execution_context='USER'}
+        Assert ($userStart.status -eq 'STAGED' -and $userCommit.status -eq 'COMMITTED' -and
+            [IO.File]::Exists($userPath) -and ([IO.FileInfo]::new($userPath)).Length -eq 0) 'fileledger.user_elevated_atomic_zero_byte_cross_frontend'
     } finally {Remove-Item -LiteralPath $fileFixture -Recurse -Force}
     function Job($p,$id,$arguments){return (ToolCall $p $id 'powershell_job' $arguments)}
     function Wait-JobState($p,$jobId,$state){

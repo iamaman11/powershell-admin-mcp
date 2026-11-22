@@ -388,7 +388,7 @@ internal static class WindowInspector
         catch (InvalidOperationException) { return new(WindowInspectCode.UIA_UNAVAILABLE, [], ElapsedMs: clock.ElapsedMilliseconds); }
     }
 
-    private static bool MatchesRole(ControlType control, WindowRoleFilter role) => role switch
+    internal static bool MatchesRole(ControlType control, WindowRoleFilter role) => role switch
     {
         WindowRoleFilter.BUTTON => control == ControlType.Button,
         WindowRoleFilter.TEXT => control == ControlType.Text,

@@ -129,7 +129,8 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                         }
                     }
                     else if (request?.Operation == AdminOperation.Job && request.Worker is null &&
-                        request.Maintenance is null && request.File is null)
+                        request.Maintenance is null && request.File is null && request.FileWrite is null &&
+                        request.FileReceipt is null)
                     {
                         try
                         {
@@ -144,6 +145,7 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                         }
                     }
                     else if (request?.Operation == AdminOperation.File && request.File is {} file &&
+                        request.FileWrite is null && request.FileReceipt is null &&
                         file.ExecutionContext == CommandContext.SYSTEM && request.Action is null &&
                         request.ExecutionContext is null &&
                         request.Key is null && request.JobId is null && request.Command is null &&
@@ -160,13 +162,65 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                             fileReply.Status == NativeFileCode.INVALID_ARGUMENT ? StatusCode.INVALID_ARGUMENT :
                             StatusCode.IPC_FAILED, correlation, File:fileReply);
                     }
+                    else if(request?.Operation==AdminOperation.FileWrite && request.FileWrite is {} fileWrite &&
+                        fileWrite.ExecutionContext==CommandContext.SYSTEM && request.File is null &&
+                        request.FileReceipt is null &&
+                        request.Action is null && request.ExecutionContext is null && request.Key is null &&
+                        request.JobId is null && request.Command is null && request.Steps is null &&
+                        request.WorkingDirectory is null && request.Worker is null && request.Maintenance is null &&
+                        request.ResourceKey is null && request.StepIndex is null &&
+                        request.ExpectedCompletedSteps is null && request.StateFilter is null &&
+                        request.BeforeSeq is null && request.PageSize is null && request.Decision is null &&
+                        request.Evidence is null && request.RetainDays is null && !request.IncludeInterruptedCommand)
+                    {
+                        deadline.CancelAfter(TimeSpan.FromSeconds(30));
+                        FileWriteReply fileReply;
+                        if(!NativeFileWriter.Valid(fileWrite))
+                            fileReply=new(FileWriteCode.INVALID_ARGUMENT,fileWrite.OperationId,fileWrite.ExecutionContext);
+                        else
+                        {
+                            var prepared=jobs.FileReceipt(FileReceiptRequest.From(fileWrite,FileReceiptPhase.PREPARE),callerSid!);
+                            if(prepared.Code!=FileReceiptCode.READY)
+                                fileReply=new(prepared.AsFileCode(),fileWrite.OperationId,fileWrite.ExecutionContext,
+                                    Stage:"SQLITE_PREPARE");
+                            else
+                            {
+                                fileReply=NativeFileWriter.Execute(fileWrite,deadline.Token);
+                                var observed=jobs.FileReceipt(FileReceiptRequest.From(fileWrite,FileReceiptPhase.OBSERVE,
+                                    fileReply),callerSid!);
+                                if(observed.Code!=FileReceiptCode.READY)
+                                    fileReply=fileReply with {Status=FileWriteCode.EFFECT_UNKNOWN,
+                                        EffectState=WindowEffectState.EFFECT_UNKNOWN,Stage="SQLITE_PERSIST"};
+                            }
+                        }
+                        response=new(fileReply.Status is FileWriteCode.STAGED or FileWriteCode.COMMITTED or FileWriteCode.ABORTED
+                            ?StatusCode.OK:fileReply.Status==FileWriteCode.INVALID_ARGUMENT?StatusCode.INVALID_ARGUMENT:
+                            StatusCode.IPC_FAILED,correlation,FileWrite:fileReply);
+                    }
+                    else if(request?.Operation==AdminOperation.FileReceipt && request.FileReceipt is {} receipt &&
+                        request.File is null && request.FileWrite is null &&
+                        request.Action is null && request.ExecutionContext is null && request.Key is null &&
+                        request.JobId is null && request.Command is null && request.Steps is null &&
+                        request.WorkingDirectory is null && request.Worker is null && request.Maintenance is null &&
+                        request.ResourceKey is null && request.StepIndex is null &&
+                        request.ExpectedCompletedSteps is null && request.StateFilter is null &&
+                        request.BeforeSeq is null && request.PageSize is null && request.Decision is null &&
+                        request.Evidence is null && request.RetainDays is null && !request.IncludeInterruptedCommand)
+                    {
+                        var result=receipt.Context==CommandContext.USER && user is null
+                            ?new FileReceiptReply(FileReceiptCode.CONFLICT)
+                            :jobs.FileReceipt(receipt,callerSid!);
+                        response=new(result.Code==FileReceiptCode.READY?StatusCode.OK:StatusCode.IPC_FAILED,
+                            correlation,FileReceipt:result);
+                    }
                     else if(request?.Operation==AdminOperation.UserWorker && request.Worker is {} worker &&
                         request.Action is null && request.ExecutionContext is null && request.Key is null && request.JobId is null &&
                         request.Command is null && request.Steps is null && request.WorkingDirectory is null &&
                         request.StepIndex is null && request.ExpectedCompletedSteps is null && request.StateFilter is null &&
                         request.PageSize is null && request.BeforeSeq is null && request.Decision is null &&
                         request.Evidence is null && request.RetainDays is null && !request.IncludeInterruptedCommand && request.ResourceKey is null &&
-                        request.Maintenance is null && request.File is null && user is not null)
+                        request.Maintenance is null && request.File is null && request.FileWrite is null &&
+                        request.FileReceipt is null && user is not null)
                     {
                         try
                         {

@@ -1,7 +1,7 @@
 using System.Text.Json.Serialization;
 
 [JsonConverter(typeof(JsonStringEnumConverter<AdminOperation>))]
-internal enum AdminOperation { Status, Job, Diagnostics, UserWorker, Maintenance, File }
+internal enum AdminOperation { Status, Job, Diagnostics, UserWorker, Maintenance, File, FileWrite, FileReceipt }
 
 [JsonConverter(typeof(JsonStringEnumConverter<MaintenanceAction>))]
 internal enum MaintenanceAction { Drain, Resume }
@@ -27,7 +27,9 @@ internal sealed record AdminRequest([property: JsonRequired] AdminOperation Oper
     CommandContext? ExecutionContext = null, WorkerRequest? Worker = null,
     string? TraceId = null, bool IncludeInterruptedCommand = false, string? ResourceKey = null,
     [property: JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] MaintenanceAction? Maintenance = null,
-    [property: JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] NativeFileRequest? File = null);
+    [property: JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] NativeFileRequest? File = null,
+    [property: JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] FileWriteRequest? FileWrite = null,
+    [property: JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] FileReceiptRequest? FileReceipt = null);
 
 [JsonConverter(typeof(JsonStringEnumConverter<CommandContext>))]
 public enum CommandContext { SYSTEM, USER, UNCONFIRMED }

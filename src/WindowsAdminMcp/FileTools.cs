@@ -3,8 +3,7 @@ using System.Diagnostics;
 using System.Security.Principal;
 using ModelContextProtocol.Server;
 
-// Two explicit read-only tools; no arbitrary script wrapper and no additional
-// process or writer. A future staged write API will use the SQLite job owner.
+// Typed native file tools; no arbitrary script wrapper or additional process.
 [McpServerToolType]
 public sealed class FileTools
 {
@@ -28,6 +27,56 @@ public sealed class FileTools
         CancellationToken cancellationToken = default) =>
         Dispatch(new(NativeFileAction.READ_CHUNK, path, execution_context,
             Offset:offset, Length:length, ExpectedVersion:expected_version), cancellationToken);
+
+    [McpServerTool(Name="windows.file_write",UseStructuredContent=true),
+     Description("Native staged file upload BEGIN/APPEND/COMMIT/ABORT/STATUS with stable operation_id, SHA-256, same-volume atomic replacement and durable readback.")]
+    public static async Task<FileWriteReply> Write(FileWriteAction action,string path,string operation_id,
+        long? expected_bytes=null,string? expected_sha256=null,
+        FileOverwritePolicy overwrite_policy=FileOverwritePolicy.FAIL_IF_EXISTS,
+        string? expected_version=null,string? original_sha256=null,
+        long? offset=null,string? data_base64=null,string? chunk_sha256=null,
+        CommandContext execution_context=CommandContext.USER,CancellationToken cancellationToken=default)
+    {
+        var request=new FileWriteRequest(action,path,operation_id,execution_context,expected_bytes,
+            expected_sha256,overwrite_policy,expected_version,original_sha256,offset,data_base64,chunk_sha256);
+        if(!NativeFileWriter.Valid(request))return new(FileWriteCode.INVALID_ARGUMENT,operation_id,execution_context,
+            Stage:"VALIDATE",ObservedAt:DateTimeOffset.UtcNow);
+        if(execution_context==CommandContext.SYSTEM)
+        {
+            var response=await AdminTools.Call(new(AdminOperation.FileWrite,FileWrite:request),cancellationToken);
+            return response.FileWrite??new(FileWriteCode.SERVICE_UNAVAILABLE,operation_id,execution_context,
+                Stage:"TRANSPORT",ObservedAt:DateTimeOffset.UtcNow);
+        }
+        var status=await AdminTools.Status(cancellationToken:cancellationToken);
+        if(status.Status!=StatusCode.OK)
+            return new(FileWriteCode.SERVICE_UNAVAILABLE,operation_id,execution_context,Stage:"TRANSPORT");
+        using var self=Process.GetCurrentProcess();
+        using var identity=WindowsIdentity.GetCurrent();
+        if(identity.IsSystem || status.Frontend?.Elevated!=true || status.Frontend.SessionId!=self.SessionId ||
+            status.Frontend.Sid!=identity.User?.Value ||
+            !new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
+            return new(FileWriteCode.USER_CONTEXT_UNAVAILABLE,operation_id,execution_context,Stage:"VALIDATE");
+        // The SCM service is the single SQLite owner even for USER filesystem
+        // actions. Prepare the durable operation identity before any write;
+        // register the verified native outcome afterwards. The native sidecar
+        // remains the crash-recovery readback when this frontend disappears.
+        var preparation=await AdminTools.Call(new(AdminOperation.FileReceipt,
+            FileReceipt:FileReceiptRequest.From(request,FileReceiptPhase.PREPARE)),cancellationToken);
+        if(preparation.FileReceipt is not {Code:FileReceiptCode.READY})
+            return new(preparation.FileReceipt?.AsFileCode()??FileWriteCode.SERVICE_UNAVAILABLE,
+                operation_id,execution_context,Stage:"SQLITE_PREPARE");
+        using var deadline=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(30));
+        FileWriteReply result;
+        try{result=await Task.Run(()=>NativeFileWriter.Execute(request,deadline.Token),deadline.Token);}
+        catch(OperationCanceledException){result=new(FileWriteCode.EFFECT_UNKNOWN,operation_id,
+            execution_context,EffectState:WindowEffectState.EFFECT_UNKNOWN,Stage:"TIMEOUT");}
+        var observed=await AdminTools.Call(new(AdminOperation.FileReceipt,
+            FileReceipt:FileReceiptRequest.From(request,FileReceiptPhase.OBSERVE,result)),CancellationToken.None);
+        return observed.FileReceipt is {Code:FileReceiptCode.READY}?result:
+            result with {Status=FileWriteCode.EFFECT_UNKNOWN,EffectState=WindowEffectState.EFFECT_UNKNOWN,
+                Stage="SQLITE_PERSIST"};
+    }
 
     private static async Task<NativeFileReply> Dispatch(NativeFileRequest request, CancellationToken ct)
     {
