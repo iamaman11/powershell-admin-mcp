@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <!-- Lock every project graph, including RunnerTests and research fixtures. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+</Project>

@@ -4,6 +4,8 @@ param([Parameter(Mandatory)][string]$PublishDirectory,
       [Parameter(Mandatory)][string]$Output,
       [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{40}$')][string]$Commit)
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+& (Join-Path $PSScriptRoot 'Sync-VendorLock.ps1')|Out-Null
+. (Join-Path $PSScriptRoot 'VendorLock.Generated.ps1')
 $Output=[IO.Path]::GetFullPath($Output)
 if(Test-Path -LiteralPath $Output){throw 'PACKAGE_ALREADY_EXISTS'}
 $parent=Split-Path -Parent $Output
@@ -22,18 +24,18 @@ try{
     # Hash these scripts in manifest.json like all other deployed files.
     $helpers=Join-Path $native 'installer'
     [void][IO.Directory]::CreateDirectory($helpers)
-    foreach($name in @('Install-Native.ps1','Update-Native.ps1','Update-OperatorTask.ps1','NativeFileSwap.ps1')){
+    foreach($name in @('Install-Native.ps1','Update-Native.ps1','Update-OperatorTask.ps1','NativeFileSwap.ps1','VendorLock.Generated.ps1')){
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $helpers
     }
-    Invoke-WebRequest -Uri 'https://github.com/openai/tunnel-client/releases/download/v0.0.21/tunnel-client-runtime-v0.0.21-windows-amd64.zip' -OutFile $zip
-    if((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne 'D991623BD171049E2100B402D72AF7EBC8EDF558051AE8FC924173373D1611A8'){throw 'VENDOR_ZIP_HASH_INVALID'}
+    Invoke-WebRequest -Uri $VendorLockZipSource -OutFile $zip
+    if((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -cne $VendorLockZipSha256){throw 'VENDOR_ZIP_HASH_INVALID'}
     $archive=[IO.Compression.ZipFile]::OpenRead($zip)
     try{
         $entries=@($archive.Entries|Where-Object Name -ceq 'tunnel-client-runtime.exe')
         if($entries.Count -ne 1){throw 'VENDOR_EXE_MISSING'}
         [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0],(Join-Path $client 'tunnel-client-runtime.exe'))
     }finally{$archive.Dispose()}
-    if((Get-FileHash -LiteralPath (Join-Path $client 'tunnel-client-runtime.exe')).Hash -ne 'DB590A52993C830A4C806108C3F25345EA986C6248210B86DF640E5081FF6A0B'){throw 'VENDOR_EXE_HASH_INVALID'}
+    if((Get-FileHash -LiteralPath (Join-Path $client 'tunnel-client-runtime.exe')).Hash -cne $VendorLockExeSha256){throw 'VENDOR_EXE_HASH_INVALID'}
     $files=[ordered]@{}
     foreach($file in (Get-ChildItem -LiteralPath $stage -File -Recurse|Sort-Object FullName)){
         $relative=[IO.Path]::GetRelativePath($stage,$file.FullName).Replace('\','/')
@@ -42,7 +44,7 @@ try{
     $product=[Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $native 'WindowsAdminMCP.exe')).ProductVersion
     $mcpVersion=($product -split '\+')[0]
     if($mcpVersion -notmatch '^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$'){throw 'MCP_VERSION_METADATA_INVALID'}
-    $metadata=[ordered]@{schema=1;commit=$Commit;mcp_version=$mcpVersion;vendor_version='0.0.21';store_schema=4;files=$files}
+    $metadata=[ordered]@{schema=1;commit=$Commit;mcp_version=$mcpVersion;vendor_version=$VendorLockVersion;vendor_zip_sha256=$VendorLockZipSha256;store_schema=4;files=$files}
     [IO.File]::WriteAllText((Join-Path $stage 'manifest.json'),($metadata|ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
     [IO.Compression.ZipFile]::CreateFromDirectory($stage,$Output,[IO.Compression.CompressionLevel]::Optimal,$false)
     [pscustomobject]@{package=$Output;sha256=(Get-FileHash -LiteralPath $Output).Hash;files=$files.Count;commit=$Commit}|ConvertTo-Json -Compress

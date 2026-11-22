@@ -162,7 +162,7 @@ $helperDir=Join-Path $fixtureRoot 'native\installer'
 try{
     [void][IO.Directory]::CreateDirectory($helperDir)
     $hashes=[ordered]@{}
-    foreach($name in @('Install-Native.ps1','Update-Native.ps1','NativeFileSwap.ps1')){
+    foreach($name in @('Install-Native.ps1','Update-Native.ps1','NativeFileSwap.ps1','VendorLock.Generated.ps1')){
         $file=Join-Path $helperDir $name
         [IO.File]::WriteAllText($file,"ci-fixture-$name")
         $hashes["native/installer/$name"]=(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
@@ -175,6 +175,7 @@ try{
     Assert-InstalledRollbackTarget $fixtureRoot $fixtureRoot $installed $old
     $old.files['native/installer/Install-Native.ps1']='B'*64
     $old.files['native/installer/NativeFileSwap.ps1']='C'*64
+    $old.files['native/installer/VendorLock.Generated.ps1']='D'*64
     Assert-InstalledRollbackTarget $helperDir $fixtureRoot $installed $old
     Write-Host 'PASS h5.bundled_rollback_helpers_allowed'
     $installed.files.PSObject.Properties['native/installer/Update-Native.ps1'].Value='0'*64

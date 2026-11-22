@@ -77,7 +77,7 @@ try{
     Check ((Test-Path (Join-Path $root 'client\tunnel-client-runtime.exe')) -and (Test-Path (Join-Path $root 'native\WindowsAdminMCP.exe')) -and (Test-Path (Join-Path $root '.rollback'))) 'r6.stable_install_paths_and_backup'
     $installedManifest=Get-Content -LiteralPath (Join-Path $root 'manifest.json') -Raw|ConvertFrom-Json
     $installedHelpers=@('native/installer/Install-Native.ps1','native/installer/Update-Native.ps1',
-                        'native/installer/NativeFileSwap.ps1')
+                        'native/installer/NativeFileSwap.ps1','native/installer/VendorLock.Generated.ps1')
     foreach($relative in $installedHelpers){
         $file=Join-Path $root ($relative.Replace('/','\'))
         $expectedHash=$installedManifest.files.PSObject.Properties[$relative].Value

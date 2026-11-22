@@ -9,7 +9,7 @@ using System.Text.RegularExpressions;
 
 internal static class TunnelHost
 {
-    internal const string VendorSha256 = "DB590A52993C830A4C806108C3F25345EA986C6248210B86DF640E5081FF6A0B";
+    internal const string VendorSha256 = VendorLock.ExecutableSha256;
     private const string Source = "WindowsAdminMCP";
     private enum Code
     {

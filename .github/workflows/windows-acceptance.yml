@@ -74,19 +74,45 @@ jobs:
           }
           Write-Host 'POWERSHELL_PARSE=PASS'
           ./tests/Test-OperatorUpdate.ps1
+          ./installer/Sync-VendorLock.ps1
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
+      - name: Prove exact SDK pin
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $pin=Get-Content global.json -Raw|ConvertFrom-Json
+          $actual=& dotnet --version
+          if($LASTEXITCODE -ne 0 -or $actual -cne $pin.sdk.version -or $pin.sdk.rollForward -cne 'disable'){throw 'SDK_PIN_MISMATCH'}
+          Write-Host "DOTNET_SDK_EXACT=$actual"
       - uses: actions/cache@v6
         with:
           path: ~/.nuget/packages
-          key: nuget-${{ runner.os }}-${{ hashFiles('Directory.Packages.props', 'src/**/*.csproj', 'research/**/*.csproj', 'tests/**/*.csproj') }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('global.json', 'Directory.Build.props', 'Directory.Packages.props', '**/*.csproj', '**/packages.lock.json') }}
+      - name: Restore all project graphs with committed lock files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $projects=@('tests/RunnerTests/RunnerTests.csproj',
+                      'src/WindowsAdminMcp/WindowsAdminMcp.csproj',
+                      'research/R0SdkProbe/R0SdkProbe.csproj',
+                      'research/R0NativeProbe/R0NativeProbe.csproj')
+          foreach($project in $projects){
+            $root=Split-Path -Parent $project
+            $lock=Join-Path $root 'packages.lock.json'
+            if(-not(Test-Path -LiteralPath $lock -PathType Leaf)){throw "NUGET_LOCK_MISSING: $project"}
+            $rid=if($project -in @('src/WindowsAdminMcp/WindowsAdminMcp.csproj', 'research/R0NativeProbe/R0NativeProbe.csproj')){@('-r','win-x64')}else{@()}
+            dotnet restore $project --locked-mode @rid
+            if($LASTEXITCODE -ne 0){throw "NUGET_LOCK_RESTORE_FAILED: $project"}
+            Write-Host ("NUGET_LOCK_GRAPH {0} {1}" -f $project,(Get-FileHash -LiteralPath $lock -Algorithm SHA256).Hash)
+          }
       - name: Exercise actual bounded PowerShell runner and typed UI contract
         if: github.event_name != 'push' || steps.provenance.outputs.full == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          dotnet run --project tests/RunnerTests/RunnerTests.csproj -c Release
+          dotnet run --project tests/RunnerTests/RunnerTests.csproj -c Release --no-restore
           if ($LASTEXITCODE -ne 0) { throw 'R2_RUNNER_FAILED' }
       - name: Verify unified startup definition without registering a live tunnel
         shell: pwsh
@@ -109,7 +135,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          dotnet publish src/WindowsAdminMcp/WindowsAdminMcp.csproj -c Release -r win-x64 --self-contained true -o "${{ runner.temp }}/WindowsAdminMcpCandidate"
+          dotnet publish src/WindowsAdminMcp/WindowsAdminMcp.csproj -c Release -r win-x64 --self-contained true --no-restore -o "${{ runner.temp }}/WindowsAdminMcpCandidate"
           if ($LASTEXITCODE -ne 0) { throw 'R1_PUBLISH_FAILED' }
       - name: Verify native service and MCP contract
         shell: pwsh
@@ -141,7 +167,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          dotnet build research/R0SdkProbe/R0SdkProbe.csproj -c Release
+          dotnet build research/R0SdkProbe/R0SdkProbe.csproj -c Release --no-restore
           if($LASTEXITCODE -ne 0){throw 'SDK_BUILD_FAILED'}
           ./research/R0SdkProbe/Test-Wire.ps1 -Dll research/R0SdkProbe/bin/Release/net10.0/R0SdkProbe.dll
       - name: Exercise experimental SCM, SQLite and shared MCP queue
@@ -149,7 +175,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          dotnet publish research/R0NativeProbe/R0NativeProbe.csproj -c Release -r win-x64 --self-contained true -o "${{ runner.temp }}/R0NativeProbe"
+          dotnet publish research/R0NativeProbe/R0NativeProbe.csproj -c Release -r win-x64 --self-contained true --no-restore -o "${{ runner.temp }}/R0NativeProbe"
           if($LASTEXITCODE -ne 0){throw 'R0_PUBLISH_FAILED'}
           ./research/R0NativeProbe/Test-Native.ps1 -Exe "${{ runner.temp }}/R0NativeProbe/R0NativeProbe.exe" -SdkDll research/R0SdkProbe/bin/Release/net10.0/R0SdkProbe.dll
       - uses: actions/upload-artifact@v7
@@ -161,6 +187,7 @@ jobs:
             ${{ runner.temp }}/WindowsAdminMCP-update.json
             installer/Install-Native.ps1
             installer/NativeFileSwap.ps1
+            installer/VendorLock.Generated.ps1
           if-no-files-found: error
   release:
     # Preserve the release status check and verify the published bytes.
