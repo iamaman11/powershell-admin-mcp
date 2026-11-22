@@ -55,13 +55,23 @@ public sealed record JobReply(
     [property:JsonPropertyName("next_before_seq")] long? NextBeforeSeq = null,
     [property:JsonPropertyName("store")] StoreSummary? Store = null,
     [property:JsonPropertyName("pruned_count")] int? PrunedCount = null,
-    [property:JsonPropertyName("timing")] ToolTiming? Timing = null);
+    [property:JsonPropertyName("timing")] ToolTiming? Timing = null,
+    [property:JsonPropertyName("tombstoned_count"), JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] int? TombstonedCount = null);
+
+[JsonConverter(typeof(JsonStringEnumConverter<StoreStorageState>))]
+public enum StoreStorageState { AVAILABLE, WARNING, FULL, READBACK_FAILED }
+
+public sealed record StoreStorageSummary(
+    long? DbBytes, long? WalBytes, long? PageCount, long? FreelistPages,
+    long? Tombstoned, long MetadataLimit, long BytesLimit, int TombstoneDays,
+    StoreStorageState Status);
 
 public sealed record StoreSummary(long Total,long Queued,long Running,long CancelRequested,long WaitingForResume,
     long WaitingForReboot,long NeedsReconciliation,long Completed,long Failed,long Cancelled,int SchemaVersion,int? ActiveLimit,int TotalLimit,
-    long Detailed,long Pruned,long Reconciled,int RetentionDays,ExecutionBudget Budget)
+    long Detailed,long Pruned,long Reconciled,int RetentionDays,ExecutionBudget Budget,
+    StoreStorageSummary? Storage=null)
 {
-    public bool CapacityWarning => Detailed>=TotalLimit*8/10;
+    public bool CapacityWarning => Detailed>=TotalLimit*8/10 || (Storage?.Status is StoreStorageState.WARNING or StoreStorageState.FULL);
 }
 internal sealed record AdminResponse(StatusCode Code, string Correlation, AdminStatus? Info = null, JobReply? Job = null,
     [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] StoreSummary? Store = null,

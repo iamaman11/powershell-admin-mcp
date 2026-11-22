@@ -49,9 +49,27 @@ frontend, not a separate permanent browser manager. No extra HTTP API.
   tunnel. The installed queue is never edited through a second connection to
   a running service. No old command is executed by cleanup.
 
+## SQLite lifecycle and bounded storage
+
+The SYSTEM `JobCoordinator` remains the **only** writer. It retains exact
+`operation_key` and payload hash identity indefinitely because a generic
+PowerShell command can have an irreversible effect; deleting the key would
+make a later accidental replay indistinguishable from a new request.
+
+Two bounded phases reclaim expensive history: after 30 days, terminal output
+is compacted to hashes/lengths; after 90 days the same SQLite owner removes
+terminal `job_steps` and encrypted working directory, leaving a durable,
+small job tombstone. Unknown, active and waiting effects never qualify.
+The permanent keys are limited by a typed total-row/DB-byte safety budget.
+If it is exhausted, **new distinct jobs fail closed** while status, readback
+and existing-key idempotency stay available. An indefinite workload cannot
+both erase arbitrary keys and promise indefinite exactly-once behaviour;
+any future key-epoch protocol must be explicit and versioned. All pruning
+uses one transaction/FK owner, no external writer or auto-replay.
+
 ## Current version and test references
 
-Main baseline: `605abdbe`, SDK ModelContextProtocol `2.4.0`,
+Baseline before #56: `605abdbe`; first accepted cleanup commit: `d656b7b`, SDK ModelContextProtocol `2.4.0`,
 .NET 10 LTS, tunnel runtime `0.0.21`, PowerShell 7.6 LTS.
 CI workflow: `.github/workflows/windows-acceptance.yml`. Exact installed
 package/physical acceptance is separate from Windows CI. `NOT_TESTED` must not

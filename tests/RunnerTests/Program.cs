@@ -1645,6 +1645,89 @@ try
 finally{Directory.Delete(retentionRoot,true);}
 
 
+// R: bounded storage, cold terminal tombstones, and exact key survival.
+Check(JobCoordinator.ClassifyStorage(10,4096,0,metadataLimit:10,bytesLimit:2*1024*1024)==StoreStorageState.FULL &&
+    JobCoordinator.ClassifyStorage(8,4096,0,metadataLimit:10,bytesLimit:2*1024*1024)==StoreStorageState.WARNING &&
+    JobCoordinator.ClassifyStorage(1,4096,0,metadataLimit:10,bytesLimit:2*1024*1024)==StoreStorageState.AVAILABLE &&
+    JobCoordinator.ClassifyStorage(1,null,0,metadataLimit:10,bytesLimit:2*1024*1024)==StoreStorageState.READBACK_FAILED &&
+    JobCoordinator.ClassifyStorage(1,2*1024*1024,0,metadataLimit:10,bytesLimit:2*1024*1024)==StoreStorageState.FULL,
+    "storage.finite_bounds_fail_closed_and_typed");
+string coldRoot=Path.Combine(Path.GetTempPath(),"WindowsAdminMCP-cold-"+Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(coldRoot);
+try
+{
+    string coldDb=Path.Combine(coldRoot,"jobs.db");
+    using(var owner=new JobCoordinator(Microsoft.Extensions.Logging.Abstractions.NullLogger<JobCoordinator>.Instance))
+    {
+        owner.Initialize(coldDb);
+        foreach(string key in new[]{"r-cold-terminal","r-cold-unknown","r-cold-waiting"})
+            Check(owner.Dispatch(new(AdminOperation.Job,JobAction.submit,Key:key,Command:"Write-Output r-fixture"),"r").Status==StatusCode.OK,
+                "storage.fixture_submit_"+key);
+    }
+    using(var db=new Microsoft.Data.Sqlite.SqliteConnection("Data Source="+coldDb+";Pooling=False"))
+    {
+        db.Open();
+        using var age=db.CreateCommand();
+        age.CommandText="""
+            UPDATE jobs SET state='COMPLETED',completed_steps=1,updated_utc=$old WHERE op_key='r-cold-terminal';
+            UPDATE jobs SET state='NEEDS_RECONCILIATION',updated_utc=$old WHERE op_key='r-cold-unknown';
+            UPDATE jobs SET state='WAITING_FOR_RESUME',updated_utc=$old WHERE op_key='r-cold-waiting';
+            """;
+        age.Parameters.AddWithValue("$old",DateTimeOffset.UtcNow.AddDays(-100).ToString("O"));
+        age.ExecuteNonQuery();
+        using var count=db.CreateCommand();
+        count.CommandText="SELECT count(*) FROM jobs WHERE updated_utc < $today";
+        count.Parameters.AddWithValue("$today",DateTimeOffset.UtcNow.AddDays(-99).ToString("O"));
+        Check((long)count.ExecuteScalar()! ==3,"storage.fixture_old_states");
+    }
+    using(var owner=new JobCoordinator(Microsoft.Extensions.Logging.Abstractions.NullLogger<JobCoordinator>.Instance))
+    {
+        owner.Initialize(coldDb);
+        bool rolledBack=false;
+        try {_=owner.MaintainHistory(()=>throw new InvalidOperationException("injected precommit"));}
+        catch(InvalidOperationException){rolledBack=true;}
+        var unmodified=owner.Dispatch(new(AdminOperation.Job,JobAction.list,PageSize:10),"r");
+        Check(rolledBack && unmodified.Store is {Pruned:0,Storage:{Tombstoned:0}},
+            "storage.injected_crash_rolls_back_both_stages");
+        var pruned=owner.Dispatch(new(AdminOperation.Job,JobAction.prune),"r");
+        Check(pruned.Status==StatusCode.OK && pruned.PrunedCount==1 && pruned.TombstonedCount==1 &&
+            pruned.Store is {Total:3,NeedsReconciliation:1,WaitingForResume:1,
+                Pruned:1,Storage:{Tombstoned:1,DbBytes:>0,PageCount:>0,Status:StoreStorageState.AVAILABLE}},
+            "storage.only_aged_terminal_becomes_tombstone");
+        var logs=owner.Dispatch(new(AdminOperation.Job,JobAction.logs,Key:"r-cold-terminal"),"r");
+        Check(logs.Status==StatusCode.HISTORY_PRUNED && logs.Job is
+            {State:JobState.COMPLETED,HistoryPrunedUtc:not null,Execution:null},
+            "storage.cold_logs_return_typed_history_pruned");
+        var retry=owner.Dispatch(new(AdminOperation.Job,JobAction.submit,
+            Key:"r-cold-terminal",Command:"Write-Output r-fixture"),"r");
+        Check(retry.Status==StatusCode.OK && retry.Job is {State:JobState.COMPLETED} &&
+            owner.Dispatch(new(AdminOperation.Job,JobAction.submit,Key:"r-cold-terminal",
+                Command:"Write-Output changed"),"r").Status==StatusCode.CONFLICT,
+            "storage.permanent_key_prevents_replay_after_payload_removed");
+        Check(owner.Dispatch(new(AdminOperation.Job,JobAction.status,Key:"r-cold-unknown"),"r")
+            .Job?.State==JobState.NEEDS_RECONCILIATION &&
+            owner.Dispatch(new(AdminOperation.Job,JobAction.status,Key:"r-cold-waiting"),"r")
+            .Job?.State==JobState.WAITING_FOR_RESUME,
+            "storage.never_purges_unknown_or_waiting");
+    }
+    using(var db=new Microsoft.Data.Sqlite.SqliteConnection("Data Source="+coldDb+";Pooling=False"))
+    {
+        db.Open();
+        using var cmd=db.CreateCommand();
+        cmd.CommandText="SELECT count(*) FROM job_steps WHERE job_id=(SELECT job_id FROM jobs WHERE op_key='r-cold-terminal')";
+        Check((long)cmd.ExecuteScalar()! ==0,"storage.cold_steps_removed");
+        cmd.CommandText="SELECT count(*) FROM job_steps WHERE job_id IN(SELECT job_id FROM jobs WHERE op_key IN ('r-cold-unknown','r-cold-waiting'))";
+        Check((long)cmd.ExecuteScalar()! ==2,"storage.other_steps_preserved");
+        cmd.CommandText="SELECT length(cwd) FROM jobs WHERE op_key='r-cold-terminal'";
+        Check((long)cmd.ExecuteScalar()! ==0,"storage.cold_cwd_removed");
+        cmd.CommandText="PRAGMA foreign_key_check";
+        Check(cmd.ExecuteScalar() is null,"storage.cold_foreign_keys_valid");
+        cmd.CommandText="PRAGMA integrity_check";
+        Check((string?)cmd.ExecuteScalar()=="ok","storage.cold_integrity_valid");
+    }
+}
+finally{Directory.Delete(coldRoot,true);}
+
 // A genuine SQLite/DPAPI fixture exercises session routing without impersonating users.
 string routingRoot=Path.Combine(Path.GetTempPath(),"WindowsAdminMCP-routing-"+Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(routingRoot);
