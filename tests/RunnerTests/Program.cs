@@ -304,15 +304,27 @@ Check(WindowChromeCdp.ValidTabElementRef(freshTabRef) && WindowAction.Valid(chro
         false, null, null, 0, WindowInspectScope.TABS, ExpectedProfile: "Valer")).Valid &&
     !new ChromeBrokerRequest(Inspect: new(testWindowId, 16, 50, null, null, 0,
         false, null, null, 0, WindowInspectScope.WINDOW, ExpectedProfile: "Valer")).Valid &&
-    WindowChromeBroker.SameBinding(testWindowId, "Valer", testWindowId, "VALER") &&
-    WindowChromeBroker.SameBinding(testWindowId, "Valer", WindowCatalog.FormatId(
-        testWindowIdentity with { Handle = 0x99999 }), "Valer") &&
-    !WindowChromeBroker.SameBinding(testWindowId, "Valer", testWindowId, "Other") &&
+    WindowChromeBroker.SameBrowser(testWindowId, testWindowId) &&
+    WindowChromeBroker.SameBrowser(testWindowId, WindowCatalog.FormatId(
+        testWindowIdentity with { Handle = 0x99999 })) &&
+    !WindowChromeBroker.SameBrowser(testWindowId, WindowCatalog.FormatId(
+        testWindowIdentity with { ProcessId = testWindowIdentity.ProcessId + 1 })) &&
     WindowChromeBroker.ReplyMatches(new(Action: chromeAction),
         new(Action: new(WindowActionCode.COMPLETED))) &&
     !WindowChromeBroker.ReplyMatches(new(Action: chromeAction),
         new(Inspect: new(WindowInspectCode.COMPLETED, []))),
-    "chrome.profile_bound_broker_reuses_connection_and_rejects_cross_profile");
+    "chrome.browser_bound_broker_reuses_connection_across_profiles");
+var matchingCdpWindow = WindowChromeCdp.UniqueWindowContext(new (int WindowId, string ContextId)[]
+    { (12, "profile5"), (12, "profile5") });
+Check(matchingCdpWindow.HasValue && matchingCdpWindow.Value.WindowId == 12 &&
+    matchingCdpWindow.Value.ContextId == "profile5" &&
+    WindowChromeCdp.UniqueWindowContext(new (int WindowId, string ContextId)[]
+    { (12, "profile5"), (12, "profile9") }) is null &&
+    WindowChromeCdp.UniqueWindowContext(new (int WindowId, string ContextId)[]
+    { (12, "profile5"), (13, "profile5") }) is null &&
+    WindowChromeCdp.UniqueWindowContext(new (int WindowId, string ContextId)[]
+    { (12, "") }) is null,
+    "chrome.cdp_context_requires_one_verified_window_and_profile");
 Check(WindowPhysicalClick.CanUseNativeFallback(null) &&
     WindowPhysicalClick.CanUseNativeFallback(new(WindowActionCode.CDP_UNAVAILABLE,
         FailureStage: WindowFailureStage.CDP_CONNECT)) &&
