@@ -103,6 +103,15 @@ internal static partial class WindowChromeCdp
             return new(WindowActionCode.CDP_UNAVAILABLE, FailureStage: WindowFailureStage.CDP_CONNECT,
                 Detail: endpointFailure, ElapsedMs: clock.ElapsedMilliseconds);
         }
+        var connection = ConnectionState(endpoint!, request: true);
+        if (connection == ChromeConnectionState.CONSENT_PENDING)
+            return new(WindowActionCode.CDP_CONSENT_PENDING,
+                FailureStage: WindowFailureStage.CDP_CONNECT, Detail: "ALLOW_CHROME_PROMPT",
+                ElapsedMs: clock.ElapsedMilliseconds);
+        if (connection != ChromeConnectionState.CONNECTED)
+            return new(WindowActionCode.CDP_UNAVAILABLE,
+                FailureStage: WindowFailureStage.CDP_CONNECT, Detail: connection.ToString(),
+                ElapsedMs: clock.ElapsedMilliseconds);
         try
         {
             var bounds = new WindowBounds(rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top);

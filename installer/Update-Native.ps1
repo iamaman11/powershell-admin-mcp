@@ -621,7 +621,7 @@ try{
         closed_local_clients=$closedClients;closed_blocking_launchers=$closedLaunchers;
         cancelled_queued=$cancelledQueued;cancel_requested=$cancelRequested;
         needs_reconciliation=$after.store.needsReconciliation;
-        next_action='verify all nine MCP tools externally, then use powershell_update ACCEPT with confirmed exact commit'}|ConvertTo-Json -Compress
+        next_action='verify all ten MCP tools externally, then use powershell_update ACCEPT with confirmed exact commit'}|ConvertTo-Json -Compress
 }catch{
     $reason=if($_.Exception.Message -match '^UPDATE_[A-Z0-9_]+$'){$_.Exception.Message}else{$_.Exception.GetType().Name}
     # Restore transport only when no maintenance/swap was attempted. Once

@@ -23,6 +23,10 @@ internal static partial class WindowChromeCdp
     private static ClientWebSocket? _tabSocket;
     private static Session? _tabSession;
     private static Uri? _tabEndpoint;
+    private static ClientWebSocket? _pendingSocket;
+    private static Task? _pendingConnect;
+    private static CancellationTokenSource? _pendingDeadline;
+    private static Uri? _pendingEndpoint;
     private static readonly Dictionary<string, string> AttachedTabs = new(StringComparer.Ordinal);
     private static bool TabConnected => _tabSocket?.State == WebSocketState.Open && _tabSession is not null;
 
@@ -48,11 +52,90 @@ internal static partial class WindowChromeCdp
 
     internal static void CloseTabConnection()
     {
+        CancelPendingConnection();
         AttachedTabs.Clear();
         _tabSession = null;
         _tabEndpoint = null;
         _tabSocket?.Dispose();
         _tabSocket = null;
+    }
+
+    private static void CancelPendingConnection()
+    {
+        _pendingDeadline?.Cancel();
+        _pendingSocket?.Dispose();
+        _pendingDeadline?.Dispose();
+        _pendingDeadline = null;
+        _pendingSocket = null;
+        _pendingConnect = null;
+        _pendingEndpoint = null;
+    }
+
+    // Chrome's approval-only server does not expose its current permission
+    // state. A live authorized socket proves consent; an outstanding handshake
+    // means only that consent has NOT YET been confirmed (not that it was denied).
+    // Run one handshake independently of the short-lived MCP request deadline.
+    private static ChromeConnectionState ConnectionState(Uri endpoint, bool request, bool retry = false)
+    {
+        if (TabConnected && _tabEndpoint == endpoint) return ChromeConnectionState.CONNECTED;
+        if (_pendingConnect is not null && _pendingEndpoint == endpoint)
+        {
+            if (!_pendingConnect.IsCompleted) return ChromeConnectionState.CONSENT_PENDING;
+            if (_pendingConnect.IsCompletedSuccessfully && _pendingSocket?.State == WebSocketState.Open)
+            {
+                var socket = _pendingSocket!;
+                _pendingSocket = null;
+                _pendingConnect = null;
+                _pendingEndpoint = null;
+                _pendingDeadline?.Dispose();
+                _pendingDeadline = null;
+                CloseTabConnection();
+                _tabSocket = socket;
+                _tabEndpoint = endpoint;
+                _tabSession = new Session(socket, CancellationToken.None);
+                return ChromeConnectionState.CONNECTED;
+            }
+            ChromeConnectionState failure = _pendingConnect.IsCanceled
+                ? ChromeConnectionState.CONSENT_NOT_CONFIRMED
+                : ChromeConnectionState.CONNECTION_FAILED;
+            if (!retry) return failure;
+        }
+        if (!request) return ChromeConnectionState.NOT_REQUESTED;
+        CloseTabConnection();
+        _pendingSocket = new ClientWebSocket();
+        _pendingEndpoint = endpoint;
+        _pendingDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        _pendingConnect = _pendingSocket.ConnectAsync(endpoint, _pendingDeadline.Token);
+        // The task is inspected on STATUS/poll. Observe faults if a new
+        // selection kills this worker before the approval dialog completes.
+        _ = _pendingConnect.ContinueWith(t => { _ = t.Exception; },
+            TaskContinuationOptions.OnlyOnFaulted);
+        return ChromeConnectionState.CONSENT_PENDING;
+    }
+
+    internal static ChromeConnectionResult ConnectInWorker(ChromeConnectionRequest request)
+    {
+        using var self = Process.GetCurrentProcess();
+        var profile = ChromeProfileCatalog.ReadWindowProfile(request.WindowId, self.SessionId);
+        if (profile is null || !ChromeProfileCatalog.MatchesSelector(profile, request.ExpectedProfile))
+            return new(ChromeConnectionCode.PROFILE_MISMATCH,
+                ChromeConnectionState.NOT_REQUESTED, ChromeConnectionNextAction.SELECT_PROFILE);
+
+        if (request.Action == ChromeConnectionAction.STATUS && _pendingConnect is null && !TabConnected)
+            return new(ChromeConnectionCode.OK, ChromeConnectionState.NOT_REQUESTED,
+                ChromeConnectionNextAction.RETRY_CONNECTION, profile);
+        if (!TryEndpoint(out var endpoint, out string failure))
+            return new(ChromeConnectionCode.OK, ChromeConnectionState.DEBUGGING_UNAVAILABLE,
+                ChromeConnectionNextAction.ENABLE_CHROME_DEBUGGING, profile, Detail: failure);
+        var state = ConnectionState(endpoint!, request.Action == ChromeConnectionAction.REQUEST,
+            retry: request.Action == ChromeConnectionAction.REQUEST);
+        var next = state switch
+        {
+            ChromeConnectionState.CONSENT_PENDING => ChromeConnectionNextAction.ALLOW_CHROME_PROMPT,
+            ChromeConnectionState.CONNECTED => ChromeConnectionNextAction.NONE,
+            _ => ChromeConnectionNextAction.RETRY_CONNECTION
+        };
+        return new(ChromeConnectionCode.OK, state, next, profile);
     }
 
     internal static bool ValidTargetId(string? id) => id is { Length: >= 16 and <= 64 } &&
@@ -113,15 +196,11 @@ internal static partial class WindowChromeCdp
             if (ownerPid == 0) return false;
             using var owner = Process.GetProcessById(checked((int)ownerPid));
             if (!owner.ProcessName.Equals("chrome", StringComparison.OrdinalIgnoreCase)) return false;
-            var root = AutomationElement.FromHandle(hwnd);
-            if (root is null) return false;
-            var buttons = root.FindAll(TreeScope.Descendants,
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button));
-            int matches = 0;
-            foreach (AutomationElement button in buttons)
-                if (!IsInsideDocument(button) && ProfileLabelMatches(button.Current.Name, expected) &&
-                    ++matches > 1) return false;
-            return matches == 1;
+            using var self = Process.GetCurrentProcess();
+            var id = WindowCatalog.FormatId(new WindowIdentity(hwnd.ToInt64(), owner.Id,
+                owner.StartTime.ToFileTimeUtc(), self.SessionId));
+            var profile = ChromeProfileCatalog.ReadWindowProfile(id, self.SessionId);
+            return profile is not null && ChromeProfileCatalog.MatchesSelector(profile, expected);
         }
         catch (Exception e) when (e is COMException or ElementNotAvailableException or
             InvalidOperationException or ArgumentException or Win32Exception or OverflowException) { return false; }
@@ -292,6 +371,11 @@ internal static partial class WindowChromeCdp
                 return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: "NOT_CHROME");
             if (expectedProfile is not null && !VerifiedChromeProfile(hwnd, expectedProfile))
                 return new(WindowInspectCode.CDP_CONTEXT_MISMATCH, [], Detail: "PROFILE_NOT_VERIFIED");
+            var connection = ConnectionState(endpoint!, request: true);
+            if (connection == ChromeConnectionState.CONSENT_PENDING)
+                return new(WindowInspectCode.CDP_CONSENT_PENDING, [], Detail: "ALLOW_CHROME_PROMPT");
+            if (connection != ChromeConnectionState.CONNECTED)
+                return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: connection.ToString());
             return InspectTabAsync(endpoint!, hwnd, windowId, scope, tabId, maxElements,
                 offset, nameFilter, roleFilter, expectedProfile, expectedOrigin, expectedUrl)
                 .GetAwaiter().GetResult();
@@ -521,6 +605,13 @@ internal static partial class WindowChromeCdp
         if (!TryEndpoint(out var endpoint, out string endpointFailure))
             return new(WindowActionCode.CDP_UNAVAILABLE, FailureStage: WindowFailureStage.CDP_CONNECT,
                 Detail: endpointFailure);
+        var connection = ConnectionState(endpoint!, request: true);
+        if (connection == ChromeConnectionState.CONSENT_PENDING)
+            return new(WindowActionCode.CDP_CONSENT_PENDING,
+                FailureStage: WindowFailureStage.CDP_CONNECT, Detail: "ALLOW_CHROME_PROMPT");
+        if (connection != ChromeConnectionState.CONNECTED)
+            return new(WindowActionCode.CDP_UNAVAILABLE,
+                FailureStage: WindowFailureStage.CDP_CONNECT, Detail: connection.ToString());
         try
         {
             return InvokeTabAsync(endpoint!, hwnd, request, target, clock).GetAwaiter().GetResult();

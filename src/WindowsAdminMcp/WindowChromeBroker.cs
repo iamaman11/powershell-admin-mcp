@@ -6,20 +6,23 @@ using System.Text.Json;
 // MCP calls. It cannot serve a different browser process/profile without a
 // fresh, explicitly named request and a new connection. No service or listener.
 internal sealed record ChromeBrokerRequest(WindowInspectRequest? Inspect = null,
-    WindowActionRequest? Action = null)
+    WindowActionRequest? Action = null, ChromeConnectionRequest? Connection = null)
 {
-    internal string WindowId => Inspect?.WindowId ?? Action?.WindowId ?? "";
-    internal string? Profile => Inspect?.ExpectedProfile ?? Action?.ExpectedProfile;
-    internal bool Valid => (Inspect is null) != (Action is null) &&
+    internal string WindowId => Inspect?.WindowId ?? Action?.WindowId ?? Connection?.WindowId ?? "";
+    internal string? Profile => Inspect?.ExpectedProfile ?? Action?.ExpectedProfile ?? Connection?.ExpectedProfile;
+    internal bool Valid => (Inspect is not null ? 1 : 0) + (Action is not null ? 1 : 0) +
+        (Connection is not null ? 1 : 0) == 1 &&
         WindowCatalog.TryParseId(WindowId, out _) &&
         Profile is { Length: >= 1 and <= 100 } && !string.IsNullOrWhiteSpace(Profile) &&
         (Inspect is null || Inspect.Scope is WindowInspectScope.TABS or WindowInspectScope.TAB) &&
         (Action is null || WindowChromeCdp.ValidTabElementRef(Action.ElementId) ||
-            WindowInspector.TryParseElementRef(Action.ElementId, out _));
+            WindowInspector.TryParseElementRef(Action.ElementId, out _)) &&
+        (Connection is null || Connection.Action is ChromeConnectionAction.REQUEST or
+            ChromeConnectionAction.STATUS);
 }
 
 internal sealed record ChromeBrokerReply(WindowInspectResult? Inspect = null,
-    WindowActionResult? Action = null);
+    WindowActionResult? Action = null, ChromeConnectionResult? Connection = null);
 
 internal static class WindowChromeBroker
 {
@@ -48,8 +51,31 @@ internal static class WindowChromeBroker
 
     internal static bool ReplyMatches(ChromeBrokerRequest request, ChromeBrokerReply? reply) =>
         reply is not null && (request.Inspect is not null
-            ? reply.Inspect is not null && reply.Action is null
-            : request.Action is not null && reply.Action is not null && reply.Inspect is null);
+            ? reply.Inspect is not null && reply.Action is null && reply.Connection is null
+            : request.Action is not null
+                ? reply.Action is not null && reply.Inspect is null && reply.Connection is null
+                : request.Connection is not null && reply.Connection is not null &&
+                    reply.Inspect is null && reply.Action is null);
+
+    internal static async Task<ChromeConnectionResult> ConnectionAsync(ChromeConnectionRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.Action == ChromeConnectionAction.DISCONNECT)
+        {
+            try { await Gate.WaitAsync(cancellationToken); }
+            catch (OperationCanceledException)
+            { return new(ChromeConnectionCode.WORKER_FAILED, ChromeConnectionState.NOT_REQUESTED); }
+            try
+            {
+                if (_binding == Binding(new(Connection: request))) Stop();
+                return new(ChromeConnectionCode.OK, ChromeConnectionState.DISCONNECTED);
+            }
+            finally { Gate.Release(); }
+        }
+        var reply = await ExchangeAsync(new(Connection: request), cancellationToken);
+        return reply?.Connection ?? new(ChromeConnectionCode.WORKER_FAILED,
+            ChromeConnectionState.NOT_REQUESTED, Detail: "CDP_BROKER_UNAVAILABLE");
+    }
 
     internal static async Task<WindowInspectResult> InspectAsync(WindowInspectRequest request,
         CancellationToken cancellationToken)
@@ -76,6 +102,10 @@ internal static class WindowChromeBroker
         try
         {
             string binding = Binding(request);
+            if (request.Connection?.Action == ChromeConnectionAction.STATUS &&
+                (_worker is null || _worker.HasExited || _binding != binding))
+                return new(Connection: new(ChromeConnectionCode.OK,
+                    ChromeConnectionState.NOT_REQUESTED, ChromeConnectionNextAction.RETRY_CONNECTION));
             if (_worker is null || _worker.HasExited || _binding != binding)
             {
                 Stop();
@@ -85,7 +115,7 @@ internal static class WindowChromeBroker
             }
             if (_worker is null) return null;
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            int timeout = _firstExchange
+            int timeout = request.Connection is not null ? 10000 : _firstExchange
                 ? 30000 + (request.Action?.ObservationTimeoutMs ?? 0)
                 : request.Action is { } action ? action.ObservationTimeoutMs + 6000 : 8000;
             deadline.CancelAfter(timeout);
@@ -176,7 +206,9 @@ internal static class WindowChromeBroker
                     {
                         boundWindow ??= request.WindowId;
                         boundProfile ??= request.Profile;
-                        reply = request.Inspect is { } inspect
+                        reply = request.Connection is { } connection
+                            ? new(Connection: WindowChromeCdp.ConnectInWorker(connection))
+                            : request.Inspect is { } inspect
                             ? new(Inspect: WindowInspector.InspectInWorker(inspect.WindowId,
                                 inspect.MaxDepth, inspect.MaxElements, inspect.StartPath,
                                 inspect.StartElementId, inspect.Offset, inspect.IncludeDetails,

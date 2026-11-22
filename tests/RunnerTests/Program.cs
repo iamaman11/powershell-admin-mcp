@@ -207,6 +207,65 @@ Check(WindowChromeCdp.ProfileLabelMatches("Valer", "Valer") &&
     !WindowChromeCdp.ProfileLabelMatches("Another Valer", "Valer") &&
     !WindowChromeCdp.ProfileLabelMatches("Valer test profile", "Valer"),
     "chrome.profile_delimiters_are_unambiguous");
+var plainAvatar = ChromeProfileCatalog.ParseAvatar("Valer");
+var emailAvatar = ChromeProfileCatalog.ParseAvatar("Васил (vasilinn9@gmail.com)");
+Check(plainAvatar is { Name: "Valer", Account: null } &&
+    emailAvatar is { Name: "Васил", Account: "vasilinn9@gmail.com" } &&
+    ChromeProfileCatalog.ParseAvatar("Valery")?.Name != "Valer" &&
+    ChromeProfileCatalog.ParseAvatar("Invalid (not an email)")?.Account is null &&
+    ChromeProfileCatalog.ParseAvatar(new string('x', 201)) is null,
+    "chrome.native_avatar_profile_and_account_are_observed_not_inferred");
+using (var profileFixture = System.Text.Json.JsonDocument.Parse("""
+    {"profile":{"info_cache":{
+      "Profile 5":{"name":"Valer","user_name":"pvisakp@gmail.com"},
+      "Profile 7":{"name":"example@domain.test","user_name":""},
+      "Profile 8":{"name":"No email","user_name":""},
+      "Profile 9":{"name":"Valer","user_name":""}
+    }}}
+    """))
+{
+    var profiles = ChromeProfileCatalog.ParseInfoCache(profileFixture.RootElement);
+    var unique = profiles.Take(3).ToArray();
+    var signedIn = ChromeProfileCatalog.ResolveMetadata("Valer", null, unique);
+    var ambiguous = ChromeProfileCatalog.ResolveMetadata("Valer", null, profiles);
+    var address = ChromeProfileCatalog.ResolveMetadata("irrelevant", "pvisakp@gmail.com", profiles);
+    var missingAddress = ChromeProfileCatalog.ResolveMetadata("Valer", "other@domain.test", profiles);
+    Check(profiles.Length == 4 && signedIn?.Id == "Profile 5" &&
+        signedIn.Email == "pvisakp@gmail.com" &&
+        signedIn.Source == ChromeProfileEmailSource.SIGNED_IN_ACCOUNT &&
+        profiles[1].Source == ChromeProfileEmailSource.PROFILE_NAME &&
+        profiles[2].Email is null && profiles[2].Source == ChromeProfileEmailSource.NOT_AVAILABLE &&
+        ambiguous is null && address?.Id == "Profile 5" && missingAddress is null &&
+        ChromeProfileCatalog.MatchesSelector(new(null, signedIn.Id, signedIn.Name,
+            signedIn.Email, signedIn.Source, null, null), "pvisakp@gmail.com") &&
+        ChromeProfileCatalog.MatchesSelector(new(null, signedIn.Id, signedIn.Name,
+            signedIn.Email, signedIn.Source, null, null), "Profile 5"),
+        "chrome.profile_selection_uses_exact_native_identity_and_email_provenance");
+}
+Check(ChromeConnectionTools.ValidArguments(ChromeConnectionAction.LIST, null, null) &&
+    !ChromeConnectionTools.ValidArguments(ChromeConnectionAction.LIST, testWindowId, "Valer") &&
+    ChromeConnectionTools.ValidArguments(ChromeConnectionAction.REQUEST, testWindowId, "Valer") &&
+    ChromeConnectionTools.ValidArguments(ChromeConnectionAction.STATUS, testWindowId, "Valer") &&
+    ChromeConnectionTools.ValidArguments(ChromeConnectionAction.DISCONNECT, testWindowId, "Valer") &&
+    !ChromeConnectionTools.ValidArguments(ChromeConnectionAction.REQUEST, testWindowId, null) &&
+    !ChromeConnectionTools.ValidArguments(ChromeConnectionAction.STATUS, "invalid", "Valer") &&
+    !ChromeConnectionTools.ValidArguments((ChromeConnectionAction)99, testWindowId, "Valer"),
+    "chrome.connection_action_schema_rejects_ambiguous_profile_selection");
+var connectRequest = new ChromeConnectionRequest(testWindowId, "Valer", ChromeConnectionAction.REQUEST);
+var connectReply = new ChromeConnectionResult(ChromeConnectionCode.OK,
+    ChromeConnectionState.CONSENT_PENDING, ChromeConnectionNextAction.ALLOW_CHROME_PROMPT);
+Check(new ChromeBrokerRequest(Connection: connectRequest).Valid &&
+    !new ChromeBrokerRequest(Connection: connectRequest, Inspect: new(testWindowId, 16, 50,
+        null, null, 0, false, null, null, 0, WindowInspectScope.TABS,
+        ExpectedProfile: "Valer")).Valid &&
+    WindowChromeBroker.ReplyMatches(new(Connection: connectRequest), new(Connection: connectReply)) &&
+    !WindowChromeBroker.ReplyMatches(new(Connection: connectRequest),
+        new(Inspect: new(WindowInspectCode.COMPLETED, []))) &&
+    System.Text.Json.JsonSerializer.Deserialize<ChromeConnectionResult>(
+        System.Text.Json.JsonSerializer.Serialize(connectReply, PipeWire.Json), PipeWire.Json)?.State ==
+        ChromeConnectionState.CONSENT_PENDING &&
+    connectReply.NextAction == ChromeConnectionNextAction.ALLOW_CHROME_PROMPT,
+    "chrome.connection_consent_pending_is_typed_and_not_a_grant");
 Check(WindowAction.WindowTitleMatches("Example Domain — Camoufox", "Example Domain") &&
     WindowAction.WindowTitleMatches("Example Domain - Google Chrome", "Example Domain") &&
     WindowAction.WindowTitleMatches("Exact title", "Exact title") &&
