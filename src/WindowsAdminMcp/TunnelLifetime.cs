@@ -44,13 +44,16 @@ internal static class TunnelLifetime
            detail.TryGetProperty("consecutive_failures",out var failures) &&
            failures.ValueKind==JsonValueKind.Number && failures.TryGetInt64(out long count) && count>0;
 
-    internal static async Task<bool> AccessDeniedAsync()
+    internal static Task<bool> AccessDeniedAsync()=>AccessDeniedAsync(TunnelProfiles.PrimaryPort);
+
+    internal static async Task<bool> AccessDeniedAsync(int port)
     {
+        if(port is < 1024 or > 65535)throw new ArgumentOutOfRangeException(nameof(port));
         try
         {
             using var handler=new HttpClientHandler { UseProxy=false,AllowAutoRedirect=false };
             using var http=new HttpClient(handler) { Timeout=TimeSpan.FromSeconds(2),MaxResponseContentBufferSize=65536 };
-            using var response=await http.GetAsync("http://127.0.0.1:8080/health/control-plane");
+            using var response=await http.GetAsync($"http://127.0.0.1:{port}/health/control-plane");
             if(!response.IsSuccessStatusCode)return false;
             using var doc=JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync());
             return IsAccessDenied(doc.RootElement);

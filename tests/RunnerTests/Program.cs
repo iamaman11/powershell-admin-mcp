@@ -1343,6 +1343,32 @@ Check(launch.FileName.EndsWith(@"\client\tunnel-client-runtime.exe",StringCompar
     launch.ArgumentList.Contains("env:CONTROL_PLANE_API_KEY")&&
     !launch.ArgumentList.Any(a=>a.Contains("inert-test-key",StringComparison.Ordinal))&&
     launch.Environment["CONTROL_PLANE_API_KEY"]=="inert-test-key","r6.stable_vendor_binding_no_key_in_argv");
+var secondary=fixtureCredential with {ProfileId="secondary",HealthPort=8081,
+    TunnelId="tunnel_"+new string('b',32),RuntimeKey="other-inert-test-key"};
+var secondaryLaunch=TunnelHost.StartInfo(@"C:\Program Files\WindowsAdminMCP\client\tunnel-client-runtime.exe",
+    @"C:\Program Files\WindowsAdminMCP\native\WindowsAdminMCP.exe",secondary);
+Check(TunnelProfiles.ValidSet([
+    new(TunnelProfiles.Primary,fixtureCredential,"f-primary"),
+    new("secondary",secondary,"f-secondary")]) &&
+    !TunnelProfiles.ValidSet([new(TunnelProfiles.Primary,fixtureCredential,"a"),new("secondary",secondary with {TunnelId=fixtureCredential.TunnelId},"b")]) &&
+    !TunnelProfiles.ValidSet([new(TunnelProfiles.Primary,fixtureCredential,"a"),new("secondary",secondary with {HealthPort=8080},"b")]) &&
+    !TunnelProfiles.ValidSet([new(TunnelProfiles.Primary,fixtureCredential,"a"),new("secondary",secondary with {ProfileId="wrong"},"b")]) &&
+    !TunnelProfiles.ValidName("../secret") && TunnelProfiles.ValidName("second-account"),
+    "m01.multiprofile_unique_ids_ports_safe_names");
+Check(launch.ArgumentList.Contains("127.0.0.1:8080") &&
+    secondaryLaunch.ArgumentList.Contains("127.0.0.1:8081") &&
+    !secondaryLaunch.ArgumentList.Contains("127.0.0.1:8080") &&
+    launch.Environment["CONTROL_PLANE_API_KEY"]=="inert-test-key" &&
+    secondaryLaunch.Environment["CONTROL_PLANE_API_KEY"]=="other-inert-test-key" &&
+    !secondaryLaunch.ArgumentList.Any(a=>a.Contains("other-inert-test-key",StringComparison.Ordinal)) &&
+    secondaryLaunch.ArgumentList.Contains("command=\"C:/Program Files/WindowsAdminMCP/native/WindowsAdminMCP.exe\" stdio,channel=main"),
+    "m02.independent_vendor_arguments_credentials_stdio");
+using(var oldCredential=System.Text.Json.JsonDocument.Parse("""{"version":1,"tunnel_id":"tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","runtime_key":"legacy-inert"}"""))
+{
+    var legacy=System.Text.Json.JsonSerializer.Deserialize<TunnelHost.Credential>(oldCredential.RootElement.GetRawText());
+    Check(legacy is not null && TunnelHost.Valid(legacy) && legacy.ProfileId==TunnelProfiles.Primary &&
+        legacy.HealthPort==8080,"m03.legacy_primary_credential_compatible");
+}
 
 var up=System.Net.NetworkInformation.OperationalStatus.Up;
 var down=System.Net.NetworkInformation.OperationalStatus.Down;
@@ -1364,6 +1390,18 @@ ProcessStartInfo InertChild()
     var info=new ProcessStartInfo(PowerShellRunner.Executable){UseShellExecute=false,WorkingDirectory=Environment.SystemDirectory};
     foreach(string arg in new[]{"-NoLogo","-NoProfile","-NonInteractive","-Command","Start-Sleep -Seconds 60"})info.ArgumentList.Add(arg);
     return info;
+}
+using(var first=NativeChildProcess.Start(InertChild()))
+using(var second=NativeChildProcess.Start(InertChild()))
+{
+    first.Input.Close();second.Input.Close();
+    Check(first.Process.Id!=second.Process.Id && !first.Process.HasExited && !second.Process.HasExited,
+        "m04.two_independent_owned_vendor_processes");
+    first.StopTree();
+    Check(first.Process.WaitForExit(5000) && !second.Process.HasExited,
+        "m05.stopping_one_tunnel_preserves_other");
+    second.StopTree();
+    Check(second.Process.WaitForExit(5000),"m06.second_tunnel_cleanup");
 }
 using(var fixture=NativeChildProcess.Start(InertChild()))
 {

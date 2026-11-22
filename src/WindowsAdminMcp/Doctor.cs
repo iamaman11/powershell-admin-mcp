@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -104,22 +105,31 @@ internal static class Doctor
                 vendorHash=Convert.ToHexString(SHA256.HashData(stream));
                 vendorReason=vendorHash==TunnelHost.VendorSha256?DoctorReason.OBSERVED:DoctorReason.HASH_MISMATCH;
             }
+            using var identity=WindowsIdentity.GetCurrent();
+            int expected=TunnelProfiles.Load(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "WindowsAdminMCP"),identity.User).Count;
             var processes=Process.GetProcessesByName("tunnel-client-runtime");
             try
             {
-                if(processes.Length>1) vendorReason=DoctorReason.MULTIPLE_PROCESSES;
-                else if(processes.Length==1)
+                if(processes.Length!=expected)vendorReason=processes.Length==0?DoctorReason.MISSING:DoctorReason.MULTIPLE_PROCESSES;
+                else if(processes.Length>=1)
                 {
-                    if(string.Equals(processes[0].MainModule?.FileName,vendor,StringComparison.OrdinalIgnoreCase))
-                        {tunnelPid=processes[0].Id;tunnelSession=processes[0].SessionId;
-                        tunnelStarted=new DateTimeOffset(processes[0].StartTime.ToUniversalTime());}
+                    if(processes.All(p=>string.Equals(p.MainModule?.FileName,vendor,StringComparison.OrdinalIgnoreCase) && p.SessionId!=0))
+                    {
+                        // Schema-1 remote receipts attest one specific process.
+                        // Do not falsely interpret it as evidence for every tunnel.
+                        if(expected==1)
+                        {
+                            tunnelPid=processes[0].Id;tunnelSession=processes[0].SessionId;
+                            tunnelStarted=new DateTimeOffset(processes[0].StartTime.ToUniversalTime());
+                        }
+                    }
                     else vendorReason=DoctorReason.NOT_CANONICAL;
                 }
-                else if(vendorReason==DoctorReason.OBSERVED)vendorReason=DoctorReason.MISSING;
             }
             finally{foreach(var process in processes)process.Dispose();}
         }
-        catch(Exception e) when(e is IOException or UnauthorizedAccessException or Win32Exception or InvalidOperationException or System.Security.SecurityException)
+        catch(Exception e) when(e is IOException or UnauthorizedAccessException or Win32Exception or InvalidOperationException or CryptographicException or JsonException or ArgumentException or System.Security.SecurityException)
         {vendorReason=DoctorReason.ACCESS_OR_READBACK_FAILED;}
         Add(DoctorComponent.Vendor,vendorReason==DoctorReason.OBSERVED?DoctorState.OK:DoctorState.DEGRADED,vendorReason,
             vendorReason==DoctorReason.OBSERVED?DoctorAction.NONE:DoctorAction.VERIFY_INSTALLATION);

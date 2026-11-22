@@ -13,8 +13,11 @@ acceptance matrix live in [Issue #56](https://github.com/iamaman11/powershell-ad
 | Chrome child | Native consented CDP connection, browser context/window/profile binding and background tab actions | `WindowChromeBroker`, `WindowChromeCdp` |
 | Native operator | Verified package/SCM/Task Scheduler maintenance, exact SHA, trial and rollback | `installer/*`, `PackageIntegrity`, `Doctor` |
 
-There is **one** SCM service, **one** SQLite job store, the existing elevated
-interactive USER frontend and the official tunnel runtime. A disposable UIA
+There is **one** SCM service, **one** SQLite job store, **one** elevated interactive
+USER worker and **one supervisor** for N independently owned official tunnel
+runtime children. Each distinct tunnel ID uses a separate encrypted key, local
+health port, vendor Job Object and MCP stdio child; their SYSTEM job store is
+shared, without a second daemon or database. A disposable UIA
 worker isolates providers that can block. The CDP child is owned by the USER
 frontend, not a separate permanent browser manager. No extra HTTP API.
 
