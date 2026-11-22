@@ -28,7 +28,7 @@ internal static class LegacyUnknownCleanup
 {
     internal const int ExpectedCount = 17;
     internal static readonly DateTimeOffset Earliest =
-        new(2026, 11, 18, 0, 0, 0, TimeSpan.Zero);
+        new(2026, 11, 17, 0, 0, 0, TimeSpan.Zero);
     internal static readonly DateTimeOffset Cutoff =
         new(2026, 11, 22, 0, 0, 0, TimeSpan.Zero);
     private const string BackupPrefix = "jobs.db.legacy-unknown-";
@@ -78,7 +78,7 @@ internal static class LegacyUnknownCleanup
         if (schema != StoreSchema.Current)
             return new(LegacyCleanupCode.STORE_UNAVAILABLE, SchemaVersion: schema);
         int active = checked((int)Scalar(db,
-            "SELECT count(*) FROM jobs WHERE state IN ('QUEUED','RUNNING','CANCEL_REQUESTED')"));
+            "SELECT count(*) FROM jobs WHERE state IN ('QUEUED','RUNNING','CANCEL_REQUESTED','WAITING_FOR_RESUME','WAITING_FOR_REBOOT')"));
         if (active > 0) return new(LegacyCleanupCode.ACTIVE_JOBS, SchemaVersion: schema);
         var initial = CandidateRows(db, null);
         if (initial.Count == 0)

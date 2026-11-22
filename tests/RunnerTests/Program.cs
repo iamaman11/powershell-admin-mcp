@@ -1431,11 +1431,27 @@ try
         using var update=db.CreateCommand();
         update.CommandText="""
             UPDATE jobs SET state='NEEDS_RECONCILIATION',
-                created_utc='2026-11-21T12:00:00.0000000+00:00'
+                created_utc=CASE WHEN op_key='legacy56-0' THEN '2026-11-17T23:36:25.6892759+00:00' ELSE '2026-11-21T12:00:00.0000000+00:00' END
             WHERE op_key LIKE 'legacy56-%' AND op_key<>'legacy56-preserved';
             UPDATE jobs SET state='COMPLETED' WHERE op_key='legacy56-preserved';
             """;
         update.ExecuteNonQuery();
+    }
+    using(var db=new Microsoft.Data.Sqlite.SqliteConnection("Data Source="+database+";Pooling=False"))
+    {
+        db.Open();
+        using var pending=db.CreateCommand();
+        pending.CommandText="UPDATE jobs SET state='WAITING_FOR_RESUME' WHERE op_key='legacy56-preserved'";
+        Check(pending.ExecuteNonQuery()==1,"legacy56.fixture_waiting_guard");
+    }
+    Check(LegacyUnknownCleanup.OnDatabase(database,false,null).Status==
+        LegacyCleanupCode.ACTIVE_JOBS,"legacy56.refuses_other_waiting_jobs");
+    using(var db=new Microsoft.Data.Sqlite.SqliteConnection("Data Source="+database+";Pooling=False"))
+    {
+        db.Open();
+        using var resumed=db.CreateCommand();
+        resumed.CommandText="UPDATE jobs SET state='COMPLETED' WHERE op_key='legacy56-preserved'";
+        Check(resumed.ExecuteNonQuery()==1,"legacy56.fixture_waiting_reset");
     }
     var plan=LegacyUnknownCleanup.OnDatabase(database,false,null);
     Check(plan is {Status:LegacyCleanupCode.READY,LegacyCount:17} &&

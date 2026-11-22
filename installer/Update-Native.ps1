@@ -492,7 +492,8 @@ try{
             throw 'UPDATE_LEGACY_REQUIRES_ACCEPTED_COMMIT'
         }
         if($d.store.needsReconciliation -ne 17 -or $d.store.queued -ne 0 -or
-           $d.store.running -ne 0 -or $d.store.cancelRequested -ne 0){
+           $d.store.running -ne 0 -or $d.store.cancelRequested -ne 0 -or
+            $d.store.waitingForResume -ne 0 -or $d.store.waitingForReboot -ne 0){
             throw 'UPDATE_LEGACY_NOT_QUIESCENT_OR_COUNT_MISMATCH'
         }
     }
