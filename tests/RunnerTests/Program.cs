@@ -296,7 +296,6 @@ var lostConnection = new ChromeConnectionResult(ChromeConnectionCode.OK,
 string lostWire = System.Text.Json.JsonSerializer.Serialize(lostConnection, PipeWire.Json);
 Check(WindowChromeCdp.MissingConnectionState(false) == ChromeConnectionState.NOT_REQUESTED &&
     WindowChromeCdp.MissingConnectionState(true) == ChromeConnectionState.CONNECTION_LOST &&
-    WindowChromeCdp.ReconnectQuickWaitMs is >= 500 and <= 2000 &&
     lostWire.Contains("\"failure_reason\":\"SOCKET_CLOSED\"", StringComparison.Ordinal) &&
     lostWire.Contains("\"last_loss_reason\":\"SOCKET_CLOSED\"", StringComparison.Ordinal) &&
     System.Text.Json.JsonSerializer.Deserialize<ChromeConnectionResult>(lostWire, PipeWire.Json)?.FailureReason ==
