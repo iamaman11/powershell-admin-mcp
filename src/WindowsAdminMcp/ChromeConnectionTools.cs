@@ -20,7 +20,7 @@ public enum ChromeConnectionCode
 public enum ChromeConnectionState
 {
     NOT_REQUESTED, DEBUGGING_UNAVAILABLE, CONSENT_PENDING, CONNECTED,
-    CONSENT_NOT_CONFIRMED, CONNECTION_FAILED, DISCONNECTED
+    CONSENT_NOT_CONFIRMED, CONNECTION_FAILED, CONSENT_WINDOW_UNAVAILABLE, DISCONNECTED
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<ChromeConnectionNextAction>))]

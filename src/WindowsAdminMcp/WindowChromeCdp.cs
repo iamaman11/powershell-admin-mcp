@@ -103,7 +103,7 @@ internal static partial class WindowChromeCdp
             return new(WindowActionCode.CDP_UNAVAILABLE, FailureStage: WindowFailureStage.CDP_CONNECT,
                 Detail: endpointFailure, ElapsedMs: clock.ElapsedMilliseconds);
         }
-        var connection = ConnectionState(endpoint!, request: true);
+        var connection = ConnectionState(endpoint!, request: true, hwnd);
         if (connection == ChromeConnectionState.CONSENT_PENDING)
             return new(WindowActionCode.CDP_CONSENT_PENDING,
                 FailureStage: WindowFailureStage.CDP_CONNECT, Detail: "ALLOW_CHROME_PROMPT",
