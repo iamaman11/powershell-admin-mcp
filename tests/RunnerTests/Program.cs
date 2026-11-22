@@ -289,6 +289,34 @@ Check(new ChromeBrokerRequest(Connection: connectRequest).Valid &&
     WindowChromeCdp.ConsentTimeout == TimeSpan.FromMinutes(5) &&
     connectReply.NextAction == ChromeConnectionNextAction.ALLOW_CHROME_PROMPT,
     "chrome.connection_consent_pending_is_typed_and_not_a_grant");
+var lostConnection = new ChromeConnectionResult(ChromeConnectionCode.OK,
+    ChromeConnectionState.CONNECTION_LOST, ChromeConnectionNextAction.RETRY_CONNECTION,
+    FailureReason: ChromeConnectionFailureReason.SOCKET_CLOSED,
+    LastLossReason: ChromeConnectionFailureReason.SOCKET_CLOSED);
+string lostWire = System.Text.Json.JsonSerializer.Serialize(lostConnection, PipeWire.Json);
+Check(WindowChromeCdp.MissingConnectionState(false) == ChromeConnectionState.NOT_REQUESTED &&
+    WindowChromeCdp.MissingConnectionState(true) == ChromeConnectionState.CONNECTION_LOST &&
+    lostWire.Contains("\"failure_reason\":\"SOCKET_CLOSED\"", StringComparison.Ordinal) &&
+    lostWire.Contains("\"last_loss_reason\":\"SOCKET_CLOSED\"", StringComparison.Ordinal) &&
+    System.Text.Json.JsonSerializer.Deserialize<ChromeConnectionResult>(lostWire, PipeWire.Json)?.FailureReason ==
+        ChromeConnectionFailureReason.SOCKET_CLOSED &&
+    System.Text.Json.JsonSerializer.Deserialize<ChromeConnectionResult>(lostWire, PipeWire.Json)?.LastLossReason ==
+        ChromeConnectionFailureReason.SOCKET_CLOSED,
+    "chrome.lost_approved_connection_has_typed_reason_not_not_requested");
+Check(WindowChromeCdp.CdpTransportFailure(new IOException("CDP_SOCKET_CLOSED")) &&
+    WindowChromeCdp.CdpTransportFailure(new OperationCanceledException()) &&
+    WindowChromeCdp.CdpTransportFailure(new System.Text.Json.JsonException("bad payload")) &&
+    !WindowChromeCdp.CdpTransportFailure(new InvalidOperationException("CDP_COMMAND_REJECTED")) &&
+    !WindowChromeCdp.CdpTransportFailure(new InvalidOperationException("CDP_TARGET_DETACHED")) &&
+    !WindowChromeCdp.CdpTransportFailure(new KeyNotFoundException()),
+    "chrome.command_or_target_error_preserves_authorized_browser_socket");
+Check(WindowChromeCdp.CanRetryCdpAction(new(WindowActionCode.CDP_UNAVAILABLE), connected: false) &&
+    !WindowChromeCdp.CanRetryCdpAction(new(WindowActionCode.CDP_UNAVAILABLE), connected: true) &&
+    !WindowChromeCdp.CanRetryCdpAction(new(WindowActionCode.CDP_FAILED_UNKNOWN_EFFECT,
+        EffectUnknown: true, ExecutionMethod: WindowExecutionMethod.CHROME_CDP), connected: false) &&
+    !WindowChromeCdp.CanRetryCdpAction(new(WindowActionCode.COMPLETED,
+        ExecutionMethod: WindowExecutionMethod.CHROME_CDP), connected: false),
+    "chrome.retry_only_before_any_action_dispatch");
 Check(WindowAction.WindowTitleMatches("Example Domain — Camoufox", "Example Domain") &&
     WindowAction.WindowTitleMatches("Example Domain - Google Chrome", "Example Domain") &&
     WindowAction.WindowTitleMatches("Exact title", "Exact title") &&

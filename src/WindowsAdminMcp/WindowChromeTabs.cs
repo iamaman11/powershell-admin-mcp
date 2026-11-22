@@ -29,27 +29,48 @@ internal static partial class WindowChromeCdp
     private static CancellationTokenSource? _pendingDeadline;
     private static Uri? _pendingEndpoint;
     internal static readonly TimeSpan ConsentTimeout = TimeSpan.FromMinutes(5);
+    internal const int ReconnectQuickWaitMs = 1200;
     private static readonly Dictionary<string, string> AttachedTabs = new(StringComparer.Ordinal);
     private static bool TabConnected => _tabSocket?.State == WebSocketState.Open && _tabSession is not null;
+    private static bool _hadConnection;
+    private static ChromeConnectionFailureReason? _lastFailure;
+    private static ChromeConnectionFailureReason? _lastLossReason;
 
-    private static async Task<Session> TabSessionAsync(Uri endpoint, CancellationToken deadline)
+    internal static ChromeConnectionState MissingConnectionState(bool hadConnection) =>
+        hadConnection ? ChromeConnectionState.CONNECTION_LOST : ChromeConnectionState.NOT_REQUESTED;
+
+    internal static bool CdpTransportFailure(Exception e) => e is
+        WebSocketException or IOException or OperationCanceledException or JsonException ||
+        e is InvalidOperationException { Message: "CDP_SOCKET_CLOSED" };
+
+    private static void ObserveCdpFailure(Exception e)
+    {
+        if (e is InvalidOperationException { Message: "CDP_TARGET_DETACHED" })
+            AttachedTabs.Clear();
+        if (!CdpTransportFailure(e)) return;
+        _lastFailure = e switch
+        {
+            OperationCanceledException => ChromeConnectionFailureReason.TIMEOUT,
+            JsonException => ChromeConnectionFailureReason.PROTOCOL_ERROR,
+            IOException { Message: "CDP_SOCKET_CLOSED" } or
+                InvalidOperationException { Message: "CDP_SOCKET_CLOSED" } =>
+                ChromeConnectionFailureReason.SOCKET_CLOSED,
+            _ => ChromeConnectionFailureReason.TRANSPORT_ERROR
+        };
+        _lastLossReason = _lastFailure;
+        CloseTabConnection();
+    }
+
+    private static Task<Session> TabSessionAsync(Uri endpoint, CancellationToken deadline)
     {
         if (TabConnected && _tabEndpoint == endpoint)
         {
             _tabSession!.SetDeadline(deadline);
-            return _tabSession!;
+            return Task.FromResult(_tabSession!);
         }
-        CloseTabConnection();
-        var socket = new ClientWebSocket();
-        try
-        {
-            await socket.ConnectAsync(endpoint, deadline);
-            _tabSocket = socket;
-            _tabEndpoint = endpoint;
-            _tabSession = new Session(socket, deadline);
-            return _tabSession;
-        }
-        catch { socket.Dispose(); throw; }
+        // Reconnect only through ConnectionState, which verifies the selected
+        // native Chrome window before any consent handshake can begin.
+        throw new IOException("CDP_SOCKET_CLOSED");
     }
 
     internal static void CloseTabConnection()
@@ -80,19 +101,68 @@ internal static partial class WindowChromeCdp
     // Chrome displays the per-connection dialog in its last-active window.
     // Select the verified native window immediately before the handshake;
     // once authorized, all tab operations remain background-only.
-    private static bool PrepareConsentWindow(IntPtr hwnd)
+    private static bool PrepareConsentWindow(IntPtr hwnd,
+        out ChromeConnectionFailureReason failure)
     {
-        if (hwnd == IntPtr.Zero || !IsWindowVisible(hwnd)) return false;
-        if (IsIconic(hwnd)) _ = ShowWindow(hwnd, 9); // SW_RESTORE
-        if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd)) return false;
-        if (!SpinWait.SpinUntil(() => GetForegroundWindow() == hwnd, 500)) return false;
+        failure = ChromeConnectionFailureReason.FOREGROUND_DENIED;
+        if (hwnd == IntPtr.Zero || !IsWindowVisible(hwnd))
+        {
+            failure = ChromeConnectionFailureReason.WINDOW_HIDDEN;
+            return false;
+        }
+        if (IsIconic(hwnd))
+        {
+            _ = ShowWindowAsync(hwnd, 9); // SW_RESTORE on Chrome's own UI thread
+            if (!SpinWait.SpinUntil(() => !IsIconic(hwnd), 1500))
+            {
+                failure = ChromeConnectionFailureReason.WINDOW_MINIMIZED;
+                return false;
+            }
+        }
+        if (GetForegroundWindow() != hwnd)
+        {
+            _ = SetForegroundWindow(hwnd);
+            if (!SpinWait.SpinUntil(() => GetForegroundWindow() == hwnd, 750))
+            {
+                // A native UIA focus request sometimes succeeds when Windows
+                // refuses SetForegroundWindow. Never send synthetic ALT keys.
+                try
+                {
+                    var root = AutomationElement.FromHandle(hwnd);
+                    if (root?.Current.IsKeyboardFocusable == true) root.SetFocus();
+                }
+                catch (Exception e) when (e is COMException or ElementNotAvailableException or
+                    InvalidOperationException) { }
+                if (!SpinWait.SpinUntil(() => GetForegroundWindow() == hwnd, 750)) return false;
+            }
+        }
         Thread.Sleep(150); // Let Chrome record its newly active window.
         return GetForegroundWindow() == hwnd;
+    }
+
+    private static void ProbeTabConnection()
+    {
+        if (!TabConnected) return;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+        try
+        {
+            _tabSession!.SetDeadline(timeout.Token);
+            _ = _tabSession.Call("Browser.getVersion", new { }).GetAwaiter().GetResult();
+        }
+        catch (Exception e) when (e is WebSocketException or IOException or JsonException or
+            OperationCanceledException or InvalidOperationException or KeyNotFoundException)
+        { ObserveCdpFailure(e); }
     }
 
     private static ChromeConnectionState ConnectionState(Uri endpoint, bool request,
         IntPtr consentWindow, bool retry = false)
     {
+        if (!TabConnected && _tabSession is not null)
+        {
+            _lastFailure ??= ChromeConnectionFailureReason.SOCKET_CLOSED;
+            _lastLossReason = _lastFailure;
+            CloseTabConnection();
+        }
         if (TabConnected && _tabEndpoint == endpoint) return ChromeConnectionState.CONNECTED;
         if (_pendingConnect is not null && _pendingEndpoint == endpoint)
         {
@@ -109,16 +179,26 @@ internal static partial class WindowChromeCdp
                 _tabSocket = socket;
                 _tabEndpoint = endpoint;
                 _tabSession = new Session(socket, CancellationToken.None);
+                _hadConnection = true;
+                _lastFailure = null;
                 return ChromeConnectionState.CONNECTED;
             }
             ChromeConnectionState failure = _pendingConnect.IsCanceled
                 ? ChromeConnectionState.CONSENT_TIMED_OUT
                 : ChromeConnectionState.CONNECTION_FAILED;
+            _lastFailure = _pendingConnect.IsCanceled
+                ? ChromeConnectionFailureReason.CONSENT_TIMEOUT
+                : ChromeConnectionFailureReason.HANDSHAKE_FAILED;
             if (!retry) return failure;
         }
-        if (!request) return ChromeConnectionState.NOT_REQUESTED;
-        if (!PrepareConsentWindow(consentWindow)) return ChromeConnectionState.CONSENT_WINDOW_UNAVAILABLE;
+        if (!request) return MissingConnectionState(_hadConnection);
+        if (!PrepareConsentWindow(consentWindow, out var activationFailure))
+        {
+            _lastFailure = activationFailure;
+            return ChromeConnectionState.CONSENT_WINDOW_UNAVAILABLE;
+        }
         CloseTabConnection();
+        _lastFailure = null; // A new pending handshake is not a failed attempt.
         _pendingSocket = new ClientWebSocket();
         _pendingEndpoint = endpoint;
         _pendingDeadline = new CancellationTokenSource(ConsentTimeout);
@@ -127,6 +207,12 @@ internal static partial class WindowChromeCdp
         // selection kills this worker before the approval dialog completes.
         _ = _pendingConnect.ContinueWith(t => { _ = t.Exception; },
             TaskContinuationOptions.OnlyOnFaulted);
+        // A previous user-approved Chrome session commonly reconnects without
+        // another dialog. Let that handshake complete during this same call.
+        var pending = _pendingConnect!;
+        if (_hadConnection && SpinWait.SpinUntil(() => pending.IsCompleted,
+            ReconnectQuickWaitMs))
+            return ConnectionState(endpoint, request: false, consentWindow: consentWindow);
         return ChromeConnectionState.CONSENT_PENDING;
     }
 
@@ -138,9 +224,20 @@ internal static partial class WindowChromeCdp
             return new(ChromeConnectionCode.PROFILE_MISMATCH,
                 ChromeConnectionState.NOT_REQUESTED, ChromeConnectionNextAction.SELECT_PROFILE);
 
-        if (request.Action == ChromeConnectionAction.STATUS && _pendingConnect is null && !TabConnected)
-            return new(ChromeConnectionCode.OK, ChromeConnectionState.NOT_REQUESTED,
-                ChromeConnectionNextAction.RETRY_CONNECTION, profile);
+        if (request.Action == ChromeConnectionAction.STATUS)
+        {
+            ProbeTabConnection();
+            if (_pendingConnect is null && !TabConnected)
+            {
+                if (_hadConnection && _lastLossReason is null)
+                    _lastLossReason = ChromeConnectionFailureReason.SOCKET_CLOSED;
+                return new(ChromeConnectionCode.OK, MissingConnectionState(_hadConnection),
+                    ChromeConnectionNextAction.RETRY_CONNECTION, profile,
+                    FailureReason: _lastFailure ?? (_hadConnection
+                        ? ChromeConnectionFailureReason.SOCKET_CLOSED : null),
+                    LastLossReason: _lastLossReason);
+            }
+        }
         if (!TryEndpoint(out var endpoint, out string failure))
             return new(ChromeConnectionCode.OK, ChromeConnectionState.DEBUGGING_UNAVAILABLE,
                 ChromeConnectionNextAction.ENABLE_CHROME_DEBUGGING, profile, Detail: failure);
@@ -154,7 +251,9 @@ internal static partial class WindowChromeCdp
             ChromeConnectionState.CONNECTED => ChromeConnectionNextAction.NONE,
             _ => ChromeConnectionNextAction.RETRY_CONNECTION
         };
-        return new(ChromeConnectionCode.OK, state, next, profile);
+        return new(ChromeConnectionCode.OK, state, next, profile,
+            FailureReason: state == ChromeConnectionState.CONNECTED ? null : _lastFailure,
+            LastLossReason: _lastLossReason);
     }
 
     internal static bool ValidTargetId(string? id) => id is { Length: >= 16 and <= 64 } &&
@@ -426,14 +525,31 @@ internal static partial class WindowChromeCdp
                 return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: "NOT_CHROME");
             if (expectedProfile is not null && !VerifiedChromeProfile(hwnd, expectedProfile))
                 return new(WindowInspectCode.CDP_CONTEXT_MISMATCH, [], Detail: "PROFILE_NOT_VERIFIED");
-            var connection = ConnectionState(endpoint!, request: true, hwnd);
-            if (connection == ChromeConnectionState.CONSENT_PENDING)
-                return new(WindowInspectCode.CDP_CONSENT_PENDING, [], Detail: "ALLOW_CHROME_PROMPT");
-            if (connection != ChromeConnectionState.CONNECTED)
-                return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: connection.ToString());
-            return InspectTabAsync(endpoint!, hwnd, windowId, scope, tabId, maxElements,
-                offset, nameFilter, roleFilter, expectedProfile, expectedOrigin, expectedUrl)
-                .GetAwaiter().GetResult();
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                var connection = ConnectionState(endpoint!, request: true, hwnd);
+                if (connection == ChromeConnectionState.CONSENT_PENDING)
+                    return new(WindowInspectCode.CDP_CONSENT_PENDING, [], Detail: "ALLOW_CHROME_PROMPT");
+                if (connection != ChromeConnectionState.CONNECTED)
+                    return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: connection.ToString());
+                try
+                {
+                    return InspectTabAsync(endpoint!, hwnd, windowId, scope, tabId, maxElements,
+                        offset, nameFilter, roleFilter, expectedProfile, expectedOrigin, expectedUrl)
+                        .GetAwaiter().GetResult();
+                }
+                catch (Exception e) when (e is WebSocketException or IOException or JsonException or
+                    OperationCanceledException or InvalidOperationException or KeyNotFoundException)
+                {
+                    bool transportLost = CdpTransportFailure(e);
+                    ObserveCdpFailure(e);
+                    if (transportLost && attempt == 0) continue; // Read-only retry.
+                    return new(WindowInspectCode.CDP_UNAVAILABLE, [],
+                        Detail: e is InvalidOperationException ? e.Message :
+                            transportLost ? "CDP_TRANSPORT_LOST" : e.GetType().Name);
+                }
+            }
+            return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: "CDP_RECONNECT_FAILED");
         }
         catch (InvalidOperationException e) when (e.Message == "CDP_WINDOW_NOT_UNIQUE")
         {
@@ -444,7 +560,7 @@ internal static partial class WindowChromeCdp
             OperationCanceledException or InvalidOperationException or KeyNotFoundException or
             ArgumentException or Win32Exception)
         {
-            CloseTabConnection();
+            ObserveCdpFailure(e);
             return new(WindowInspectCode.CDP_UNAVAILABLE,
                 [], Detail: e is InvalidOperationException ? e.Message : e is WebSocketException ws
                     ? $"CDP_WEBSOCKET_{ws.WebSocketErrorCode}" : e.GetType().Name);
@@ -713,27 +829,40 @@ internal static partial class WindowChromeCdp
         if (!TryEndpoint(out var endpoint, out string endpointFailure))
             return new(WindowActionCode.CDP_UNAVAILABLE, FailureStage: WindowFailureStage.CDP_CONNECT,
                 Detail: endpointFailure);
-        var connection = ConnectionState(endpoint!, request: true, hwnd);
-        if (connection == ChromeConnectionState.CONSENT_PENDING)
-            return new(WindowActionCode.CDP_CONSENT_PENDING,
-                FailureStage: WindowFailureStage.CDP_CONNECT, Detail: "ALLOW_CHROME_PROMPT");
-        if (connection != ChromeConnectionState.CONNECTED)
-            return new(WindowActionCode.CDP_UNAVAILABLE,
-                FailureStage: WindowFailureStage.CDP_CONNECT, Detail: connection.ToString());
         try
         {
-            return InvokeTabAsync(endpoint!, hwnd, request, target, clock).GetAwaiter().GetResult();
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                var connection = ConnectionState(endpoint!, request: true, hwnd);
+                if (connection == ChromeConnectionState.CONSENT_PENDING)
+                    return new(WindowActionCode.CDP_CONSENT_PENDING,
+                        FailureStage: WindowFailureStage.CDP_CONNECT, Detail: "ALLOW_CHROME_PROMPT");
+                if (connection != ChromeConnectionState.CONNECTED)
+                    return new(WindowActionCode.CDP_UNAVAILABLE,
+                        FailureStage: WindowFailureStage.CDP_CONNECT, Detail: connection.ToString());
+                var result = InvokeTabAsync(endpoint!, hwnd, request, target, clock)
+                    .GetAwaiter().GetResult();
+                // Only a proven pre-dispatch transport failure may be retried.
+                // Never replay a click after its effect could be unknown.
+                if (attempt == 0 && CanRetryCdpAction(result, TabConnected)) continue;
+                return result;
+            }
+            return new(WindowActionCode.CDP_UNAVAILABLE, FailureStage: WindowFailureStage.CDP_CONNECT);
         }
         catch (Exception e) when (e is WebSocketException or IOException or JsonException or
             OperationCanceledException or InvalidOperationException or KeyNotFoundException)
         {
-            CloseTabConnection();
+            ObserveCdpFailure(e);
             return new(WindowActionCode.CDP_UNAVAILABLE, FailureStage: WindowFailureStage.CDP_CONNECT,
                 ExceptionType: e.GetType().Name,
                 Detail: e is WebSocketException ws ? $"CDP_WEBSOCKET_{ws.WebSocketErrorCode}" : null,
                 ElapsedMs: clock.ElapsedMilliseconds);
         }
     }
+
+    internal static bool CanRetryCdpAction(WindowActionResult result, bool connected) =>
+        result.Status == WindowActionCode.CDP_UNAVAILABLE && !result.EffectUnknown &&
+        result.ExecutionMethod is null && !connected;
 
     private static async Task<WindowActionResult> InvokeTabAsync(Uri endpoint, IntPtr hwnd,
         WindowActionRequest request, TabElementRef target, Stopwatch clock)
@@ -897,10 +1026,12 @@ internal static partial class WindowChromeCdp
         catch (Exception e) when (e is WebSocketException or IOException or JsonException or
             OperationCanceledException or InvalidOperationException or KeyNotFoundException)
         {
-            CloseTabConnection();
+            ObserveCdpFailure(e);
             return new(dispatched ? WindowActionCode.CDP_FAILED_UNKNOWN_EFFECT : WindowActionCode.CDP_UNAVAILABLE,
                 EffectUnknown: dispatched, FailureStage: dispatched ? WindowFailureStage.DISPATCH_INPUT :
                     WindowFailureStage.CDP_TARGET, ExceptionType: e.GetType().Name,
+                Detail: e is InvalidOperationException { Message: "CDP_COMMAND_REJECTED" } or
+                    InvalidOperationException { Message: "CDP_TARGET_DETACHED" } ? e.Message : null,
                 ElapsedMs: clock.ElapsedMilliseconds,
                 ExecutionMethod: dispatched ? WindowExecutionMethod.CHROME_CDP : null);
         }
@@ -920,5 +1051,5 @@ internal static partial class WindowChromeCdp
     private static extern bool IsIconic(IntPtr hwnd);
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ShowWindow(IntPtr hwnd, int command);
+    private static extern bool ShowWindowAsync(IntPtr hwnd, int command);
 }

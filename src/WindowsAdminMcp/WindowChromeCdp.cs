@@ -300,7 +300,7 @@ internal static partial class WindowChromeCdp
         catch (Exception e) when (e is WebSocketException or IOException or JsonException or
                                    OperationCanceledException or InvalidOperationException or KeyNotFoundException)
         {
-            CloseTabConnection();
+            ObserveCdpFailure(e);
             return new(dispatched ? WindowActionCode.CDP_FAILED_UNKNOWN_EFFECT : WindowActionCode.CDP_UNAVAILABLE,
                 EffectUnknown: dispatched, FailureStage: dispatched ? WindowFailureStage.DISPATCH_INPUT :
                     WindowFailureStage.CDP_CONNECT, ExceptionType: e.GetType().Name,
@@ -333,13 +333,25 @@ internal static partial class WindowChromeCdp
                 do
                 {
                     part = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), _deadline);
+                    if (part.MessageType == WebSocketMessageType.Close)
+                        throw new IOException("CDP_SOCKET_CLOSED");
                     if (part.MessageType != WebSocketMessageType.Text || stream.Length + part.Count > MaxMessageBytes)
                         throw new JsonException("CDP_MESSAGE_INVALID");
                     stream.Write(buffer, 0, part.Count);
                 } while (!part.EndOfMessage);
                 using var response = JsonDocument.Parse(stream.ToArray());
-                if (!response.RootElement.TryGetProperty("id", out var responseId) ||
-                    responseId.GetInt32() != id) continue; // Ignore asynchronous CDP events.
+                if (!response.RootElement.TryGetProperty("id", out var responseId))
+                {
+                    // A page may detach without closing the browser socket.
+                    // Invalidate its tab attachment, not the authorized CDP link.
+                    if (response.RootElement.TryGetProperty("method", out var eventMethod) &&
+                        eventMethod.GetString() == "Inspector.detached" &&
+                        response.RootElement.TryGetProperty("sessionId", out var eventSession) &&
+                        eventSession.GetString() == sessionId)
+                        throw new InvalidOperationException("CDP_TARGET_DETACHED");
+                    continue;
+                }
+                if (responseId.GetInt32() != id) continue;
                 if (response.RootElement.TryGetProperty("error", out _))
                     throw new InvalidOperationException("CDP_COMMAND_REJECTED");
                 return response.RootElement.GetProperty("result").Clone();
