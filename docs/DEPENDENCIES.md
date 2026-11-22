@@ -1,7 +1,7 @@
 # Tested dependency pins and upgrade gates (Issue #56, P0-F)
 
 The app is deliberately one .NET Windows service, one SQLite store, one elevated
-interactive USER frontend and one official tunnel. Dependency updates never
+interactive USER worker and one supervisor for independently configured official tunnels. Dependency updates never
 install themselves. This inventory records **build intent**; a separately
 installed machine must be checked using `powershell_status` and native doctor.
 

@@ -636,13 +636,20 @@ try{
             try{
                 $state=& $startup -Action Status|ConvertFrom-Json
                 $v=@($state.tunnel_instances)
-                if($state.task -eq 'Running' -and $v.Count -eq 1 -and
-                    $v[0].ExecutablePath -ieq (Join-Path $root 'client\tunnel-client-runtime.exe')){
-                    $listener=@(Get-NetTCPConnection -LocalAddress '127.0.0.1' -LocalPort 8080 -State Listen -ErrorAction SilentlyContinue)
-                    if($listener.Count -eq 1 -and $listener[0].OwningProcess -eq $v[0].ProcessId){
-                        $health=Invoke-WebRequest -Uri 'http://127.0.0.1:8080/readyz' -NoProxy -TimeoutSec 3
-                        if($health.StatusCode -eq 200 -and $health.Content.Trim() -ceq 'ready'){$ready=$true;break}
+                $profiles=@(& $startup -Action Profiles|ConvertFrom-Json)
+                if($state.task -eq 'Running' -and $v.Count -eq $profiles.Count -and $profiles.Count -gt 0 -and
+                    @($v|Where-Object {$_.ExecutablePath -ine (Join-Path $root 'client\tunnel-client-runtime.exe')}).Count -eq 0){
+                    $used=@{};$allReady=$true
+                    foreach($profile in $profiles){
+                        $port=[int]$profile.health_port
+                        $listener=@(Get-NetTCPConnection -LocalAddress '127.0.0.1' -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
+                        if($listener.Count -ne 1 -or $used.ContainsKey([string]$listener[0].OwningProcess) -or
+                            @($v|Where-Object {$_.ProcessId -eq $listener[0].OwningProcess}).Count -ne 1){$allReady=$false;break}
+                        $used[[string]$listener[0].OwningProcess]=$true
+                        $health=Invoke-WebRequest -Uri "http://127.0.0.1:$port/readyz" -NoProxy -TimeoutSec 3
+                        if($health.StatusCode -ne 200 -or $health.Content.Trim() -cne 'ready'){$allReady=$false;break}
                     }
+                    if($allReady){$ready=$true;break}
                 }
             }catch{ # A readiness failure is never acceptance.
             }

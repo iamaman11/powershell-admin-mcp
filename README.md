@@ -5,7 +5,7 @@ Candidate native MCP 0.8.1-dev; .NET 10 LTS (current runtime 10.0.15, build SDK 
 
 ## Architecture and execution context
 
-One Windows service (SYSTEM) owns the durable SQLite queue, state transitions, encrypted job data and concurrent system execution. One existing interactive elevated tunnel host runs the same native PowerShellRunner for USER jobs in its own Windows logon. The MCP frontend uses the existing authenticated local pipe. The service derives the SID, logon SID and session from Windows rather than accepting arbitrary user IDs. No password/token duplication, separate tunnel, new service, or automatic user impersonation for execution.
+One Windows service (SYSTEM) owns the durable SQLite queue, state transitions, encrypted job data and concurrent system execution. One interactive elevated supervisor owns one USER worker and **one or more independent official OpenAI Tunnel processes**; each tunnel starts its own stateless MCP stdio child, and all children use the existing authenticated local service pipe. The service derives the SID, logon SID and session from Windows rather than accepting arbitrary user IDs. No duplicate SYSTEM service, SQLite store, logon task or automatic user impersonation for execution.
 
 ### Legacy test-generation cleanup (#56)
 
@@ -39,6 +39,23 @@ $admin = "$env:ProgramFiles\WindowsAdminMCP\native\WindowsAdminMCP.ps1"
 ```
 
 Stop disconnects the interactive tunnel but does not stop the durable system service. For deliberate offline maintenance use an independent local console. The canonical updater drains work itself after package verification; callers do not need to clear the queue manually. The old root PowerShell MCP and v0.7 installer/launch path are retired; do not run old copies left outside the native package. The source root installer forwards to installer/Install-Native.ps1. Credential configuration is local-only and one-time; existing protected DPAPI credentials are reused for updates.
+
+### Additional independent OpenAI Tunnel profiles (#56 P0-G)
+
+In the **same elevated interactive local PowerShell** session, keep the existing primary tunnel and add a distinct second tunnel ID with its own runtime key (never paste the key into command arguments):
+
+```powershell
+& $admin list-tunnels
+& $admin add-tunnel -ProfileId second -TunnelId tunnel_0123456789abcdef0123456789abcdef
+& $admin list-tunnels
+& $admin configure-tunnel -ProfileId second  # Rotate its runtime key without affecting primary
+& $admin disable-tunnel -ProfileId second
+& $admin enable-tunnel -ProfileId second
+# Deliberate permanent removal, with an interactive confirmation:
+& $admin remove-tunnel -ProfileId second
+```
+
+Replace the example tunnel ID with the **actual newly created, distinct OpenAI Tunnel ID** and enter its separately issued runtime key only in the encrypted local prompt. The original primary DPAPI credential remains compatible and stays on `127.0.0.1:8080`; new profiles use their own protected DPAPI files under ProgramData and distinct loopback health ports. The single existing supervisor notices additions, disables and removals without restarting healthy peers. A 401/403 blocks **only that profile** until its credentials change or it is explicitly re-enabled; a vendor crash is restarted for that profile. `status` reports each profile and vendor PID. Both ChatGPT connectors must be individually configured to their corresponding tunnel IDs; local readiness is **not** proof that both externally deliver the same MCP catalog. Do not start two active clients with the **same** tunnel ID.
 
 ## Install, update, trial and rollback
 
