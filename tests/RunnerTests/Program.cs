@@ -1669,7 +1669,7 @@ try
         db.Open();
         using var age=db.CreateCommand();
         age.CommandText="""
-            UPDATE jobs SET state='COMPLETED',updated_utc=$old WHERE op_key='r-cold-terminal';
+            UPDATE jobs SET state='COMPLETED',completed_steps=1,updated_utc=$old WHERE op_key='r-cold-terminal';
             UPDATE jobs SET state='NEEDS_RECONCILIATION',updated_utc=$old WHERE op_key='r-cold-unknown';
             UPDATE jobs SET state='WAITING_FOR_RESUME',updated_utc=$old WHERE op_key='r-cold-waiting';
             """;
