@@ -40,6 +40,11 @@ Check(UpdateTools.ValidArguments(UpdateToolAction.REQUEST, false, null) &&
     !UpdateTools.ValidArguments(UpdateToolAction.REQUEST, true, null) &&
     !UpdateTools.ValidArguments(UpdateToolAction.STATUS, false, new string('a', 40)),
     "update.explicit_accept_confirmation_and_exact_sha");
+Check(UpdateTools.ValidArguments(UpdateToolAction.FORGET_LEGACY,false,new string('a',40)) &&
+    !UpdateTools.ValidArguments(UpdateToolAction.FORGET_LEGACY,false,null) &&
+    !UpdateTools.ValidArguments(UpdateToolAction.FORGET_LEGACY,true,new string('a',40)) &&
+    !UpdateTools.ValidArguments(UpdateToolAction.FORGET_LEGACY,false,new string('z',40)),
+    "update.legacy_forget_requires_exact_commit_without_accept");
 var doctorSnapshot = new DoctorSnapshot(DoctorState.DEGRADED,
     [new DoctorCheck(DoctorComponent.Store, DoctorState.DEGRADED,
         DoctorReason.RECONCILIATION_REQUIRED, DoctorAction.INSPECT_JOBS)],

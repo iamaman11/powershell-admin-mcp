@@ -35,6 +35,16 @@ Check (-not(Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operator
     -not(Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript $operatorId '' '' 'accept' $acceptCommit)) 'operator.accept_requires_confirmation'
 $action.Arguments=$acceptArguments+' -Unexpected'
 Check (-not(Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript)) 'operator.rejects_appended_task_arguments'
+$forgetArgs=New-OperatorArguments $operatorScript 'forget' $operatorId $acceptCommit
+$action.Arguments=$forgetArgs
+Check ((Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript) -and
+    (Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript $operatorId '' '' 'forget' $acceptCommit)) 'operator.exact_legacy_cleanup_definition'
+Check (-not(Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript $operatorId '' '' 'forget' ('c'*40)) -and
+    -not(Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript $operatorId '' '' 'accept' $acceptCommit)) 'operator.legacy_cleanup_no_cross_mode'
+$action.Arguments=$forgetArgs.Replace(' -ExpectedCommit '+$acceptCommit,'')
+Check (-not(Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript)) 'operator.legacy_cleanup_requires_exact_commit'
+$action.Arguments=$forgetArgs+' -Unexpected'
+Check (-not(Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript)) 'operator.legacy_cleanup_rejects_injected_args'
 $action.Arguments=New-OperatorArguments $operatorScript 'update' $operatorId
 $actual=[Security.Principal.WindowsIdentity]::GetCurrent()
 $task.Principal.UserId=$actual.User.Translate([Security.Principal.NTAccount]).Value

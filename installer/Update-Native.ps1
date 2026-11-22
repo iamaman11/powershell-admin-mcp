@@ -1,7 +1,7 @@
 # Local operator orchestration only. The existing installer owns verification,
 # protected file swaps and rollback. SCM/Task Scheduler own process lifetime.
 [CmdletBinding()]
-param([ValidateSet('update','rollback','accept')][string]$Action='update',
+param([ValidateSet('update','rollback','accept','forget')][string]$Action='update',
       [switch]$RemoteAcceptanceConfirmed,
       [switch]$ScheduledOperator,
        [ValidatePattern('^[a-f0-9]{32}$')][string]$OperationId,
@@ -280,6 +280,8 @@ function Test-ScheduledUpdateIdentity($task,[string]$account,[string]$updater,[s
                                        [string]$mode='update',[string]$expectedCommit=''){
     $verb=if($mode -ceq 'accept'){
         '-Action accept -RemoteAcceptanceConfirmed -ExpectedCommit '+$expectedCommit
+    }elseif($mode -ceq 'forget' -and $expectedCommit -cmatch '^[a-f0-9]{40}$'){
+        '-Action forget -ExpectedCommit '+$expectedCommit
     }elseif($mode -ceq 'update' -and -not $expectedCommit){
         '-Action update'
     }else{return $false}
@@ -301,8 +303,9 @@ if(-not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProc
     throw 'UPDATE_LOCAL_INTERACTIVE_ADMIN_REQUIRED'
 }
 if($ScheduledOperator){
-    if($Action -notin @('update','accept') -or -not $OperationId -or
+    if($Action -notin @('update','accept','forget') -or -not $OperationId -or
        ($Action -eq 'accept' -and (-not $RemoteAcceptanceConfirmed -or -not $ExpectedCommit)) -or
+       ($Action -eq 'forget' -and ($RemoteAcceptanceConfirmed -or -not $ExpectedCommit)) -or
        ($Action -eq 'update' -and ($RemoteAcceptanceConfirmed -or $ExpectedCommit))){
         throw 'UPDATE_SCHEDULED_OPERATION_INVALID'
     }
@@ -320,7 +323,7 @@ $startup=Join-Path $root 'native\NativeStartup.ps1'
 $installer=Join-Path $PSScriptRoot 'Install-Native.ps1'
 $repo='iamaman11/powershell-admin-mcp'
 $checkout=Split-Path -Parent $PSScriptRoot
-$stage=if($Action -eq 'accept'){'accept_preflight'}else{'preflight'}
+$stage=if($Action -eq 'accept'){'accept_preflight'}elseif($Action -eq 'forget'){'legacy_preflight'}else{'preflight'}
 $download=$null
 $stopping=$false
 $maintenance=$false
@@ -333,14 +336,17 @@ $cancelledQueued=0
 $cancelRequested=0
 $current=$null
 $installed=$null
+$legacyDeleted=$null
+$legacyRemaining=$null
 function Write-OperatorStage([string]$state,[string]$reason=''){
     if(-not $ScheduledOperator){return}
     $target=Join-Path $root '.operator-update.json'
     $temp=Join-Path $root ('.operator-update-'+$OperationId+'.tmp')
     $commit=if($null -ne $current){$current.commit}elseif($null -ne $installed){$installed.commit}else{$null}
     $status=[ordered]@{schema=1;operation_id=$OperationId;state=$state;stage=$stage;
-        operation_action=if($Action -eq 'accept'){'ACCEPT'}else{'REQUEST'};
-        commit=$commit;reason=$reason;rollback_pending=(Test-Path -LiteralPath (Join-Path $root '.rollback\journal.json'));
+        operation_action=if($Action -eq 'accept'){'ACCEPT'}elseif($Action -eq 'forget'){'FORGET_LEGACY'}else{'REQUEST'};
+        commit=$commit;reason=$reason;deleted_count=$legacyDeleted;remaining_count=$legacyRemaining;
+        rollback_pending=(Test-Path -LiteralPath (Join-Path $root '.rollback\journal.json'));
         updated_utc=[DateTimeOffset]::UtcNow.ToString('o')}
     [IO.File]::WriteAllText($temp,($status|ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
     [IO.File]::Move($temp,$target,$true)
@@ -481,6 +487,15 @@ try{
     $before=& $startup -Action Status|ConvertFrom-Json
     if(-not $before.definition_valid -or -not $before.service_binding_valid){throw 'UPDATE_STARTUP_UNCONFIRMED'}
     $pending=Test-Path -LiteralPath (Join-Path $root '.rollback\journal.json')
+    if($Action -eq 'forget'){
+        if($ExpectedCommit -cne $installed.commit -or $pending){
+            throw 'UPDATE_LEGACY_REQUIRES_ACCEPTED_COMMIT'
+        }
+        if($d.store.needsReconciliation -ne 17 -or $d.store.queued -ne 0 -or
+           $d.store.running -ne 0 -or $d.store.cancelRequested -ne 0){
+            throw 'UPDATE_LEGACY_NOT_QUIESCENT_OR_COUNT_MISMATCH'
+        }
+    }
     if($Action -eq 'update'){
         $stage='acquire'
         $main=(Invoke-GhJson "repos/$repo/commits/main").sha
@@ -520,7 +535,7 @@ try{
         $candidateNative=Extract-VerifiedDrainTool $packages[0].FullName (Join-Path $download 'candidate')
         # A moving main is not a license to install an unintended revision.
         if((Invoke-GhJson "repos/$repo/commits/main").sha -cne $main){throw 'UPDATE_MAIN_MOVED'}
-    }else{
+    }elseif($Action -eq 'rollback'){
         if(-not $pending){throw 'UPDATE_PENDING_ROLLBACK_REQUIRED'}
         $priorPath=Join-Path $root '.rollback\manifest.json'
         if(-not(Test-Path -LiteralPath $priorPath -PathType Leaf)){throw 'UPDATE_ROLLBACK_TARGET_UNPROVEN'}
@@ -563,11 +578,31 @@ try{
     $receipt=& $installer -Action Maintenance -ExpectedCommit $installed.commit|ConvertFrom-Json
     if($receipt.status -ne 'MAINTENANCE_READY'){throw 'UPDATE_MAINTENANCE_UNCONFIRMED'}
     $maintenance=$true
-    $stage='swap'
+    if($Action -eq 'forget'){
+        $stage='legacy_plan'
+        $PSNativeCommandUseErrorActionPreference=$false
+        $planRaw=& $native maintenance legacy-unknown plan
+        if($LASTEXITCODE -ne 0 -or -not $planRaw){throw 'UPDATE_LEGACY_PLAN_FAILED'}
+        $plan=$planRaw|ConvertFrom-Json
+        if($plan.status -cne 'READY' -or $plan.legacy_count -ne 17 -or
+           $plan.fingerprint -cnotmatch '^[a-f0-9]{64}$'){throw 'UPDATE_LEGACY_PLAN_UNCONFIRMED'}
+        $stage='legacy_apply'
+        Write-OperatorStage 'RUNNING'
+        $appliedRaw=& $native maintenance legacy-unknown apply $plan.fingerprint
+        if($LASTEXITCODE -ne 0 -or -not $appliedRaw){throw 'UPDATE_LEGACY_APPLY_UNKNOWN'}
+        $applied=$appliedRaw|ConvertFrom-Json
+        if($applied.status -cne 'CLEARED' -or $applied.deleted_count -ne 17 -or
+           $applied.remaining_count -ne 0 -or $applied.fingerprint -cne $plan.fingerprint){
+            throw 'UPDATE_LEGACY_APPLY_UNCONFIRMED'
+        }
+        $legacyDeleted=17
+        $legacyRemaining=0
+    }
+    $stage=if($Action -eq 'forget'){'legacy_prepare'}else{'swap'}
     if($Action -eq 'update'){
         $swapped=& $installer -Action Install -PackagePath $packages[0].FullName -ExpectedSha256 $digest -ReplaceUnaccepted:$pending|ConvertFrom-Json
         if($swapped.status -ne 'INSTALLED_OFFLINE' -or $swapped.commit -cne $main){throw 'UPDATE_INSTALL_UNCONFIRMED'}
-    }else{
+    }elseif($Action -eq 'rollback'){
         $rolled=& $installer -Action Rollback|ConvertFrom-Json
         if($rolled.status -ne 'ROLLED_BACK_OFFLINE'){throw 'UPDATE_ROLLBACK_UNCONFIRMED'}
     }
@@ -613,6 +648,18 @@ try{
         }while($clock.Elapsed.TotalSeconds -lt 30)
         if(-not $ready){$after=Read-InstalledDoctor}
     }
+    if($Action -eq 'forget'){
+        if($after.store.needsReconciliation -ne 0 -or $legacyDeleted -ne 17){
+            throw 'UPDATE_LEGACY_STORE_READBACK_FAILED'
+        }
+        $stage='legacy_cleared'
+        Write-OperatorStage 'COMPLETED'
+        [pscustomobject]@{status='COMPLETED';commit=$current.commit;
+            operation_action='FORGET_LEGACY';deleted_count=17;remaining_count=0;
+            startup_ready=$startupState.startup_ready;tun=$after.tun;
+            local_ready=$ready}|ConvertTo-Json -Compress
+        return
+    }
     $trialStatus=if($ready){'TRIAL_LOCAL_READY'}elseif($after.tun -ne 'READY'){'TRIAL_WAITING_FOR_TUN'}else{'TRIAL_NOT_READY'}
     $stage=$trialStatus.ToLowerInvariant()
     Write-OperatorStage 'COMPLETED'
@@ -630,6 +677,12 @@ try{
     if($drainTool -and -not $maintenance){
         try{$null=Invoke-UpdateDrain $drainTool 'resume'}
         catch{Write-Warning 'UPDATE_PRE_SWAP_DRAIN_RELEASE_FAILED'}
+    }
+    if($Action -eq 'forget' -and $maintenance -and $installed -and $before.task -eq 'Running'){
+        # No file swap occurred; restarting the verified owner is safe even
+        # when cleanup outcome needs independent readback. Never retry delete.
+        try{$null=& $startup -Action Start -ExpectedNativeSha256 $installed.files.'native/WindowsAdminMCP.exe'}
+        catch{Write-Warning 'UPDATE_LEGACY_RESTART_FAILED'}
     }
     if($stopping -and -not $maintenance -and $stage -in @('drain','maintenance') -and $before.task -eq 'Running'){
         try{$null=& $startup -Action Start -ExpectedNativeSha256 $installed.files.'native/WindowsAdminMCP.exe'}catch{Write-Warning 'UPDATE_PRE_SWAP_RESTART_FAILED'}

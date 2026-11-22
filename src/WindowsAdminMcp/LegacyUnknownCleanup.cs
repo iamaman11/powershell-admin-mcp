@@ -138,7 +138,12 @@ internal static class LegacyUnknownCleanup
                 !DatabaseIntegrity(db, null))
                 return new(LegacyCleanupCode.POSTCOMMIT_INCOMPLETE, ExpectedCount, hash,
                     ExpectedCount, SchemaVersion: schema);
-            File.Delete(backup);
+            try { File.Delete(backup); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                return new(LegacyCleanupCode.POSTCOMMIT_INCOMPLETE, ExpectedCount, hash,
+                    ExpectedCount, SchemaVersion: schema);
+            }
             return new(LegacyCleanupCode.CLEARED, ExpectedCount, hash,
                 ExpectedCount, 0, schema);
         }
