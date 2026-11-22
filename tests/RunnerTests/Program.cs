@@ -240,7 +240,11 @@ if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("GITHUB_A
         string lost=Path.Combine(root,"lost.bin"),lostId=Guid.NewGuid().ToString("N");
         byte[] same=[8,9,10];
         Check(Write(Begin(lost,lostId,same)).Status==FileWriteCode.STAGED,"filewrite.recovery_fixture");
-        string stage=Directory.GetFiles(root,".wmcp-*.stage").Single();
+        // Several intentionally conflicted writers can leave their own stage.
+        // Resolve only the exact synthetic operation, never an unrelated file.
+        string lostFingerprint=Hash(System.Text.Encoding.UTF8.GetBytes(
+            Path.GetFullPath(lost)+"\0"+lostId))[..32];
+        string stage=Path.Combine(root,".wmcp-"+lostFingerprint+".stage");
         File.Delete(stage);
         File.WriteAllBytes(lost,same);
         Check(Write(Step(FileWriteAction.STATUS,lost,lostId)).Status==FileWriteCode.EFFECT_UNKNOWN &&
