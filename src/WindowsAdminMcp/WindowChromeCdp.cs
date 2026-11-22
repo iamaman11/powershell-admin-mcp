@@ -83,6 +83,7 @@ internal static partial class WindowChromeCdp
     {
         if (request.Action is not (WindowActionKind.CLICK or WindowActionKind.KEY_PRESS or
             WindowActionKind.TYPE_TEXT or WindowActionKind.SET_VALUE) ||
+            request.Action==WindowActionKind.KEY_PRESS && request.VirtualKey is not null ||
             !TryWebRole(target, out string? role, out string? name) ||
             !GetWindowRect(hwnd, out var rect)) return null;
         WindowCatalog.TryParseId(request.WindowId, out var identity);

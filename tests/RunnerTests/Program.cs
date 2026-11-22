@@ -118,6 +118,102 @@ if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("GITHUB_A
     }
     finally { Directory.Delete(root, recursive:true); }
 }
+// A: Windows-only, synthetic files. No developer or operator data is touched.
+{
+    string root=Path.Combine(Path.GetTempPath(),"wmcp-native-write-"+Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        static string Hash(byte[] bytes)=>Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes));
+        string path=Path.Combine(root,"roundtrip.bin"),id=Guid.NewGuid().ToString("N");
+        byte[] payload=new byte[5*1024*1024+13];
+        System.Security.Cryptography.RandomNumberGenerator.Fill(payload);
+        FileWriteRequest Begin(string target,string operation,byte[] bytes,
+            FileOverwritePolicy policy=FileOverwritePolicy.FAIL_IF_EXISTS,
+            string? version=null,string? originalHash=null)=>
+            new(FileWriteAction.BEGIN,target,operation,CommandContext.USER,
+                bytes.LongLength,Hash(bytes),policy,version,originalHash);
+        FileWriteRequest Step(FileWriteAction action,string target,string operation)=>
+            new(action,target,operation,CommandContext.USER);
+        FileWriteReply Write(FileWriteRequest request)=>NativeFileWriter.Execute(request);
+        Check(NativeFileWriter.Valid(Begin(path,id,payload)) &&
+            !NativeFileWriter.Valid(Begin("relative",id,payload)) &&
+            !NativeFileWriter.Valid(Begin(path,"not-guid",payload)) &&
+            !NativeFileWriter.Valid(Begin(path,id,new byte[1]) with {ExpectedBytes=NativeFileWriter.MaxUploadBytes+1}) &&
+            !NativeFileWriter.Valid(Begin(path,id,payload) with {ExpectedSha256="bad"}),
+            "filewrite.typed_bounds_and_operation_identity");
+        var begin=Write(Begin(path,id,payload));
+        Check(begin is {Status:FileWriteCode.STAGED,ReceivedBytes:0} && !File.Exists(path) &&
+            Write(Begin(path,id,payload)).Status==FileWriteCode.STAGED &&
+            Write(Begin(path,id,[1,2])).Status==FileWriteCode.CONFLICT,
+            "filewrite.begin_idempotent_and_conflict");
+        for(int offset=0;offset<payload.Length;offset+=NativeFileWriter.MaxChunkBytes)
+        {
+            byte[] bytes=payload.AsSpan(offset,Math.Min(payload.Length-offset,NativeFileWriter.MaxChunkBytes)).ToArray();
+            var append=new FileWriteRequest(FileWriteAction.APPEND,path,id,CommandContext.USER,
+                Offset:offset,DataBase64:Convert.ToBase64String(bytes),ChunkSha256:Hash(bytes));
+            var response=Write(append);
+            Check(response.Status==FileWriteCode.STAGED && response.ReceivedBytes==offset+bytes.Length,
+                "filewrite.chunk_"+offset);
+            if(offset==0)
+            {
+                Check(Write(append).Status==FileWriteCode.STAGED &&
+                    Write(append with {ChunkSha256=Hash([1,2])}).Status==FileWriteCode.INVALID_ARGUMENT &&
+                    Write(append with {Offset=bytes.Length+1}).Status==FileWriteCode.CONFLICT,
+                    "filewrite.duplicate_chunk_hash_and_gap");
+            }
+        }
+        Check(!File.Exists(path) && Write(Step(FileWriteAction.STATUS,path,id)) is
+            {Status:FileWriteCode.STAGED,ReceivedBytes:>0} &&
+            Write(Step(FileWriteAction.COMMIT,path,id)) is
+            {Status:FileWriteCode.COMMITTED,EffectState:WindowEffectState.EFFECT_VERIFIED} &&
+            File.ReadAllBytes(path).SequenceEqual(payload) &&
+            Write(Step(FileWriteAction.COMMIT,path,id)).Status==FileWriteCode.COMMITTED &&
+            Write(Step(FileWriteAction.STATUS,path,id)).Status==FileWriteCode.COMMITTED,
+            "filewrite.atomic_commit_verified_sha_and_lost_ack_replay");
+        Check(Write(Begin(path,Guid.NewGuid().ToString("N"),[3])).Status==FileWriteCode.CONFLICT,
+            "filewrite.fail_if_exists_no_clobber");
+
+        var stat=await NativeFileReader.ExecuteAsync(new(NativeFileAction.STAT,path,CommandContext.USER,
+            IncludeSha256:true),CancellationToken.None);
+        byte[] replacement=System.Text.Encoding.Unicode.GetBytes("unicode 🌍 safely updated");
+        string replaceId=Guid.NewGuid().ToString("N");
+        var replaceBegin=Begin(path,replaceId,replacement,FileOverwritePolicy.REPLACE_IF_MATCH,
+            stat.Info!.Version,stat.Info.Sha256);
+        Check(Write(replaceBegin).Status==FileWriteCode.STAGED,"filewrite.cas_begin");
+        var replacementAppend=new FileWriteRequest(FileWriteAction.APPEND,path,replaceId,CommandContext.USER,
+            Offset:0,DataBase64:Convert.ToBase64String(replacement),ChunkSha256:Hash(replacement));
+        Check(Write(replacementAppend).Status==FileWriteCode.STAGED &&
+            Write(Step(FileWriteAction.COMMIT,path,replaceId)).Status==FileWriteCode.COMMITTED &&
+            File.ReadAllBytes(path).SequenceEqual(replacement),"filewrite.cas_atomic_replace");
+        Check(Write(Begin(path,Guid.NewGuid().ToString("N"),payload,
+            FileOverwritePolicy.REPLACE_IF_MATCH,stat.Info.Version,stat.Info.Sha256)).Status==FileWriteCode.CONFLICT,
+            "filewrite.cas_stale_version_or_hash_rejected");
+
+        string aborted=Path.Combine(root,"aborted.bin"),abortId=Guid.NewGuid().ToString("N");
+        Check(Write(Begin(aborted,abortId,[])).Status==FileWriteCode.STAGED &&
+            Write(Step(FileWriteAction.ABORT,aborted,abortId)).Status==FileWriteCode.ABORTED &&
+            Write(Step(FileWriteAction.COMMIT,aborted,abortId)).Status==FileWriteCode.ABORTED &&
+            !File.Exists(aborted),"filewrite.abort_is_final_no_target_effect");
+        string empty=Path.Combine(root,"empty.bin"),emptyId=Guid.NewGuid().ToString("N");
+        Check(Write(Begin(empty,emptyId,[])).Status==FileWriteCode.STAGED &&
+            Write(Step(FileWriteAction.COMMIT,empty,emptyId)).Status==FileWriteCode.COMMITTED &&
+            File.Exists(empty) && new FileInfo(empty).Length==0,"filewrite.zero_byte_atomic_commit");
+
+        // Simulate the crash gap without touching the target: an absent stage
+        // must never be treated as a successful commit just from equal content.
+        string lost=Path.Combine(root,"lost.bin"),lostId=Guid.NewGuid().ToString("N");
+        byte[] same=[8,9,10];
+        Check(Write(Begin(lost,lostId,same)).Status==FileWriteCode.STAGED,"filewrite.recovery_fixture");
+        string stage=Directory.GetFiles(root,".wmcp-*.stage").Single();
+        File.Delete(stage);
+        File.WriteAllBytes(lost,same);
+        Check(Write(Step(FileWriteAction.STATUS,lost,lostId)).Status==FileWriteCode.EFFECT_UNKNOWN &&
+            Write(Step(FileWriteAction.COMMIT,lost,lostId)).Status==FileWriteCode.EFFECT_UNKNOWN,
+            "filewrite.no_false_commit_from_matching_unrelated_target");
+    }
+    finally {Directory.Delete(root,recursive:true);}
+}
 Check(File.Exists(PowerShellRunner.Executable), "r2.machine_wide_pwsh");
 using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent())
 {
@@ -174,6 +270,19 @@ Check(WindowCatalog.ResolveId(testWindowId, 2, out _) == WindowResolveCode.WRONG
 var staleWindowId = WindowCatalog.FormatId(new WindowIdentity(long.MaxValue, 4242, 133700000000000000, 1));
 Check(WindowCatalog.ResolveId(staleWindowId, 1, out _) == WindowResolveCode.STALE_WINDOW,
     "windows.reject_stale_hwnd");
+Check(WindowManager.Valid(WindowManageAction.ACTIVATE,null,null,null,null) &&
+    WindowManager.Valid(WindowManageAction.RESTORE,null,null,null,null) &&
+    WindowManager.Valid(WindowManageAction.MINIMIZE,null,null,null,null) &&
+    WindowManager.Valid(WindowManageAction.MAXIMIZE,null,null,null,null) &&
+    WindowManager.Valid(WindowManageAction.MOVE,0,-25,null,null) &&
+    WindowManager.Valid(WindowManageAction.RESIZE,null,null,1024,768) &&
+    !WindowManager.Valid(WindowManageAction.MOVE,1,null,null,null) &&
+    !WindowManager.Valid(WindowManageAction.RESIZE,null,null,0,500) &&
+    !WindowManager.Valid(WindowManageAction.ACTIVATE,1,1,null,null) &&
+    !WindowManager.Valid((WindowManageAction)999,null,null,null,null) &&
+    WindowManager.Execute(testWindowId,WindowManageAction.RESTORE,null,null,null,null,2).Status==
+        WindowManageCode.USER_CONTEXT_UNAVAILABLE,
+    "windows.manage_typed_bounds_and_cross_session_rejection");
 Check(WindowInspector.ValidArguments(testWindowId, 0, 1) &&
     WindowInspector.ValidArguments(testWindowId, 16, 100) &&
     WindowInspector.ValidArguments(testWindowId, 16, 10, includeDetails: true) &&
@@ -271,6 +380,33 @@ Check(WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, W
     !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.INVOKE, "unexpected")) &&
     !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.SET_VALUE, new string('x', 4097))),
     "windows.action_bounded_arguments");
+Check(WindowAction.Valid(new WindowActionRequest(testWindowId,freshElementId,
+        WindowActionKind.KEY_PRESS,null,VirtualKey:0x41,Ctrl:true,Shift:true)) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId,freshElementId,
+        WindowActionKind.KEY_PRESS,null,VirtualKey:0)) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId,freshElementId,
+        WindowActionKind.KEY_PRESS,null,Key:WindowKey.ENTER,VirtualKey:0x41)) &&
+    WindowAction.Valid(new WindowActionRequest(testWindowId,freshElementId,
+        WindowActionKind.SCROLL,null,ScrollDirection:WindowScrollDirection.DOWN,ScrollUnits:3)) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId,freshElementId,
+        WindowActionKind.SCROLL,null,ScrollDirection:WindowScrollDirection.DOWN,ScrollUnits:11)) &&
+    WindowAction.Valid(new WindowActionRequest(testWindowId,freshElementId,
+        WindowActionKind.HOVER,null)) &&
+    WindowAction.Valid(new WindowActionRequest(testWindowId,freshElementId,
+        WindowActionKind.DRAG,null,TargetX:25,TargetY:50)) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId,freshElementId,
+        WindowActionKind.DRAG,null,TargetX:25)) &&
+    WindowAction.Valid(new WindowActionRequest(testWindowId,"locator",
+        WindowActionKind.INVOKE,null,LocatorAutomationId:"submit")) &&
+    WindowAction.Valid(new WindowActionRequest(testWindowId,"locator",
+        WindowActionKind.CLICK,null,LocatorRole:WindowRoleFilter.BUTTON,LocatorName:"OK")) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId,"locator",
+        WindowActionKind.INVOKE,null)) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId,"locator",
+        WindowActionKind.INVOKE,null,LocatorName:new string('x',129))) &&
+    !WindowAction.Valid(new WindowActionRequest(testWindowId,freshElementId,
+        WindowActionKind.INVOKE,null,LocatorName:"unexpected")),
+    "windows.pointer_keyboard_and_unique_locator_contracts");
 Check(WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId,
         WindowActionKind.SET_VALUE, "next", ExpectedName: "CI_UIA_INPUT_NAME",
         ExpectedChange: WindowExpectedChange.APPEARS, ExpectedKind: WindowExpectedKind.UIA_VALUE,
@@ -864,6 +1000,12 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         Check(WindowCatalog.TryReadTitle(realWindowId, current.SessionId, out var initialTitle) &&
             initialTitle == "CI_UIA_OWNED_WINDOW",
             "windows.read_title_of_exact_verified_window_identity");
+        var geometry=WindowManager.Execute(realWindowId,WindowManageAction.MOVE,
+            created.Form.Left,created.Form.Top,null,null,current.SessionId);
+        Check(geometry.Status==WindowManageCode.COMPLETED &&
+            geometry.EffectState==WindowEffectState.EFFECT_VERIFIED &&
+            geometry.After?.X==created.Form.Left && geometry.After?.Y==created.Form.Top,
+            "windows.manage_real_window_move_and_readback");
         var result = await Task.Run(() => WindowInspector.InspectCore(created.Handle, 3, 40, realWindowId))
             .WaitAsync(TimeSpan.FromSeconds(5));
         Check(result.Status == WindowInspectCode.COMPLETED &&
@@ -907,6 +1049,22 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         Check(delayed.Status == WindowInspectCode.COMPLETED &&
             delayed.Elements.Length == 1 && delayed.Elements[0].Name == "CI_UIA_DELAYED_READY",
             "windows.wait_for_changed_react_style_element_without_focus");
+        var located=await Task.Run(()=>WindowAction.InvokeInWorker(new WindowActionRequest(
+            realWindowId,"locator",WindowActionKind.INVOKE,null,
+            LocatorName:"CI_UIA_DELAYED_READY",LocatorRole:WindowRoleFilter.BUTTON)))
+            .WaitAsync(TimeSpan.FromSeconds(8));
+        Check(located.Status==WindowActionCode.COMPLETED && located.TargetVerified,
+            "windows.locator_unique_match_dispatches_only_once");
+        var ambiguous=await Task.Run(()=>WindowAction.InvokeInWorker(new WindowActionRequest(
+            realWindowId,"locator",WindowActionKind.INVOKE,null,
+            LocatorRole:WindowRoleFilter.BUTTON))).WaitAsync(TimeSpan.FromSeconds(8));
+        Check(ambiguous.Status==WindowActionCode.LOCATOR_AMBIGUOUS,
+            "windows.locator_rejects_ambiguous_button_without_dispatch");
+        var absent=await Task.Run(()=>WindowAction.InvokeInWorker(new WindowActionRequest(
+            realWindowId,"locator",WindowActionKind.INVOKE,null,
+            LocatorAutomationId:"CI_ABSENT_AUTOMATION_ID"))).WaitAsync(TimeSpan.FromSeconds(8));
+        Check(absent.Status==WindowActionCode.LOCATOR_NOT_FOUND,
+            "windows.locator_rejects_missing_target_without_dispatch");
         var rejectedKeyboard = await Task.Run(() => WindowPhysicalClick.PressKey(
             IntPtr.Zero, System.Windows.Automation.AutomationElement.FromHandle(created.Handle),
             new WindowActionRequest(realWindowId, delayed.Elements[0].ElementId,
@@ -1793,6 +1951,60 @@ Check(JobCoordinator.ClassifyStorage(10,4096,0,metadataLimit:10,bytesLimit:2*102
     JobCoordinator.ClassifyStorage(1,null,0,metadataLimit:10,bytesLimit:2*1024*1024)==StoreStorageState.READBACK_FAILED &&
     JobCoordinator.ClassifyStorage(1,2*1024*1024,0,metadataLimit:10,bytesLimit:2*1024*1024)==StoreStorageState.FULL,
     "storage.finite_bounds_fail_closed_and_typed");
+// R: 20k durable SQLite mutations under a real WAL transaction, reopen,
+// integrity readback and exact idempotency-key retention. No live store touched.
+string stressRoot=Path.Combine(Path.GetTempPath(),"WindowsAdminMCP-stress-"+Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(stressRoot);
+try
+{
+    string dbPath=Path.Combine(stressRoot,"jobs.db"),key="r-twenty-thousand-transitions";
+    using(var owner=new JobCoordinator(Microsoft.Extensions.Logging.Abstractions.NullLogger<JobCoordinator>.Instance))
+    {
+        owner.Initialize(dbPath);
+        Check(owner.Dispatch(new(AdminOperation.Job,JobAction.submit,Key:key,
+            Command:"Write-Output deterministic"),"stress").Status==StatusCode.OK,
+            "storage.stress_fixture_admitted");
+    }
+    var clock=Stopwatch.StartNew();
+    using(var db=new Microsoft.Data.Sqlite.SqliteConnection("Data Source="+dbPath+";Pooling=False"))
+    {
+        db.Open();
+        using(var tx=db.BeginTransaction())
+        using(var update=db.CreateCommand())
+        {
+            update.Transaction=tx;
+            update.CommandText="UPDATE jobs SET updated_utc=$utc WHERE op_key=$key";
+            update.Parameters.AddWithValue("$key",key);
+            var utc=update.Parameters.Add("$utc",Microsoft.Data.Sqlite.SqliteType.Text);
+            for(int i=0;i<20000;i++)
+            {
+                utc.Value=DateTimeOffset.UtcNow.AddTicks(i).ToString("O");
+                if(update.ExecuteNonQuery()!=1)throw new InvalidOperationException("SQLite churn lost the job row");
+            }
+            tx.Commit();
+        }
+        using var verify=db.CreateCommand();
+        verify.CommandText="PRAGMA integrity_check";
+        Check((string?)verify.ExecuteScalar()=="ok","storage.stress_integrity_check_after_20000_updates");
+        using var checkpoint=db.CreateCommand();
+        checkpoint.CommandText="PRAGMA wal_checkpoint(TRUNCATE)";
+        checkpoint.ExecuteNonQuery();
+    }
+    clock.Stop();
+    using(var owner=new JobCoordinator(Microsoft.Extensions.Logging.Abstractions.NullLogger<JobCoordinator>.Instance))
+    {
+        owner.Initialize(dbPath);
+        Check(owner.Dispatch(new(AdminOperation.Job,JobAction.status,Key:key),"stress") is
+            {Status:StatusCode.OK,Job:{OperationKey:"r-twenty-thousand-transitions"}} &&
+            owner.Dispatch(new(AdminOperation.Job,JobAction.submit,Key:key,
+                Command:"Write-Output changed"),"stress").Status==StatusCode.CONFLICT &&
+            new FileInfo(dbPath).Length<512L*1024*1024,
+            "storage.stress_reopen_key_survives_and_size_bounded");
+    }
+    Console.WriteLine($"BENCH storage.twenty_thousand_update_ms={clock.ElapsedMilliseconds} " +
+        $"db_bytes={new FileInfo(dbPath).Length}");
+}
+finally{Directory.Delete(stressRoot,true);}
 string coldRoot=Path.Combine(Path.GetTempPath(),"WindowsAdminMCP-cold-"+Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(coldRoot);
 try

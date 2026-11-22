@@ -10,6 +10,7 @@ internal static class WindowPhysicalClick
     private const uint InputMouse = 0;
     private const uint LeftDown = 0x0002;
     private const uint LeftUp = 0x0004;
+    private const uint Wheel = 0x0800, HorizontalWheel=0x1000;
     private const uint InputKeyboard = 1;
     private const uint KeyUp = 0x0002;
     private const uint KeyUnicode = 0x0004;
@@ -153,6 +154,86 @@ internal static class WindowPhysicalClick
         }
     }
 
+    internal static WindowActionResult Scroll(IntPtr hwnd,AutomationElement target,
+        WindowActionRequest request,Stopwatch clock)
+    {
+        var before=GetForegroundWindow();
+        if(!IsWindowVisible(hwnd) || IsIconic(hwnd))return new(WindowActionCode.WINDOW_NOT_VISIBLE);
+        if(!ActivateVerifiedWindow(hwnd,target,focusElement:false))
+            return new(WindowActionCode.FOREGROUND_UNAVAILABLE,FailureStage:WindowFailureStage.ACTIVATE_WINDOW);
+        if(!target.TryGetClickablePoint(out var point))return new(WindowActionCode.CLICK_POINT_UNAVAILABLE);
+        var p=new Point((int)Math.Round(point.X),(int)Math.Round(point.Y));
+        if(!HitsTarget(hwnd,target,p))return new(WindowActionCode.TARGET_OCCLUDED);
+        if(!SetCursorPos(p.X,p.Y) || GetForegroundWindow()!=hwnd || !HitsTarget(hwnd,target,p) ||
+            WindowCatalog.ResolveId(request.WindowId,Process.GetCurrentProcess().SessionId,out var actual)!=WindowResolveCode.OK || actual!=hwnd)
+            return new(WindowActionCode.TARGET_OCCLUDED);
+        bool vertical=request.ScrollDirection is WindowScrollDirection.UP or WindowScrollDirection.DOWN;
+        int ticks=(request.ScrollDirection is WindowScrollDirection.UP or WindowScrollDirection.RIGHT ? 1:-1)*
+            request.ScrollUnits*120;
+        var inputs=new[] {new Input {Type=InputMouse,Mouse=new MouseInput {
+            Flags=vertical?Wheel:HorizontalWheel,Data=unchecked((uint)ticks)} }};
+        uint inserted=SendInput(1,inputs,Marshal.SizeOf<Input>());
+        return new(inserted==1?WindowActionCode.COMPLETED:WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT,
+            EffectUnknown:true,ForegroundChanged:before!=GetForegroundWindow(),
+            ElapsedMs:clock.ElapsedMilliseconds,FailureStage:WindowFailureStage.DISPATCH_INPUT,
+            ExecutionMethod:WindowExecutionMethod.WIN32_SENDINPUT);
+    }
+
+    // HOVER moves only the cursor. DRAG is an explicitly requested physical
+    // gesture: any partial SendInput is an unknown effect and is never replayed.
+    internal static WindowActionResult Pointer(IntPtr hwnd,AutomationElement target,
+        WindowActionRequest request,Stopwatch clock)
+    {
+        var before=GetForegroundWindow();
+        if(!IsWindowVisible(hwnd) || IsIconic(hwnd))return new(WindowActionCode.WINDOW_NOT_VISIBLE);
+        if(!ActivateVerifiedWindow(hwnd,target,focusElement:false))
+            return new(WindowActionCode.FOREGROUND_UNAVAILABLE,FailureStage:WindowFailureStage.ACTIVATE_WINDOW);
+        if(!target.TryGetClickablePoint(out var point))return new(WindowActionCode.CLICK_POINT_UNAVAILABLE);
+        var source=new Point((int)Math.Round(point.X),(int)Math.Round(point.Y));
+        if(!HitsTarget(hwnd,target,source))return new(WindowActionCode.TARGET_OCCLUDED);
+        if(request.Action==WindowActionKind.DRAG)
+        {
+            var dest=new Point(request.TargetX!.Value,request.TargetY!.Value);
+            if(WindowFromPoint(dest)==IntPtr.Zero || GetAncestor(WindowFromPoint(dest),RootAncestor)!=hwnd)
+                return new(WindowActionCode.TARGET_OCCLUDED);
+        }
+        if(!SetCursorPos(source.X,source.Y) || !GetCursorPos(out var actualPoint) ||
+            actualPoint.X!=source.X || actualPoint.Y!=source.Y ||
+            GetForegroundWindow()!=hwnd || !HitsTarget(hwnd,target,source) ||
+            WindowCatalog.ResolveId(request.WindowId,Process.GetCurrentProcess().SessionId,out var check)!=WindowResolveCode.OK || check!=hwnd)
+            return new(WindowActionCode.TARGET_OCCLUDED);
+        if(request.Action==WindowActionKind.HOVER)
+            return new(WindowActionCode.COMPLETED,ForegroundChanged:before!=GetForegroundWindow(),
+                EffectUnknown:true,Detail:"CURSOR_POSITION_VERIFIED_HOVER_EFFECT_UNKNOWN",
+                ObservationState:WindowObservationState.UNKNOWN,
+                ElapsedMs:clock.ElapsedMilliseconds,ExecutionMethod:WindowExecutionMethod.WIN32_SENDINPUT);
+        bool pressed=false;
+        try
+        {
+            var down=new[]{new Input {Type=InputMouse,Mouse=new MouseInput {Flags=LeftDown}}};
+            uint accepted=SendInput(1,down,Marshal.SizeOf<Input>());
+            if(accepted!=1)return new(WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT,EffectUnknown:true,
+                FailureStage:WindowFailureStage.DISPATCH_INPUT);
+            pressed=true;
+            var dest=new Point(request.TargetX!.Value,request.TargetY!.Value);
+            if(!SetCursorPos(dest.X,dest.Y) || GetForegroundWindow()!=hwnd)
+                return new(WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT,EffectUnknown:true,
+                    FailureStage:WindowFailureStage.DISPATCH_INPUT);
+            var up=new[]{new Input {Type=InputMouse,Mouse=new MouseInput {Flags=LeftUp}}};
+            uint finished=SendInput(1,up,Marshal.SizeOf<Input>());
+            pressed=false;
+            return new(finished==1?WindowActionCode.COMPLETED:WindowActionCode.INPUT_FAILED_UNKNOWN_EFFECT,
+                EffectUnknown:true,ForegroundChanged:before!=GetForegroundWindow(),
+                FailureStage:WindowFailureStage.DISPATCH_INPUT,ElapsedMs:clock.ElapsedMilliseconds,
+                ExecutionMethod:WindowExecutionMethod.WIN32_SENDINPUT);
+        }
+        finally
+        {
+            if(pressed)
+                _=SendInput(1,[new Input {Type=InputMouse,Mouse=new MouseInput {Flags=LeftUp}}],Marshal.SizeOf<Input>());
+        }
+    }
+
     // A key is addressed to an exact, freshly verified UIA element. In particular,
     // never send Enter to the global foreground when Chrome denies SetFocus.
     internal static WindowActionResult PressKey(IntPtr hwnd, AutomationElement target,
@@ -163,7 +244,7 @@ internal static class WindowPhysicalClick
         WindowFailureStage stage = WindowFailureStage.PREPARE_FOCUS;
         try
         {
-            if (request.Key is null)
+            if (request.Key is null && request.VirtualKey is null)
                 return new(WindowActionCode.INVALID_ARGUMENT, FailureStage: stage,
                     ElapsedMs: clock.ElapsedMilliseconds);
 
@@ -202,20 +283,25 @@ internal static class WindowPhysicalClick
                     ForegroundChanged: foregroundAtEntry != GetForegroundWindow(),
                     FailureStage: stage, ElapsedMs: clock.ElapsedMilliseconds);
 
-            ushort virtualKey = request.Key.Value switch
-            {
-                WindowKey.ENTER => 0x0D,
-                WindowKey.SPACE => 0x20,
-                WindowKey.ESCAPE => 0x1B,
-                _ => (ushort)0
-            };
+            ushort virtualKey = request.VirtualKey is int vk ? checked((ushort)vk) :
+                (ushort)(request.Key!.Value switch
+                {
+                    WindowKey.ENTER => 0x0D,
+                    WindowKey.SPACE => 0x20,
+                    WindowKey.ESCAPE => 0x1B,
+                    _ => 0
+                });
             if (virtualKey == 0) return new(WindowActionCode.INVALID_ARGUMENT);
             stage = WindowFailureStage.DISPATCH_INPUT;
-            var inputs = new[]
-            {
-                new KeyboardEventInput { Type = InputKeyboard, VirtualKey = virtualKey },
-                new KeyboardEventInput { Type = InputKeyboard, VirtualKey = virtualKey, Flags = KeyUp }
-            };
+            var keys = new List<ushort>(5);
+            if(request.Ctrl)keys.Add(0x11);
+            if(request.Alt)keys.Add(0x12);
+            if(request.Shift)keys.Add(0x10);
+            if(request.Win)keys.Add(0x5B);
+            keys.Add(virtualKey);
+            var inputs=keys.Select(key=>new KeyboardEventInput {Type=InputKeyboard,VirtualKey=key})
+                .Concat(keys.AsEnumerable().Reverse().Select(key=>new KeyboardEventInput
+                    {Type=InputKeyboard,VirtualKey=key,Flags=KeyUp})).ToArray();
             if (!StableFocus(hwnd, target, request.ExpectedProfile) ||
                 WindowCatalog.ResolveId(request.WindowId, Process.GetCurrentProcess().SessionId,
                     out var finalHwnd) != WindowResolveCode.OK || finalHwnd != hwnd)

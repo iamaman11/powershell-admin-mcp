@@ -32,6 +32,25 @@ public sealed record WindowListResult(
 [McpServerToolType]
 public sealed class WindowTools
 {
+    [McpServerTool(Name = "windows.manage_window",UseStructuredContent = true),
+     Description("Native Win32 window ACTIVATE/RESTORE/MINIMIZE/MAXIMIZE/MOVE/RESIZE; exact HWND/process/session identity and verified before/after state.")]
+    public static async Task<WindowManageResult> ManageWindow(string window_id,WindowManageAction action,
+        int? x=null,int? y=null,int? width=null,int? height=null,CancellationToken cancellationToken=default)
+    {
+        if(!WindowCatalog.TryParseId(window_id,out _) || !WindowManager.Valid(action,x,y,width,height))
+            return new(WindowManageCode.INVALID_ARGUMENT,window_id,action);
+        var status=await AdminTools.Status(cancellationToken:cancellationToken);
+        if(status.Status!=StatusCode.OK)return new(WindowManageCode.SERVICE_UNAVAILABLE,window_id,action);
+        using var self=Process.GetCurrentProcess();
+        if(status.ExecutionContext!=CommandContext.USER || status.UserContextAvailable!=true ||
+            status.Frontend?.Elevated!=true || status.Frontend.SessionId!=self.SessionId)
+            return new(WindowManageCode.USER_CONTEXT_UNAVAILABLE,window_id,action);
+        var desktop=DesktopCapture.ObserveDesktop(self.SessionId);
+        if(desktop.Code!=CaptureCode.COMPLETED)return new(WindowManageCode.DESKTOP_UNAVAILABLE,window_id,action);
+        cancellationToken.ThrowIfCancellationRequested();
+        return WindowManager.ExecuteAudited(window_id,action,x,y,width,height,self.SessionId);
+    }
+
     [McpServerTool(Name = "windows.list_windows", UseStructuredContent = true),
      Description("List USER windows.")]
     public static async Task<WindowListResult> ListWindows(int max_windows = 50,
@@ -133,12 +152,19 @@ public sealed class WindowTools
         string? expected_origin = null, string? expected_url = null,
         int observation_timeout_ms = 8000,
         string? expected_enabled_name = null, bool expected_enabled = true,
+        int? virtual_key = null, bool ctrl = false, bool alt = false, bool shift = false, bool win = false,
+        WindowScrollDirection? scroll_direction = null, int scroll_units = 1,
+        int? target_x = null, int? target_y = null,
+        string? locator_automation_id = null, string? locator_name = null,
+        WindowRoleFilter? locator_role = null,
         CancellationToken cancellationToken = default)
     {
         var request = new WindowActionRequest(window_id, element_id, action, value,
             element_path, expected_name, expected_change, key, expected_kind,
             expected_value, expected_profile, expected_origin, expected_url, observation_timeout_ms,
-            expected_enabled_name, expected_enabled);
+            expected_enabled_name, expected_enabled, virtual_key, ctrl, alt, shift, win,
+            scroll_direction, scroll_units, target_x, target_y,
+            locator_automation_id, locator_name, locator_role);
         if (!WindowAction.Valid(request)) return new(WindowAction.InvalidCode(request));
         if (!confirm) return new(WindowActionCode.CONFIRMATION_REQUIRED);
 
@@ -160,6 +186,29 @@ public sealed class WindowTools
                 WindowActionCode.STALE_WINDOW, Detail: resolved.ToString());
         return await WindowAction.RunIsolatedAsync(request, cancellationToken);
     }
+
+    [McpServerTool(Name="windows.invoke_locator",UseStructuredContent=true),
+     Description("Locate exactly one live UIA element by automation_id/name/role and act once, in a bounded disposable worker. Reject missing or ambiguous matches.")]
+    public static Task<WindowActionResult> InvokeLocator(string window_id,WindowActionKind action,
+        string? automation_id=null,string? name=null,WindowRoleFilter? role=null,
+        string? value=null,bool confirm=true,
+        string? expected_name=null,WindowExpectedChange? expected_change=null,
+        WindowKey? key=null,WindowExpectedKind expected_kind=WindowExpectedKind.UIA_ELEMENT,
+        string? expected_value=null,string? expected_profile=null,
+        int observation_timeout_ms=8000,int? virtual_key=null,
+        bool ctrl=false,bool alt=false,bool shift=false,bool win=false,
+        WindowScrollDirection? scroll_direction=null,int scroll_units=1,
+        int? target_x=null,int? target_y=null,
+        CancellationToken cancellationToken=default)=>
+        InvokeElement(window_id,"locator",action,value,confirm,
+            expected_name:expected_name,expected_change:expected_change,key:key,
+            expected_kind:expected_kind,expected_value:expected_value,
+            expected_profile:expected_profile,observation_timeout_ms:observation_timeout_ms,
+            virtual_key:virtual_key,ctrl:ctrl,alt:alt,shift:shift,win:win,
+            scroll_direction:scroll_direction,scroll_units:scroll_units,
+            target_x:target_x,target_y:target_y,
+            locator_automation_id:automation_id,locator_name:name,locator_role:role,
+            cancellationToken:cancellationToken);
 }
 
 internal readonly record struct WindowIdentity(long Handle, int ProcessId, long StartFileTimeUtc, int SessionId);

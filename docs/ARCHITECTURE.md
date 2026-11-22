@@ -11,6 +11,7 @@ acceptance matrix live in [Issue #56](https://github.com/iamaman11/powershell-ad
 | SYSTEM service | SQLite admission, encrypted durable PowerShell queue, idempotency, cancellation and recovery | `AdminService`, `JobCoordinator`, `StoreSchema` |
 | USER worker | UIA, Win32, WGC, user desktop and session-bound operations | `UserWorker`, `WindowInspector`, `WindowAction`, `WindowCapture` |
 | Chrome child | Native consented CDP connection, browser context/window/profile binding and background tab actions | `WindowChromeBroker`, `WindowChromeCdp` |
+| Native file transaction | Exact USER/SYSTEM token, same-volume stage plus bounded journal, SHA-256 and atomic replacement | `NativeFileWriter`, `FileWriteContracts`, `FileTools` |
 | Native operator | Verified package/SCM/Task Scheduler maintenance, exact SHA, trial and rollback | `installer/*`, `PackageIntegrity`, `Doctor` |
 
 There is **one** SCM service, **one** SQLite job store, **one** elevated interactive
@@ -52,6 +53,19 @@ frontend, not a separate permanent browser manager. No extra HTTP API.
   No PowerShell child, second database, permanent daemon, or side-effect retry.
   Directory pagination fingerprints the observed directory and returns
   `CHANGED_SINCE_LIST` rather than continuing from an invalidated cursor.
+- **Native file write (P0-A):** MCP `windows.file_write` receives one durable
+  `operation_id` with typed `BEGIN/APPEND/COMMIT/ABORT/STATUS`. It keeps a
+  bounded (1024 per directory) same-volume sidecar journal and staged bytes
+  under the actual USER or SYSTEM token. A `COMMITTING` receipt is flushed
+  before the atomic target rename. After a transport drop, query `STATUS`
+  rather than attempting an unconfirmed second write. The primary job SQLite
+  store is **not** yet the source of these upload receipts; shared owner
+  integration and physical power-loss fault tests remain unaccepted.
+- **Window operations (P0-B):** MCP `windows.manage_window` resolves a fresh
+  HWND/process/session, calls Win32 once and compares geometry/foreground
+  readback. UIA actions accept bounded `SCROLL`, `HOVER`, `DRAG` and native
+  key combinations. `windows.invoke_locator` finds exactly one element within
+  a bounded worker and fails closed on ambiguous or incomplete searches.
 - **Legacy cleanup (#56, one time):** `powershell_update(FORGET_LEGACY)` →
   existing verified interactive Task Scheduler operator → drain and stop SCM →
   offline `LegacyUnknownCleanup` plan/fingerprint → transactional deletion of
@@ -86,3 +100,9 @@ CI workflow: `.github/workflows/windows-acceptance.yml`. Exact installed
 package/physical acceptance is separate from Windows CI. `NOT_TESTED` must not
 be rendered as PASS or FAIL. The 24-hour soak is outside the required scope;
 bounded smoke and injected failure checks remain mandatory.
+
+Issue #56 CI fixtures exercise binary exactness (5 MiB + tail), zero bytes,
+stale version CAS, duplicate chunks, missing staging state, unique UIA locator,
+Win32 geometry, and 20,000 SQLite WAL updates with `integrity_check` and
+reopen. They do not substitute for remote installed package or real service
+kill/power-loss evidence.

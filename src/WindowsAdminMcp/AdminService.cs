@@ -160,6 +160,22 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                             fileReply.Status == NativeFileCode.INVALID_ARGUMENT ? StatusCode.INVALID_ARGUMENT :
                             StatusCode.IPC_FAILED, correlation, File:fileReply);
                     }
+                    else if(request?.Operation==AdminOperation.FileWrite && request.FileWrite is {} fileWrite &&
+                        fileWrite.ExecutionContext==CommandContext.SYSTEM && request.File is null &&
+                        request.Action is null && request.ExecutionContext is null && request.Key is null &&
+                        request.JobId is null && request.Command is null && request.Steps is null &&
+                        request.WorkingDirectory is null && request.Worker is null && request.Maintenance is null &&
+                        request.ResourceKey is null && request.StepIndex is null &&
+                        request.ExpectedCompletedSteps is null && request.StateFilter is null &&
+                        request.BeforeSeq is null && request.PageSize is null && request.Decision is null &&
+                        request.Evidence is null && request.RetainDays is null && !request.IncludeInterruptedCommand)
+                    {
+                        deadline.CancelAfter(TimeSpan.FromSeconds(30));
+                        var fileReply=NativeFileWriter.Execute(fileWrite,deadline.Token);
+                        response=new(fileReply.Status is FileWriteCode.STAGED or FileWriteCode.COMMITTED or FileWriteCode.ABORTED
+                            ?StatusCode.OK:fileReply.Status==FileWriteCode.INVALID_ARGUMENT?StatusCode.INVALID_ARGUMENT:
+                            StatusCode.IPC_FAILED,correlation,FileWrite:fileReply);
+                    }
                     else if(request?.Operation==AdminOperation.UserWorker && request.Worker is {} worker &&
                         request.Action is null && request.ExecutionContext is null && request.Key is null && request.JobId is null &&
                         request.Command is null && request.Steps is null && request.WorkingDirectory is null &&

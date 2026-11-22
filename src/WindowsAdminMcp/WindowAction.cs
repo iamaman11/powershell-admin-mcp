@@ -8,7 +8,10 @@ using System.Text.Json.Serialization;
 using System.Windows.Automation;
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowActionKind>))]
-public enum WindowActionKind { INVOKE, SET_VALUE, SELECT, TOGGLE, EXPAND, COLLAPSE, CLICK, KEY_PRESS, TYPE_TEXT }
+public enum WindowActionKind { INVOKE, SET_VALUE, SELECT, TOGGLE, EXPAND, COLLAPSE, CLICK, KEY_PRESS, TYPE_TEXT, SCROLL, HOVER, DRAG }
+
+[JsonConverter(typeof(JsonStringEnumConverter<WindowScrollDirection>))]
+public enum WindowScrollDirection { UP, DOWN, LEFT, RIGHT }
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowKey>))]
 public enum WindowKey { ENTER, SPACE, ESCAPE }
@@ -42,7 +45,8 @@ public enum WindowActionCode
     EXPECTED_STATE_ALREADY_TRUE, WINDOW_NOT_VISIBLE, FOREGROUND_UNAVAILABLE,
     CLICK_POINT_UNAVAILABLE, TARGET_OCCLUDED, INPUT_FAILED_UNKNOWN_EFFECT,
     FOCUS_UNAVAILABLE, CDP_UNAVAILABLE, CDP_TARGET_AMBIGUOUS, CDP_CONTEXT_MISMATCH,
-    CDP_TARGET_NOT_VISIBLE, CDP_FAILED_UNKNOWN_EFFECT, CDP_CONSENT_PENDING
+    CDP_TARGET_NOT_VISIBLE, CDP_FAILED_UNKNOWN_EFFECT, CDP_CONSENT_PENDING,
+    LOCATOR_NOT_FOUND, LOCATOR_AMBIGUOUS
 }
 
 internal sealed record WindowActionRequest(
@@ -61,7 +65,19 @@ internal sealed record WindowActionRequest(
     [property: JsonPropertyName("expected_url")] string? ExpectedUrl = null,
     [property: JsonPropertyName("observation_timeout_ms")] int ObservationTimeoutMs = 8000,
     [property: JsonPropertyName("expected_enabled_name")] string? ExpectedEnabledName = null,
-    [property: JsonPropertyName("expected_enabled")] bool ExpectedEnabled = true);
+    [property: JsonPropertyName("expected_enabled")] bool ExpectedEnabled = true,
+    [property: JsonPropertyName("virtual_key")] int? VirtualKey = null,
+    [property: JsonPropertyName("ctrl")] bool Ctrl = false,
+    [property: JsonPropertyName("alt")] bool Alt = false,
+    [property: JsonPropertyName("shift")] bool Shift = false,
+    [property: JsonPropertyName("win")] bool Win = false,
+    [property: JsonPropertyName("scroll_direction")] WindowScrollDirection? ScrollDirection = null,
+    [property: JsonPropertyName("scroll_units")] int ScrollUnits = 1,
+    [property: JsonPropertyName("target_x")] int? TargetX = null,
+    [property: JsonPropertyName("target_y")] int? TargetY = null,
+    [property: JsonPropertyName("locator_automation_id")] string? LocatorAutomationId = null,
+    [property: JsonPropertyName("locator_name")] string? LocatorName = null,
+    [property: JsonPropertyName("locator_role")] WindowRoleFilter? LocatorRole = null);
 
 public sealed record WindowActionResult(
     [property: JsonPropertyName("status")] WindowActionCode Status,
@@ -107,6 +123,8 @@ internal static class WindowAction
             WindowInspector.WellFormedElementRef(request.ElementId, out _);
         bool tabRef = requireFresh ? WindowChromeCdp.ValidTabElementRef(request.ElementId) :
             WindowChromeCdp.WellFormedTabElementRef(request.ElementId);
+        bool locator=request.LocatorAutomationId is not null || request.LocatorName is not null ||
+            request.LocatorRole is not null;
         return
         WindowCatalog.TryParseId(request.WindowId, out _) &&
         WindowChromeCdp.ContextArgumentError(request.ExpectedProfile, request.ExpectedOrigin,
@@ -114,10 +132,25 @@ internal static class WindowAction
         (!tabRef || request.ExpectedProfile is not null) &&
         (tabRef ||
             request.ExpectedOrigin is null && request.ExpectedUrl is null) &&
-        (uiaRef || tabRef) &&
+        (uiaRef || tabRef || locator) &&
+        (locator ? request.ElementId=="locator" &&
+            request.LocatorAutomationId is null or {Length:>=1 and <=128} &&
+            request.LocatorName is null or {Length:>=1 and <=128} &&
+            (request.LocatorAutomationId is null || !string.IsNullOrWhiteSpace(request.LocatorAutomationId) &&
+                !request.LocatorAutomationId.Contains('\0')) &&
+            (request.LocatorName is null || !string.IsNullOrWhiteSpace(request.LocatorName) &&
+                !request.LocatorName.Contains('\0')) &&
+            (request.LocatorRole is null || Enum.IsDefined(request.LocatorRole.Value)) &&
+            request.ExpectedOrigin is null && request.ExpectedUrl is null :
+            request.LocatorAutomationId is null && request.LocatorName is null && request.LocatorRole is null) &&
         (request.ElementPath is null || uiaRef &&
          WindowInspector.TryParsePath(request.ElementPath, out _)) &&
         Enum.IsDefined(request.Action) &&
+        (request.Action==WindowActionKind.SCROLL ? request.ScrollDirection is not null &&
+            Enum.IsDefined(request.ScrollDirection.Value) && request.ScrollUnits is >=1 and <=10 :
+            request.ScrollDirection is null && request.ScrollUnits==1) &&
+        (request.Action==WindowActionKind.DRAG ? request.TargetX.HasValue && request.TargetY.HasValue :
+            request.TargetX is null && request.TargetY is null) &&
         Enum.IsDefined(request.ExpectedKind) &&
         request.ObservationTimeoutMs is >= 100 and <= 15000 &&
         (request.ExpectedKind is not (WindowExpectedKind.WINDOW_CREATED or WindowExpectedKind.PROCESS_STARTED) ||
@@ -137,7 +170,9 @@ internal static class WindowAction
             !string.IsNullOrWhiteSpace(request.ExpectedEnabledName) &&
             !request.ExpectedEnabledName.Contains('\0')) &&
         (request.Action == WindowActionKind.KEY_PRESS ?
-            request.Key is not null && Enum.IsDefined(request.Key.Value) : request.Key is null) &&
+            (request.Key is not null && Enum.IsDefined(request.Key.Value) && request.VirtualKey is null ||
+             request.Key is null && request.VirtualKey is >= 1 and <= 254) :
+            request.Key is null && request.VirtualKey is null && !request.Ctrl && !request.Alt && !request.Shift && !request.Win) &&
         (request.Action is WindowActionKind.SET_VALUE or WindowActionKind.TYPE_TEXT ?
             request.Value is { Length: <= 4096 } && request.Value?.Contains('\0') == false :
             request.Value is null);
@@ -155,7 +190,62 @@ internal static class WindowAction
             return new(resolved == WindowResolveCode.ACCESS_DENIED ? WindowActionCode.ACCESS_DENIED :
                 resolved == WindowResolveCode.WRONG_SESSION ? WindowActionCode.USER_CONTEXT_UNAVAILABLE :
                 WindowActionCode.STALE_WINDOW, Detail: resolved.ToString());
-        return InvokeCore(hwnd, request);
+        return request.ElementId=="locator"?InvokeLocator(hwnd,request):InvokeCore(hwnd, request);
+    }
+
+    // Resolve exactly one semantic UIA locator *inside* the disposable action
+    // worker. No old snapshot, ambiguous best-effort click or retry is used.
+    private static WindowActionResult InvokeLocator(IntPtr hwnd,WindowActionRequest request)
+    {
+        try
+        {
+            if(request.ExpectedProfile is not null &&
+                !WindowChromeCdp.VerifiedChromeProfile(hwnd,request.ExpectedProfile))
+                return new(WindowActionCode.CDP_CONTEXT_MISMATCH,Detail:"PROFILE_NOT_VERIFIED");
+            var root=AutomationElement.FromHandle(hwnd);
+            if(root is null)return new(WindowActionCode.UIA_UNAVAILABLE);
+            var walker=TreeWalker.ControlViewWalker;
+            var pending=new Stack<(AutomationElement Element,int Depth,int[] Path)>();
+            pending.Push((root,0,[]));
+            int traversed=0;
+            WindowActionRequest? match=null;
+            while(pending.Count>0 && traversed<WindowInspector.MaxTraversal)
+            {
+                var (element,depth,path)=pending.Pop();
+                traversed++;
+                AutomationElement.AutomationElementInformation current;
+                try{current=element.Current;}catch(ElementNotAvailableException){continue;}
+                bool role=request.LocatorRole is null ||
+                    WindowInspector.MatchesRole(current.ControlType,request.LocatorRole.Value);
+                if(role &&
+                    (request.LocatorAutomationId is null || current.AutomationId==request.LocatorAutomationId) &&
+                    (request.LocatorName is null || current.Name==request.LocatorName))
+                {
+                    if(match is not null)return new(WindowActionCode.LOCATOR_AMBIGUOUS,
+                        Detail:"MULTIPLE_MATCHES");
+                    long now=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    match=request with {ElementId=WindowInspector.ElementRef(element,request.WindowId,now),
+                        ElementPath="0"+string.Concat(path.Select(i=>"."+i)),
+                        LocatorAutomationId=null,LocatorName=null,LocatorRole=null};
+                }
+                if(depth>=WindowInspector.MaxDepth)continue;
+                var children=new List<AutomationElement>();
+                try
+                {
+                    var child=walker.GetFirstChild(element);
+                    while(child is not null && children.Count<WindowInspector.MaxTraversal)
+                    {children.Add(child);child=walker.GetNextSibling(child);}
+                }
+                catch(ElementNotAvailableException){continue;}
+                for(int i=children.Count-1;i>=0;i--)
+                    pending.Push((children[i],depth+1,[..path,i]));
+            }
+            if(pending.Count>0)return new(WindowActionCode.LOCATOR_AMBIGUOUS,Detail:"TRAVERSAL_LIMIT");
+            return match is null?new(WindowActionCode.LOCATOR_NOT_FOUND):InvokeCore(hwnd,match);
+        }
+        catch(ElementNotAvailableException){return new(WindowActionCode.STALE_ELEMENT);}
+        catch(COMException e){return new(WindowActionCode.UIA_UNAVAILABLE,
+            ExceptionType:e.GetType().Name,HResult:e.HResult.ToString("X8"));}
     }
 
     internal static WindowActionResult InvokeCore(IntPtr hwnd, WindowActionRequest request)
@@ -267,6 +357,10 @@ internal static class WindowAction
                 }
                 var result = request.Action == WindowActionKind.CLICK
                     ? ClickWithNativeFallback()
+                    : request.Action == WindowActionKind.SCROLL
+                    ? ScrollTarget(hwnd,element,request,clock)
+                    : request.Action is WindowActionKind.HOVER or WindowActionKind.DRAG
+                    ? WindowPhysicalClick.Pointer(hwnd,element,request,clock)
                     : request.Action == WindowActionKind.KEY_PRESS
                     ? WindowPhysicalClick.PressKey(hwnd, element, request, clock)
                     : request.Action == WindowActionKind.TYPE_TEXT
@@ -391,6 +485,38 @@ internal static class WindowAction
         catch (InvalidOperationException e) { return new(WindowActionCode.UIA_UNAVAILABLE,
             FailureStage: WindowFailureStage.RESOLVE_ELEMENT, ExceptionType: e.GetType().Name,
             HResult: e.HResult.ToString("X8")); }
+    }
+
+    private static WindowActionResult ScrollTarget(IntPtr hwnd,AutomationElement element,
+        WindowActionRequest request,Stopwatch clock)
+    {
+        try
+        {
+            if(element.TryGetCurrentPattern(ScrollPattern.Pattern,out var observed) && observed is ScrollPattern scroll)
+            {
+                bool vertical=request.ScrollDirection is WindowScrollDirection.UP or WindowScrollDirection.DOWN;
+                if(vertical?!scroll.Current.VerticallyScrollable:!scroll.Current.HorizontallyScrollable)
+                    return new(WindowActionCode.UNSUPPORTED_ACTION,ElapsedMs:clock.ElapsedMilliseconds);
+                double before=vertical?scroll.Current.VerticalScrollPercent:scroll.Current.HorizontalScrollPercent;
+                var amount=request.ScrollDirection is WindowScrollDirection.UP or WindowScrollDirection.LEFT
+                    ? ScrollAmount.SmallDecrement:ScrollAmount.SmallIncrement;
+                for(int i=0;i<request.ScrollUnits;i++)
+                    scroll.Scroll(vertical?ScrollAmount.NoAmount:amount,vertical?amount:ScrollAmount.NoAmount);
+                double after=vertical?scroll.Current.VerticalScrollPercent:scroll.Current.HorizontalScrollPercent;
+                bool changed=before!=after;
+                return new(WindowActionCode.COMPLETED,EffectUnknown:!changed,
+                    ElapsedMs:clock.ElapsedMilliseconds,ExpectedStateObserved:changed,
+                    ObservationState:changed?WindowObservationState.OBSERVED:WindowObservationState.NOT_OBSERVED,
+                    ExecutionMethod:WindowExecutionMethod.UIA_PATTERN);
+            }
+            return WindowPhysicalClick.Scroll(hwnd,element,request,clock);
+        }
+        catch(Exception e) when(e is COMException or ElementNotAvailableException or InvalidOperationException)
+        {
+            return new(WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT,EffectUnknown:true,
+                ElapsedMs:clock.ElapsedMilliseconds,FailureStage:WindowFailureStage.DISPATCH_UIA,
+                ExceptionType:e.GetType().Name,HResult:e.HResult.ToString("X8"));
+        }
     }
 
     private static bool ExpectedNamePresent(AutomationElement root, string name)
@@ -590,7 +716,7 @@ internal static class WindowAction
         var auditId = Guid.NewGuid().ToString("N");
         if (!WriteAudit(auditId, "INTENT", request, null))
             return new(WindowActionCode.AUDIT_UNAVAILABLE, AuditId: auditId);
-        WindowActionResult result = request.ExpectedProfile is not null
+        WindowActionResult result = request.ExpectedProfile is not null && request.ElementId!="locator"
             ? await WindowChromeBroker.InvokeAsync(request, cancellationToken)
             : await RunDisposableWorkerAsync(request, cancellationToken);
         if (!WriteAudit(auditId, "RESULT", request, result))

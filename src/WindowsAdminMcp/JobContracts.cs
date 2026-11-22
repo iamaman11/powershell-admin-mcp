@@ -77,7 +77,8 @@ internal sealed record AdminResponse(StatusCode Code, string Correlation, AdminS
     [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] StoreSummary? Store = null,
     [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] WorkerReply? Worker = null,long? ServiceElapsedMs=null,
     [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] MaintenanceReply? Maintenance = null,
-    [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] NativeFileReply? File = null);
+    [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] NativeFileReply? File = null,
+    [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] FileWriteReply? FileWrite = null);
 
 [JsonConverter(typeof(JsonStringEnumConverter<QueueWaitReason>))]
 public enum QueueWaitReason { USER_UNAVAILABLE, RECOVERY_HOLD, RESOURCE_PRESSURE, RESOURCE_BUSY, READY_OR_EARLIER_JOB }
