@@ -47,9 +47,11 @@ public sealed class FileTools
                 DateTimeOffset.UtcNow, Stage:"TRANSPORT");
         using var self = Process.GetCurrentProcess();
         using var identity = WindowsIdentity.GetCurrent();
-        if (status.ExecutionContext != CommandContext.USER ||
-            status.UserContextAvailable != true || status.Frontend?.Elevated != true ||
+        // Files do not need the interactive PowerShell USER job worker or a
+        // desktop. The elevated frontend token is the actual file authority.
+        if (identity.IsSystem || status.Frontend?.Elevated != true ||
             status.Frontend.SessionId != self.SessionId ||
+            status.Frontend.Sid != identity.User?.Value ||
             !new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
             return new(NativeFileCode.USER_CONTEXT_UNAVAILABLE, CommandContext.USER,
                 DateTimeOffset.UtcNow, Stage:"VALIDATE");

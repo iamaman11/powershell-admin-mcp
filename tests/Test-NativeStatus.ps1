@@ -204,8 +204,9 @@ try{
             $tail.actual_length -eq 1 -and [Convert]::FromBase64String($tail.data_base64)[0] -eq $bytes[262144]) 'files.system_tail_and_eof'
         $invalid=ToolCall $a 704 'windows.file_read_chunk' @{path=$filePath;offset=-1;execution_context='SYSTEM'}
         Assert ($invalid.status -eq 'INVALID_ARGUMENT') 'files.reject_negative_offset_without_side_effect'
-        $notUser=ToolCall $a 705 'windows.file_query' @{action='STAT';path=$filePath;execution_context='USER'}
-        Assert ($notUser.status -eq 'USER_CONTEXT_UNAVAILABLE') 'files.no_implicit_system_fallback_for_user'
+        $realUser=ToolCall $a 705 'windows.file_query' @{action='STAT';path=$filePath;execution_context='USER'}
+        Assert ($realUser.status -eq 'COMPLETED' -and $realUser.execution_context -eq 'USER' -and
+            $realUser.info.size -eq $bytes.Length) 'files.real_elevated_user_without_worker_dependency'
     } finally {Remove-Item -LiteralPath $fileFixture -Recurse -Force}
     function Job($p,$id,$arguments){return (ToolCall $p $id 'powershell_job' $arguments)}
     function Wait-JobState($p,$jobId,$state){
