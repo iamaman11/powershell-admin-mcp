@@ -37,7 +37,8 @@ public sealed class AdminTools
             scm=clock.ElapsedMilliseconds;
             string payload=JsonSerializer.Serialize(request with {TraceId=correlation},PipeWire.Json);
             ipcStarted=clock.ElapsedMilliseconds;sent=true;
-            string raw=await PipeWire.RoundTripAsync(ServiceIdentity.Pipe,payload,pid,ct);
+            string raw=await PipeWire.RoundTripAsync(ServiceIdentity.Pipe,payload,pid,ct,
+                request.Operation==AdminOperation.File?35:5);
             ipc=clock.ElapsedMilliseconds-ipcStarted;
             var reply=JsonSerializer.Deserialize<AdminResponse>(raw,PipeWire.Json);
             if(reply is null || reply.Correlation!=correlation ||

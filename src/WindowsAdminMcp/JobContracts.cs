@@ -76,7 +76,8 @@ public sealed record StoreSummary(long Total,long Queued,long Running,long Cance
 internal sealed record AdminResponse(StatusCode Code, string Correlation, AdminStatus? Info = null, JobReply? Job = null,
     [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] StoreSummary? Store = null,
     [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] WorkerReply? Worker = null,long? ServiceElapsedMs=null,
-    [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] MaintenanceReply? Maintenance = null);
+    [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] MaintenanceReply? Maintenance = null,
+    [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] NativeFileReply? File = null);
 
 [JsonConverter(typeof(JsonStringEnumConverter<QueueWaitReason>))]
 public enum QueueWaitReason { USER_UNAVAILABLE, RECOVERY_HOLD, RESOURCE_PRESSURE, RESOURCE_BUSY, READY_OR_EARLIER_JOB }

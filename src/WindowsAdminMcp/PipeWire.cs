@@ -36,10 +36,11 @@ internal static class PipeWire
     }
 
 
-    internal static async Task<string> RoundTripAsync(string name, string payload, uint expectedServerPid, CancellationToken token)
+    internal static async Task<string> RoundTripAsync(string name, string payload, uint expectedServerPid,
+        CancellationToken token, int timeoutSeconds = 5)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
-        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        deadline.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
         using var pipe = new NamedPipeClientStream(".", name, PipeDirection.InOut,
             PipeOptions.Asynchronous, TokenImpersonationLevel.Identification);
         await pipe.ConnectAsync(deadline.Token);

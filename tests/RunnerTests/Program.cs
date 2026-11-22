@@ -15,6 +15,109 @@ static async Task<ExecutionResult> Run(string command, int timeout = 10, string?
 }
 if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true")
     throw new InvalidOperationException("Isolated Windows CI only");
+{
+    string root = Path.Combine(Path.GetTempPath(), "wmcp-native-read-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        NativeFileRequest FileRequest(NativeFileAction action, string path, int page = 50,
+            string? cursor = null, bool hash = false, long offset = 0, int length = 65536,
+            string? version = null) =>
+            new(action, path, CommandContext.USER, page, cursor, hash, offset, length, version);
+        async Task<NativeFileReply> FileCall(NativeFileRequest request) =>
+            await NativeFileReader.ExecuteAsync(request, CancellationToken.None);
+
+        string empty = Path.Combine(root, "empty.bin");
+        File.WriteAllBytes(empty, []);
+        var emptyStat = await FileCall(FileRequest(NativeFileAction.STAT, empty, hash:true));
+        Console.WriteLine($"files.empty_stat_native status={emptyStat.Status} stage={emptyStat.Stage} " +
+            $"native_error={emptyStat.NativeError} kind={emptyStat.Info?.Kind} " +
+            $"size={emptyStat.Info?.Size} hash={emptyStat.Info?.Sha256}");
+        Check(emptyStat is { Status: NativeFileCode.COMPLETED,
+            Info: { Kind: NativeFileKind.FILE, Size: 0, Sha256: not null } } &&
+            emptyStat.Info.Sha256 == Convert.ToHexString(System.Security.Cryptography.SHA256.HashData([])),
+            "files.empty_sha256_and_identity");
+        var emptyRead = await FileCall(FileRequest(NativeFileAction.READ_CHUNK, empty, offset:0));
+        Check(emptyRead is { Status: NativeFileCode.COMPLETED, ActualLength: 0, Eof: true,
+            DataBase64: "", ChunkSha256: not null }, "files.empty_eof_chunk");
+
+        foreach (var (name, encoding, text) in new (string, System.Text.Encoding, string)[] {
+            ("emoji-utf8.txt", new System.Text.UTF8Encoding(false), "привет 🌍\n"),
+            ("utf16le.txt", System.Text.Encoding.Unicode, "тест 🌍"),
+            ("utf16be.txt", System.Text.Encoding.BigEndianUnicode, "тест 🌍") })
+        {
+            string path = Path.Combine(root, name);
+            byte[] original = encoding.GetBytes(text);
+            File.WriteAllBytes(path, original);
+            var stat = await FileCall(FileRequest(NativeFileAction.STAT, path, hash:true));
+            var read = await FileCall(FileRequest(NativeFileAction.READ_CHUNK, path, offset:0,
+                length:262144, version:stat.Info?.Version));
+            Check(stat.Info?.Sha256 == Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(original)) &&
+                read.Status == NativeFileCode.COMPLETED && read.ActualLength == original.Length &&
+                Convert.FromBase64String(read.DataBase64!) .SequenceEqual(original) && read.Eof == true,
+                "files.binary_exact_" + name);
+        }
+        string largePath = Path.Combine(root, "large.bin");
+        byte[] contents = new byte[5 * 1024 * 1024 + 13];
+        System.Security.Cryptography.RandomNumberGenerator.Fill(contents);
+        File.WriteAllBytes(largePath, contents);
+        var largeStat = await FileCall(FileRequest(NativeFileAction.STAT, largePath, hash:true));
+        Check(largeStat.Status == NativeFileCode.COMPLETED && largeStat.Info?.Size == contents.Length &&
+            largeStat.Info.Sha256 == Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(contents)),
+            "files.five_megabytes_sha256");
+        var roundtrip = new List<byte>(contents.Length);
+        for (long offset = 0; offset < contents.Length; offset += 262144)
+        {
+            var chunk = await FileCall(FileRequest(NativeFileAction.READ_CHUNK, largePath,
+                offset:offset, length:262144, version:largeStat.Info!.Version));
+            byte[] bytes = Convert.FromBase64String(chunk.DataBase64!);
+            Check(chunk.Status == NativeFileCode.COMPLETED && chunk.ActualLength == bytes.Length &&
+                chunk.ChunkSha256 == Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)) &&
+                chunk.Eof == (offset + bytes.Length == contents.Length),
+                "files.chunk_at_" + offset);
+            roundtrip.AddRange(bytes);
+        }
+        Check(roundtrip.SequenceEqual(contents), "files.five_megabytes_roundtrip");
+        Check((await FileCall(FileRequest(NativeFileAction.READ_CHUNK, largePath,
+            offset:contents.Length))).Eof == true, "files.exact_eof");
+        Check((await FileCall(FileRequest(NativeFileAction.READ_CHUNK, largePath,
+            offset:contents.Length+1))).Status == NativeFileCode.INVALID_ARGUMENT &&
+            (await FileCall(FileRequest(NativeFileAction.READ_CHUNK, largePath,
+            offset:0, length:262145))).Status == NativeFileCode.INVALID_ARGUMENT &&
+            (await FileCall(FileRequest(NativeFileAction.READ_CHUNK, largePath,
+            offset:0, length:0))).Status == NativeFileCode.INVALID_ARGUMENT,
+            "files.reject_invalid_offsets_and_lengths");
+        File.SetLastWriteTimeUtc(largePath, DateTime.UtcNow.AddMinutes(-2));
+        Check((await FileCall(FileRequest(NativeFileAction.READ_CHUNK, largePath,
+            offset:0, version:largeStat.Info!.Version))).Status == NativeFileCode.CHANGED_SINCE_READ,
+            "files.reject_stale_version");
+        var listing = await FileCall(FileRequest(NativeFileAction.LIST, root, page:2));
+        Check(listing.Status == NativeFileCode.COMPLETED && listing.Entries?.Length == 2 &&
+            listing.NextCursor is not null, "files.paged_list_first");
+        var next = await FileCall(FileRequest(NativeFileAction.LIST, root, page:2,
+            cursor:listing.NextCursor));
+        Check(next.Status == NativeFileCode.COMPLETED && next.Entries?.Length == 2 &&
+            next.Entries.All(e => string.CompareOrdinal(e.Name, listing.Entries![^1].Name) > 0),
+            "files.paged_list_second_stable_order");
+        File.WriteAllText(Path.Combine(root, "mutation.txt"), "changed");
+        var changed = await FileCall(FileRequest(NativeFileAction.LIST, root, page:2,
+            cursor:listing.NextCursor));
+        Check(changed.Status == NativeFileCode.CHANGED_SINCE_LIST,
+            "files.detect_mutated_directory_between_pages");
+        Check((await FileCall(FileRequest(NativeFileAction.LIST, root, page:2,
+            cursor:"not-base64"))).Status == NativeFileCode.INVALID_CURSOR &&
+            (await FileCall(FileRequest(NativeFileAction.STAT, root))).Info?.Kind == NativeFileKind.DIRECTORY &&
+            (await FileCall(FileRequest(NativeFileAction.LIST, empty))).Status == NativeFileCode.NOT_DIRECTORY &&
+            (await FileCall(FileRequest(NativeFileAction.READ_CHUNK, root))).Status == NativeFileCode.NOT_FILE &&
+            (await FileCall(FileRequest(NativeFileAction.STAT, Path.Combine(root,"missing")))).Status == NativeFileCode.NOT_FOUND,
+            "files.typed_invalid_cursor_kinds_and_missing");
+        Check(!NativeFileReader.Valid(FileRequest((NativeFileAction)99, empty)) &&
+            !NativeFileReader.Valid(FileRequest(NativeFileAction.STAT, "relative\\file")) &&
+            !NativeFileReader.Valid(FileRequest(NativeFileAction.LIST, root, page:101)),
+            "files.reject_unknown_action_relative_path_and_unbounded_page");
+    }
+    finally { Directory.Delete(root, recursive:true); }
+}
 Check(File.Exists(PowerShellRunner.Executable), "r2.machine_wide_pwsh");
 using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent())
 {

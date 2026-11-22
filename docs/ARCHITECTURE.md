@@ -7,7 +7,7 @@ acceptance matrix live in [Issue #56](https://github.com/iamaman11/powershell-ad
 
 | Owner | Responsibility | Implementation |
 | --- | --- | --- |
-| MCP frontend | Typed tool schemas, validation, dispatch and JSON results | `AdminTools`, `WindowTools`, `ChromeConnectionTools`, `UpdateTools` |
+| MCP frontend | Typed tool schemas, validation, dispatch and JSON results | `AdminTools`, `WindowTools`, `ChromeConnectionTools`, `FileTools`, `UpdateTools` |
 | SYSTEM service | SQLite admission, encrypted durable PowerShell queue, idempotency, cancellation and recovery | `AdminService`, `JobCoordinator`, `StoreSchema` |
 | USER worker | UIA, Win32, WGC, user desktop and session-bound operations | `UserWorker`, `WindowInspector`, `WindowAction`, `WindowCapture` |
 | Chrome child | Native consented CDP connection, browser context/window/profile binding and background tab actions | `WindowChromeBroker`, `WindowChromeCdp` |
@@ -42,6 +42,13 @@ frontend, not a separate permanent browser manager. No extra HTTP API.
   session/profile validation → existing CDP broker → DOM event → observed
   effect with `execution_method=CHROME_CDP`. An unrelated foreground window
   remains unaffected when CDP supports the action.
+- **Native file inspection (P0-A read-only):** MCP `windows.file_query` or
+  `windows.file_read_chunk` → authenticated real elevated USER context, or
+  existing SYSTEM SCM IPC with a bounded 30-second deadline → Win32 file
+  handle with no final-link following → identity/version and bounded readback.
+  No PowerShell child, second database, permanent daemon, or side-effect retry.
+  Directory pagination fingerprints the observed directory and returns
+  `CHANGED_SINCE_LIST` rather than continuing from an invalidated cursor.
 - **Legacy cleanup (#56, one time):** `powershell_update(FORGET_LEGACY)` →
   existing verified interactive Task Scheduler operator → drain and stop SCM →
   offline `LegacyUnknownCleanup` plan/fingerprint → transactional deletion of

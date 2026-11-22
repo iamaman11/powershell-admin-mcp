@@ -187,7 +187,7 @@ else if (args is ["stdio"])
     {
         options.ServerInfo = new() { Name = "windows-admin-mcp", Version = BuildIdentity.McpVersion };
     }).WithStdioServerTransport().WithTools<AdminTools>().WithTools<WindowTools>()
-      .WithTools<ChromeConnectionTools>().WithTools<UpdateTools>();
+      .WithTools<ChromeConnectionTools>().WithTools<UpdateTools>().WithTools<FileTools>();
     await builder.Build().RunAsync();
 }
 else
