@@ -96,6 +96,13 @@ internal static class WindowInspector
 
     internal static bool TryParseElementRef(string? text, out long unixMs)
     {
+        if (!WellFormedElementRef(text, out unixMs)) return false;
+        long age = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - unixMs;
+        return age >= -FutureSkewMs && age <= ElementRefSeconds * 1000L;
+    }
+
+    internal static bool WellFormedElementRef(string? text, out long unixMs)
+    {
         unixMs = 0;
         if (text is null || text.Length > 80) return false;
         var fields = text.Split(':');
@@ -103,8 +110,7 @@ internal static class WindowInspector
             !fields[2].All(Uri.IsHexDigit) ||
             !long.TryParse(fields[1], NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out unixMs))
             return false;
-        long age = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - unixMs;
-        return age >= -FutureSkewMs && age <= ElementRefSeconds * 1000L;
+        return true;
     }
 
     internal static bool TryParsePath(string? path, out int[] indices)

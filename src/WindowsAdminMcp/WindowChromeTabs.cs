@@ -28,6 +28,7 @@ internal static partial class WindowChromeCdp
     private static Task? _pendingConnect;
     private static CancellationTokenSource? _pendingDeadline;
     private static Uri? _pendingEndpoint;
+    internal static readonly TimeSpan ConsentTimeout = TimeSpan.FromMinutes(5);
     private static readonly Dictionary<string, string> AttachedTabs = new(StringComparer.Ordinal);
     private static bool TabConnected => _tabSocket?.State == WebSocketState.Open && _tabSession is not null;
 
@@ -111,7 +112,7 @@ internal static partial class WindowChromeCdp
                 return ChromeConnectionState.CONNECTED;
             }
             ChromeConnectionState failure = _pendingConnect.IsCanceled
-                ? ChromeConnectionState.CONSENT_NOT_CONFIRMED
+                ? ChromeConnectionState.CONSENT_TIMED_OUT
                 : ChromeConnectionState.CONNECTION_FAILED;
             if (!retry) return failure;
         }
@@ -120,7 +121,7 @@ internal static partial class WindowChromeCdp
         CloseTabConnection();
         _pendingSocket = new ClientWebSocket();
         _pendingEndpoint = endpoint;
-        _pendingDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        _pendingDeadline = new CancellationTokenSource(ConsentTimeout);
         _pendingConnect = _pendingSocket.ConnectAsync(endpoint, _pendingDeadline.Token);
         // The task is inspected on STATUS/poll. Observe faults if a new
         // selection kills this worker before the approval dialog completes.
@@ -227,7 +228,8 @@ internal static partial class WindowChromeCdp
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
 
-    private static bool TryParseTabElementRef(string? token, out TabElementRef? result)
+    private static bool TryParseTabElementRef(string? token, out TabElementRef? result,
+        bool requireFresh = true)
     {
         result = null;
         if (token is null || token.Length > 256) return false;
@@ -240,12 +242,14 @@ internal static partial class WindowChromeCdp
             !int.TryParse(fields[3], NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture,
                 out int backendId) || backendId <= 0) return false;
         long age = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - stamp;
-        if (age is < -5000 or > 30000) return false;
+        if (requireFresh && (age is < -5000 or > 30000)) return false;
         result = new(stamp, fields[2], backendId, fields[4], fields[5]);
         return true;
     }
 
     internal static bool ValidTabElementRef(string? token) => TryParseTabElementRef(token, out _);
+    internal static bool WellFormedTabElementRef(string? token) =>
+        TryParseTabElementRef(token, out _, requireFresh: false);
 
     private static string ElementDigest(string windowId, string targetId, int backendId,
         string loaderId, string url, string role, string name)

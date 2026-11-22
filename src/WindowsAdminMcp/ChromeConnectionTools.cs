@@ -13,14 +13,16 @@ public enum ChromeConnectionAction { LIST, REQUEST, STATUS, DISCONNECT }
 public enum ChromeConnectionCode
 {
     OK, INVALID_ARGUMENT, SERVICE_UNAVAILABLE, USER_CONTEXT_UNAVAILABLE,
-    DESKTOP_UNAVAILABLE, STALE_WINDOW, PROFILE_MISMATCH, WORKER_FAILED
+    DESKTOP_UNAVAILABLE, STALE_WINDOW, PROFILE_MISMATCH, PROFILE_NOT_OPEN,
+    PROFILE_AMBIGUOUS, WORKER_FAILED
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<ChromeConnectionState>))]
 public enum ChromeConnectionState
 {
     NOT_REQUESTED, DEBUGGING_UNAVAILABLE, CONSENT_PENDING, CONNECTED,
-    CONSENT_NOT_CONFIRMED, CONNECTION_FAILED, CONSENT_WINDOW_UNAVAILABLE, DISCONNECTED
+    CONSENT_NOT_CONFIRMED, CONSENT_TIMED_OUT, CONNECTION_FAILED,
+    CONSENT_WINDOW_UNAVAILABLE, DISCONNECTED
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<ChromeConnectionNextAction>))]
@@ -62,7 +64,8 @@ internal sealed record ChromeConnectionRequest(string WindowId, string ExpectedP
 public sealed class ChromeConnectionTools
 {
     [McpServerTool(Name = "windows.chrome_connection", UseStructuredContent = true),
-     Description("Discover Chrome profiles and request or check native user-approved CDP connection.")]
+     Description("Discover Chrome profiles and request or check native user-approved CDP connection. " +
+         "A unique open profile may be selected by email without window_id; ambiguous windows require window_id.")]
     public static async Task<ChromeConnectionResult> Connection(ChromeConnectionAction action,
         string? window_id = null, string? expected_profile = null,
         CancellationToken cancellationToken = default)
@@ -82,6 +85,19 @@ public sealed class ChromeConnectionTools
         if (action == ChromeConnectionAction.LIST)
             return await ChromeProfileCatalog.ListIsolatedAsync(cancellationToken);
 
+        if (window_id is null)
+        {
+            var discovered = await ChromeProfileCatalog.ListIsolatedAsync(cancellationToken);
+            if (discovered.Status != ChromeConnectionCode.OK) return discovered;
+            var matches = ChromeProfileCatalog.OpenMatches(discovered.Profiles ?? [], expected_profile!);
+            if (matches.Length != 1)
+                return new(matches.Length == 0 ? ChromeConnectionCode.PROFILE_NOT_OPEN :
+                    ChromeConnectionCode.PROFILE_AMBIGUOUS, ChromeConnectionState.NOT_REQUESTED,
+                    ChromeConnectionNextAction.SELECT_PROFILE,
+                    Profiles: matches.Length > 1 ? matches : null);
+            window_id = matches[0].WindowId;
+        }
+
         var resolved = WindowCatalog.ResolveId(window_id, self.SessionId, out _);
         if (resolved != WindowResolveCode.OK)
             return new(ChromeConnectionCode.STALE_WINDOW, ChromeConnectionState.NOT_REQUESTED,
@@ -93,7 +109,8 @@ public sealed class ChromeConnectionTools
     internal static bool ValidArguments(ChromeConnectionAction action, string? windowId, string? profile) =>
         action == ChromeConnectionAction.LIST ? windowId is null && profile is null :
         (action is ChromeConnectionAction.REQUEST or ChromeConnectionAction.STATUS or
-            ChromeConnectionAction.DISCONNECT) && WindowCatalog.TryParseId(windowId, out _) &&
+            ChromeConnectionAction.DISCONNECT) &&
+            (windowId is null || WindowCatalog.TryParseId(windowId, out _)) &&
             profile is { Length: >= 1 and <= 100 } && !string.IsNullOrWhiteSpace(profile) &&
             !profile.Contains('\0');
 }
@@ -221,6 +238,9 @@ internal static class ChromeProfileCatalog
             string.Equals(profile.Email, selector, StringComparison.OrdinalIgnoreCase) ||
         profile.ProfileId is not null &&
             string.Equals(profile.ProfileId, selector, StringComparison.OrdinalIgnoreCase);
+
+    internal static ChromeProfileInfo[] OpenMatches(IEnumerable<ChromeProfileInfo> profiles, string selector) =>
+        [.. profiles.Where(p => p.WindowId is not null && MatchesSelector(p, selector))];
 
     internal static ChromeConnectionResult ListInWorker()
     {

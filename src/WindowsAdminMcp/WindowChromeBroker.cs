@@ -15,8 +15,8 @@ internal sealed record ChromeBrokerRequest(WindowInspectRequest? Inspect = null,
         WindowCatalog.TryParseId(WindowId, out _) &&
         Profile is { Length: >= 1 and <= 100 } && !string.IsNullOrWhiteSpace(Profile) &&
         (Inspect is null || Inspect.Scope is WindowInspectScope.TABS or WindowInspectScope.TAB) &&
-        (Action is null || WindowChromeCdp.ValidTabElementRef(Action.ElementId) ||
-            WindowInspector.TryParseElementRef(Action.ElementId, out _)) &&
+        (Action is null || WindowChromeCdp.WellFormedTabElementRef(Action.ElementId) ||
+            WindowInspector.WellFormedElementRef(Action.ElementId, out _)) &&
         (Connection is null || Connection.Action is ChromeConnectionAction.REQUEST or
             ChromeConnectionAction.STATUS);
 }
