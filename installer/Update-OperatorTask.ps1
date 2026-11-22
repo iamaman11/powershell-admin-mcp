@@ -3,7 +3,7 @@
 [CmdletBinding()]
 param([ValidateSet('Start','Status')][string]$Action='Status',
       [ValidatePattern('^[a-f0-9]{32}$')][string]$OperationId,
-      [ValidateSet('update','accept')][string]$Operation='update',
+      [ValidateSet('update','accept','forget')][string]$Operation='update',
       [ValidatePattern('^[a-f0-9]{40}$')][string]$ExpectedCommit,
       [switch]$RemoteAcceptanceConfirmed)
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
@@ -25,7 +25,11 @@ function Test-OperatorPrincipal([string]$userId,[string]$account,[string]$sid=''
 function New-OperatorArguments([string]$script,[string]$mode,[string]$id,[string]$commit=''){
     $verb=if($mode -ceq 'accept'){
         '-Action accept -RemoteAcceptanceConfirmed -ExpectedCommit '+$commit
-    }else{'-Action update'}
+    }elseif($mode -ceq 'forget'){
+        '-Action forget -ExpectedCommit '+$commit
+    }elseif($mode -ceq 'update' -and -not $commit){
+        '-Action update'
+    }else{throw 'UPDATE_UNKNOWN_OPERATOR_MODE'}
     return '-NoProfile -NonInteractive -File "'+$script+'" '+$verb+' -ScheduledOperator -OperationId '+$id
 }
 function Test-OperatorDefinition($task,[string]$account,[string]$executable,[string]$script,[string]$sid=''){
@@ -36,12 +40,14 @@ function Test-OperatorDefinition($task,[string]$account,[string]$executable,[str
     $a=$task.Actions[0]
     if($a.Execute -ine $executable){return $false}
     $pattern='^-NoProfile -NonInteractive -File "'+[regex]::Escape($script)+
-        '" -Action (update|accept)(?: -RemoteAcceptanceConfirmed -ExpectedCommit ([a-f0-9]{40}))? -ScheduledOperator -OperationId ([a-f0-9]{32})$'
+        '" -Action (update|accept|forget)(?: -RemoteAcceptanceConfirmed -ExpectedCommit ([a-f0-9]{40})| -ExpectedCommit ([a-f0-9]{40}))? -ScheduledOperator -OperationId ([a-f0-9]{32})$'
     $match=[regex]::Match($a.Arguments,$pattern,[Text.RegularExpressions.RegexOptions]::CultureInvariant)
     if(-not $match.Success){return $false}
     $mode=$match.Groups[1].Value
-    if(($mode -ceq 'accept') -ne $match.Groups[2].Success){return $false}
-    return $a.Arguments -ceq (New-OperatorArguments $script $mode $match.Groups[3].Value $match.Groups[2].Value)
+    if(($mode -ceq 'accept') -ne $match.Groups[2].Success -or
+        ($mode -ceq 'forget') -ne $match.Groups[3].Success){return $false}
+    $commit=if($mode -ceq 'accept'){$match.Groups[2].Value}elseif($mode -ceq 'forget'){$match.Groups[3].Value}else{''}
+    return $a.Arguments -ceq (New-OperatorArguments $script $mode $match.Groups[4].Value $commit)
 }
 function Get-OperatorReceipt {
     if(-not(Test-Path -LiteralPath $receipt -PathType Leaf)){return $null}
@@ -50,7 +56,7 @@ function Get-OperatorReceipt {
     if($value.schema -ne 1 -or $value.operation_id -cnotmatch '^[a-f0-9]{32}$' -or
        $value.state -notin @('RUNNING','NO_UPDATE','COMPLETED','FAILED') -or
        $value.stage -cnotmatch '^[a-z_]{1,32}$' -or
-       ($value.ContainsKey('operation_action') -and $value.operation_action -cnotin @('REQUEST','ACCEPT'))){
+       ($value.ContainsKey('operation_action') -and $value.operation_action -cnotin @('REQUEST','ACCEPT','FORGET_LEGACY'))){
         throw 'UPDATE_RECEIPT_UNTRUSTED'
     }
     if(-not $value.ContainsKey('operation_action')){$value.operation_action='REQUEST'}
@@ -73,6 +79,10 @@ if($Action -eq 'Start'){
     if($Operation -eq 'accept'){
         if(-not $RemoteAcceptanceConfirmed -or -not $ExpectedCommit){
             throw 'UPDATE_ACCEPT_ARGUMENTS_REQUIRED'
+        }
+    }elseif($Operation -eq 'forget'){
+        if($RemoteAcceptanceConfirmed -or -not $ExpectedCommit){
+            throw 'UPDATE_LEGACY_ARGUMENTS_REQUIRED'
         }
     }elseif($RemoteAcceptanceConfirmed -or $ExpectedCommit){
         throw 'UPDATE_UNEXPECTED_ACCEPT_ARGUMENTS'
@@ -101,7 +111,7 @@ if($Action -eq 'Start'){
     # The receipt is created only by the independently scheduled updater.
     Start-ScheduledTask -TaskName $taskName
     [pscustomobject]@{status='REQUESTED';operation_id=$OperationId;task=$taskName;
-        operation_action=if($Operation -eq 'accept'){'ACCEPT'}else{'REQUEST'}}|ConvertTo-Json -Compress
+        operation_action=if($Operation -eq 'accept'){'ACCEPT'}elseif($Operation -eq 'forget'){'FORGET_LEGACY'}else{'REQUEST'}}|ConvertTo-Json -Compress
     return
     }finally{$taskLock.Dispose()}
 }
@@ -115,7 +125,7 @@ if($task){
     }
     $taskId=([regex]::Match($task.Actions[0].Arguments,'-OperationId\s+([a-f0-9]{32})$')).Groups[1].Value
     if($record -and $record.operation_id -cne $taskId){throw 'UPDATE_STATUS_TASK_MISMATCH'}
-    $taskOperation=if($task.Actions[0].Arguments.Contains(' -Action accept ')){'ACCEPT'}else{'REQUEST'}
+    $taskOperation=if($task.Actions[0].Arguments.Contains(' -Action accept ')){'ACCEPT'}elseif($task.Actions[0].Arguments.Contains(' -Action forget ')){'FORGET_LEGACY'}else{'REQUEST'}
     if($record -and $record.operation_action -cne $taskOperation){throw 'UPDATE_STATUS_TASK_MISMATCH'}
 }
 [pscustomobject]@{status=if($record){$record.state}elseif($task){'REQUESTED'}else{'NOT_REQUESTED'};
@@ -125,4 +135,6 @@ if($task){
     reason=if($record){$record.reason}else{$null};
     operation_action=if($record){$record.operation_action}elseif($task){$taskOperation}else{$null};
     rollback_pending=if($record){$record.rollback_pending}else{$null};
+    deleted_count=if($record -and $record.ContainsKey('deleted_count')){$record.deleted_count}else{$null};
+    remaining_count=if($record -and $record.ContainsKey('remaining_count')){$record.remaining_count}else{$null};
     task_state=$state;last_task_result=if($info){$info.LastTaskResult}else{$null}}|ConvertTo-Json -Compress

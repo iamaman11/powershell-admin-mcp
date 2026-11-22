@@ -40,6 +40,11 @@ Check(UpdateTools.ValidArguments(UpdateToolAction.REQUEST, false, null) &&
     !UpdateTools.ValidArguments(UpdateToolAction.REQUEST, true, null) &&
     !UpdateTools.ValidArguments(UpdateToolAction.STATUS, false, new string('a', 40)),
     "update.explicit_accept_confirmation_and_exact_sha");
+Check(UpdateTools.ValidArguments(UpdateToolAction.FORGET_LEGACY,false,new string('a',40)) &&
+    !UpdateTools.ValidArguments(UpdateToolAction.FORGET_LEGACY,false,null) &&
+    !UpdateTools.ValidArguments(UpdateToolAction.FORGET_LEGACY,true,new string('a',40)) &&
+    !UpdateTools.ValidArguments(UpdateToolAction.FORGET_LEGACY,false,new string('z',40)),
+    "update.legacy_forget_requires_exact_commit_without_accept");
 var doctorSnapshot = new DoctorSnapshot(DoctorState.DEGRADED,
     [new DoctorCheck(DoctorComponent.Store, DoctorState.DEGRADED,
         DoctorReason.RECONCILIATION_REQUIRED, DoctorAction.INSPECT_JOBS)],
@@ -1398,6 +1403,104 @@ try
     }
 }
 finally{Directory.Delete(migrationRoot,true);}
+
+
+// L01-L06: previous-generation unknown-effect records are deleted only from
+// isolated fixtures; production jobs and Windows service are not touched by CI.
+string legacyRoot=Path.Combine(Path.GetTempPath(),"WindowsAdminMCP-legacy56-"+Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(legacyRoot);
+try
+{
+    string database=Path.Combine(legacyRoot,"jobs.db");
+    using(var store=new JobCoordinator(Microsoft.Extensions.Logging.Abstractions.NullLogger<JobCoordinator>.Instance))
+    {
+        store.Initialize(database);
+        for(int index=0;index<LegacyUnknownCleanup.ExpectedCount;index++)
+            Check(store.Dispatch(new(AdminOperation.Job,JobAction.submit,
+                Key:"legacy56-"+index,Command:"Write-Output fixture"),"legacy").Status==StatusCode.OK,
+                "legacy56.submit_"+index);
+        Check(store.Dispatch(new(AdminOperation.Job,JobAction.submit,
+            Key:"legacy56-preserved",Command:"Write-Output kept"),"legacy").Status==StatusCode.OK,
+            "legacy56.unrelated_created");
+    }
+    Check(LegacyUnknownCleanup.OnDatabase(database,false,null).Status==LegacyCleanupCode.ACTIVE_JOBS,
+        "legacy56.active_jobs_refused_without_effect");
+    using(var db=new Microsoft.Data.Sqlite.SqliteConnection("Data Source="+database+";Pooling=False"))
+    {
+        db.Open();
+        using var update=db.CreateCommand();
+        update.CommandText="""
+            UPDATE jobs SET state='NEEDS_RECONCILIATION',
+                created_utc=CASE WHEN op_key='legacy56-0' THEN '2026-11-17T23:36:25.6892759+00:00' ELSE '2026-11-21T12:00:00.0000000+00:00' END
+            WHERE op_key LIKE 'legacy56-%' AND op_key<>'legacy56-preserved';
+            UPDATE jobs SET state='COMPLETED' WHERE op_key='legacy56-preserved';
+            """;
+        update.ExecuteNonQuery();
+    }
+    using(var db=new Microsoft.Data.Sqlite.SqliteConnection("Data Source="+database+";Pooling=False"))
+    {
+        db.Open();
+        using var pending=db.CreateCommand();
+        pending.CommandText="UPDATE jobs SET state='WAITING_FOR_RESUME' WHERE op_key='legacy56-preserved'";
+        Check(pending.ExecuteNonQuery()==1,"legacy56.fixture_waiting_guard");
+    }
+    Check(LegacyUnknownCleanup.OnDatabase(database,false,null).Status==
+        LegacyCleanupCode.ACTIVE_JOBS,"legacy56.refuses_other_waiting_jobs");
+    using(var db=new Microsoft.Data.Sqlite.SqliteConnection("Data Source="+database+";Pooling=False"))
+    {
+        db.Open();
+        using var resumed=db.CreateCommand();
+        resumed.CommandText="UPDATE jobs SET state='COMPLETED' WHERE op_key='legacy56-preserved'";
+        Check(resumed.ExecuteNonQuery()==1,"legacy56.fixture_waiting_reset");
+    }
+    var plan=LegacyUnknownCleanup.OnDatabase(database,false,null);
+    Check(plan is {Status:LegacyCleanupCode.READY,LegacyCount:17} &&
+        plan.Fingerprint is {Length:64},"legacy56.exact_plan_without_secret_commands");
+    Check(LegacyUnknownCleanup.OnDatabase(database,true,new string('0',64)).Status==
+        LegacyCleanupCode.PLAN_CHANGED,"legacy56.hash_guard");
+    bool injected=false;
+    try { _=LegacyUnknownCleanup.OnDatabase(database,true,plan.Fingerprint,
+        ()=>throw new InvalidOperationException("fixture before commit")); }
+    catch(InvalidOperationException){injected=true;}
+    Check(injected && LegacyUnknownCleanup.OnDatabase(database,false,null).Fingerprint==plan.Fingerprint,
+        "legacy56.before_commit_rolls_back");
+    using(var db=new Microsoft.Data.Sqlite.SqliteConnection("Data Source="+database+";Pooling=False"))
+    {
+        db.Open();
+        using var edit=db.CreateCommand();
+        edit.CommandText="UPDATE jobs SET state='FAILED' WHERE op_key='legacy56-0'";
+        Check(edit.ExecuteNonQuery()==1,"legacy56.fixture_single_change");
+    }
+    Check(LegacyUnknownCleanup.OnDatabase(database,false,null).Status==
+        LegacyCleanupCode.LEGACY_SET_MISMATCH,"legacy56.rejected_16_records");
+    using(var db=new Microsoft.Data.Sqlite.SqliteConnection("Data Source="+database+";Pooling=False"))
+    {
+        db.Open();
+        using var edit=db.CreateCommand();
+        edit.CommandText="UPDATE jobs SET state='NEEDS_RECONCILIATION' WHERE op_key='legacy56-0'";
+        Check(edit.ExecuteNonQuery()==1,"legacy56.fixture_restored");
+    }
+    var applied=LegacyUnknownCleanup.OnDatabase(database,true,plan.Fingerprint);
+    Check(applied is {Status:LegacyCleanupCode.CLEARED,DeletedCount:17,RemainingCount:0,SchemaVersion:4},
+        "legacy56.atomic_exact_17_cleared");
+    using(var db=new Microsoft.Data.Sqlite.SqliteConnection("Data Source="+database+";Pooling=False"))
+    {
+        db.Open();
+        using var counts=db.CreateCommand();
+        counts.CommandText="SELECT count(*) FROM jobs";
+        Check((long)counts.ExecuteScalar()! == 1,"legacy56.unrelated_job_preserved");
+        counts.CommandText="SELECT count(*) FROM job_steps";
+        Check((long)counts.ExecuteScalar()! == 1,"legacy56.foreign_keys_cascade_exact");
+        counts.CommandText="SELECT count(*) FROM jobs WHERE op_key='legacy56-preserved'";
+        Check((long)counts.ExecuteScalar()! == 1,"legacy56.unrelated_key_preserved");
+    }
+    Check(Directory.GetFiles(legacyRoot,"jobs.db.legacy-unknown-*.backup").Length==0,
+        "legacy56.no_old_backup_left_after_success");
+    Check(LegacyUnknownCleanup.OnDatabase(database,false,null).Status==
+        LegacyCleanupCode.ALREADY_CLEARED,"legacy56.second_plan_no_replay");
+}
+finally{Directory.Delete(legacyRoot,true);}
+
 
 // Isolated real store: keyset pagination is stable, filtered and rejects invalid ranges.
 string pagingRoot=Path.Combine(Path.GetTempPath(),"WindowsAdminMCP-paging-"+Guid.NewGuid().ToString("N"));

@@ -6,7 +6,7 @@ using System.Text.Json.Serialization;
 using ModelContextProtocol.Server;
 
 [JsonConverter(typeof(JsonStringEnumConverter<UpdateToolAction>))]
-public enum UpdateToolAction { REQUEST, STATUS, ACCEPT }
+public enum UpdateToolAction { REQUEST, STATUS, ACCEPT, FORGET_LEGACY }
 
 [JsonConverter(typeof(JsonStringEnumConverter<UpdateToolCode>))]
 public enum UpdateToolCode
@@ -27,7 +27,9 @@ public sealed record UpdateToolResult(
     [property: JsonPropertyName("last_task_result")] int? LastTaskResult = null,
     [property: JsonPropertyName("detail")] string? Detail = null,
     [property: JsonPropertyName("operation_action"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        UpdateToolAction? OperationAction = null);
+        UpdateToolAction? OperationAction = null,
+    [property: JsonPropertyName("deleted_count"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? DeletedCount = null,
+    [property: JsonPropertyName("remaining_count"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? RemainingCount = null);
 
 internal sealed record UpdateTaskWire(
     [property: JsonPropertyName("status")] string Status,
@@ -39,7 +41,9 @@ internal sealed record UpdateTaskWire(
     [property: JsonPropertyName("task_state")] string? TaskState = null,
     [property: JsonPropertyName("task")] string? Task = null,
     [property: JsonPropertyName("last_task_result")] int? LastTaskResult = null,
-    [property: JsonPropertyName("operation_action")] UpdateToolAction? OperationAction = null);
+    [property: JsonPropertyName("operation_action")] UpdateToolAction? OperationAction = null,
+    [property: JsonPropertyName("deleted_count")] int? DeletedCount = null,
+    [property: JsonPropertyName("remaining_count")] int? RemainingCount = null);
 
 [McpServerToolType]
 public sealed class UpdateTools
@@ -70,6 +74,10 @@ public sealed class UpdateTools
             return new(UpdateToolCode.PACKAGE_UNVERIFIED, RollbackPending: pending,
                 Detail: package.Status.ToString());
 
+        if (action == UpdateToolAction.FORGET_LEGACY &&
+            (!string.Equals(expected_commit, package.Commit, StringComparison.Ordinal) || pending))
+            return new(UpdateToolCode.CONFLICT, InstalledCommit: package.Commit,
+                RollbackPending: pending, Detail: "LEGACY_CLEANUP_REQUIRES_ACCEPTED_EXACT_COMMIT");
         if (action == UpdateToolAction.ACCEPT)
         {
             if (!string.Equals(expected_commit, package.Commit, StringComparison.Ordinal))
@@ -79,7 +87,7 @@ public sealed class UpdateTools
                 return new(UpdateToolCode.NO_PENDING_ACCEPTANCE, InstalledCommit: package.Commit,
                     RollbackPending: false);
         }
-        if (action is UpdateToolAction.REQUEST or UpdateToolAction.ACCEPT)
+        if (action is UpdateToolAction.REQUEST or UpdateToolAction.ACCEPT or UpdateToolAction.FORGET_LEGACY)
         {
             var service = await AdminTools.Status(cancellationToken: cancellationToken);
             if (service.Status != StatusCode.OK || service.ExecutionContext != CommandContext.USER ||
@@ -105,6 +113,13 @@ public sealed class UpdateTools
         {
             start.ArgumentList.Add("-OperationId");
             start.ArgumentList.Add(operationId);
+        }
+        if (action == UpdateToolAction.FORGET_LEGACY)
+        {
+            start.ArgumentList.Add("-Operation");
+            start.ArgumentList.Add("forget");
+            start.ArgumentList.Add("-ExpectedCommit");
+            start.ArgumentList.Add(expected_commit!);
         }
         if (action == UpdateToolAction.ACCEPT)
         {
@@ -142,7 +157,8 @@ public sealed class UpdateTools
                     Detail: "OPERATOR_PROTOCOL_ERROR");
             return new(code, wire.OperationId ?? operationId, wire.Stage, package.Commit,
                 wire.Commit, wire.RollbackPending ?? pending, wire.TaskState, wire.LastTaskResult, wire.Reason,
-                wire.OperationAction ?? (action == UpdateToolAction.STATUS ? null : action));
+                wire.OperationAction ?? (action == UpdateToolAction.STATUS ? null : action),
+                wire.DeletedCount, wire.RemainingCount);
         }
         catch (Exception e) when (e is OperationCanceledException or IOException or
                                   Win32Exception or JsonException or InvalidOperationException)
@@ -161,6 +177,9 @@ public sealed class UpdateTools
         {
             UpdateToolAction.REQUEST or UpdateToolAction.STATUS => !confirmed && commit is null,
             UpdateToolAction.ACCEPT => confirmed && commit is not null &&
+                System.Text.RegularExpressions.Regex.IsMatch(commit, "^[a-f0-9]{40}$",
+                    System.Text.RegularExpressions.RegexOptions.CultureInvariant),
+            UpdateToolAction.FORGET_LEGACY => !confirmed && commit is not null &&
                 System.Text.RegularExpressions.Regex.IsMatch(commit, "^[a-f0-9]{40}$",
                     System.Text.RegularExpressions.RegexOptions.CultureInvariant),
             _ => false

@@ -7,6 +7,21 @@ Candidate native MCP 0.8.1-dev; .NET 10 LTS (10.0.15); MCP SDK 2.4.0; official O
 
 One Windows service (SYSTEM) owns the durable SQLite queue, state transitions, encrypted job data and concurrent system execution. One existing interactive elevated tunnel host runs the same native PowerShellRunner for USER jobs in its own Windows logon. The MCP frontend uses the existing authenticated local pipe. The service derives the SID, logon SID and session from Windows rather than accepting arbitrary user IDs. No password/token duplication, separate tunnel, new service, or automatic user impersonation for execution.
 
+### Legacy test-generation cleanup (#56)
+
+The previously approved generation of 17 `NEEDS_RECONCILIATION` jobs can be
+retired **once** through `powershell_update(action=FORGET_LEGACY,
+expected_commit=<installed exact commit>)`. This uses the existing verified
+interactive Scheduler operator: it requires an accepted package, no active jobs
+and exactly the old 17 entries, drains ingress, stops SCM, runs an offline
+fingerprint-checked SQLite transaction, verifies no unrelated data changed and
+restarts. `powershell_update(STATUS)` returns the typed action, deleted count
+and outcome. It never executes, reconciles or replays those old commands.
+Failing preconditions means no deletion; ambiguous outcomes require read-only
+status/doctor before any other action. Do not use `powershell_job(prune)` to
+pretend those unknown jobs were removed. This is intentionally not a general
+purpose job-deletion API. See `docs/ARCHITECTURE.md` and Issue #56.
+
 `powershell_exec` and `powershell_job submit` default to USER for non-SYSTEM clients; explicitly set execution_context=SYSTEM for service operations. USER uses the existing administrator profile, HKCU, environment and user network/application permissions. Unavailable matching runner returns USER_CONTEXT_UNAVAILABLE; never silently switch to SYSTEM. A persisted USER job stays bound to its original logon/sid/session; after logoff a different logon cannot claim/resume it. Old queued USER work can be cancelled; interrupted work needs reconciliation. Reboot checkpoints require explicit SYSTEM. Local admins are trusted administrators, not a security sandbox; physical multi-user fairness and session transitions still require acceptance.
 
 INTERNET owns networking. Tunnel startup intentionally requires the current supported INTERNET deployment: adapter internet-tun Up and exactly one running C:\internet\sing-box.exe. The app reads these prerequisites and does not change routes or start INTERNET. RDP, locked or non-console desktops do not capture the physical desktop; typed failure explains the check. WSL, Docker, browser and mapped drive support depends on the actual caller's profile and privileges; the CLI's presence is not proof that a daemon or distribution is running.
