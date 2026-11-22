@@ -15,7 +15,8 @@ internal static class NativeFileReader
     private const uint ReadAttributes = 0x80, GenericRead = 0x80000000;
     private const uint ShareRead = 1, ShareWrite = 2, ShareDelete = 4;
     private const uint OpenExisting = 3;
-    private const uint OpenReparsePoint = 0x00200000, BackupSemantics = 0x02000000;
+    private const uint OpenReparsePoint = 0x00200000, BackupSemantics = 0x02000000,
+        Overlapped = 0x40000000;
     private const uint ReparseAttribute = 0x400, DirectoryAttribute = 0x10;
     private static readonly BigInteger FingerprintMask = (BigInteger.One << 256) - 1;
     private static readonly StringComparer NameComparer = StringComparer.Ordinal;
@@ -77,7 +78,8 @@ internal static class NativeFileReader
     {
         var handle = CreateFile(full, readData ? GenericRead : ReadAttributes,
             ShareRead | ShareWrite | ShareDelete,
-            IntPtr.Zero, OpenExisting, OpenReparsePoint | BackupSemantics, IntPtr.Zero);
+            IntPtr.Zero, OpenExisting,
+            OpenReparsePoint | BackupSemantics | (readData ? Overlapped : 0), IntPtr.Zero);
         if (handle.IsInvalid)
         {
             int error = Marshal.GetLastPInvokeError();
@@ -108,6 +110,7 @@ internal static class NativeFileReader
     internal static async Task<NativeFileReply> ExecuteAsync(NativeFileRequest request,
         CancellationToken cancellationToken)
     {
+        string currentStage = "RESOLVE";
         NativeFileReply Error(NativeFileCode code, int? native = null, string stage = "RESOLVE") =>
             new(code, request.ExecutionContext, DateTimeOffset.UtcNow, NativeError:native, Stage:stage);
         if (!Valid(request)) return Error(NativeFileCode.INVALID_ARGUMENT, stage: "VALIDATE");
@@ -115,6 +118,7 @@ internal static class NativeFileReader
         {
             cancellationToken.ThrowIfCancellationRequested();
             string full = FullPath(request.Path);
+            currentStage = request.Action.ToString();
             return request.Action switch
             {
                 NativeFileAction.STAT => await Stat(full, request, cancellationToken),
@@ -133,7 +137,8 @@ internal static class NativeFileReader
         catch (JsonException) { return Error(NativeFileCode.INVALID_CURSOR, stage:"VALIDATE"); }
         catch (FormatException) { return Error(NativeFileCode.INVALID_CURSOR, stage:"VALIDATE"); }
         catch (Exception e) when (e is IOException or ArgumentException or NotSupportedException or PathTooLongException)
-        { return Error(e is ArgumentException or PathTooLongException ? NativeFileCode.INVALID_ARGUMENT : NativeFileCode.IO_ERROR); }
+        { return Error(currentStage == "RESOLVE" && e is (ArgumentException or PathTooLongException)
+            ? NativeFileCode.INVALID_ARGUMENT : NativeFileCode.IO_ERROR, stage:currentStage); }
     }
 
     private static NativeFileCode MapNative(int error) => error switch
