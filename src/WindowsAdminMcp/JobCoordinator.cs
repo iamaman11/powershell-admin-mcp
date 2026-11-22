@@ -22,7 +22,8 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
     internal bool AdmissionOpen { get { lock(gate) return connection is not null && !Draining; } }
     private SqliteConnection Db => connection ?? throw new InvalidOperationException("Store unavailable");
     private const string Columns = "job_id,op_key,state,command_hash,created_utc,updated_utc,completed_steps,step_count,reboot_evidence,reconciliation,history_pruned_utc,user_sid,user_session,user_logon_sid,resource_key";
-    internal const int DetailedLimit=10000, RetentionDays=30, PruneBatch=8;
+    internal const int DetailedLimit=10000, RetentionDays=30, TombstoneDays=90, PruneBatch=8;
+    internal const long MetadataLimit=100000, DatabaseBytesLimit=512L*1024*1024, AdmissionHeadroomBytes=1024*1024;
     private static string Now() => DateTimeOffset.UtcNow.ToString("O");
     private static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 
@@ -139,7 +140,8 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
     {
         lock(gate)
         {
-            using var cmd=Command("""
+            var counts = new long[13];
+            using(var cmd=Command("""
                 SELECT count(*),
                   coalesce(sum(state='QUEUED'),0),coalesce(sum(state='RUNNING'),0),
                   coalesce(sum(state='CANCEL_REQUESTED'),0),coalesce(sum(state='WAITING_FOR_RESUME'),0),
@@ -147,12 +149,80 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                   coalesce(sum(state='COMPLETED'),0),coalesce(sum(state='FAILED'),0),coalesce(sum(state='CANCELLED'),0),
                   coalesce(sum(history_pruned_utc IS NULL),0),coalesce(sum(history_pruned_utc IS NOT NULL),0),coalesce(sum(state='RECONCILED'),0)
                 FROM jobs
-                """,tx);
-            using var row=cmd.ExecuteReader();
-            if(!row.Read())throw new InvalidOperationException("Store count unavailable.");
-            return new(row.GetInt64(0),row.GetInt64(1),row.GetInt64(2),row.GetInt64(3),row.GetInt64(4),
-                row.GetInt64(5),row.GetInt64(6),row.GetInt64(7),row.GetInt64(8),row.GetInt64(9),StoreSchema.Current,null,DetailedLimit,row.GetInt64(10),row.GetInt64(11),row.GetInt64(12),RetentionDays,ExecutionBudget.Observe(active.Count));
+                """,tx))
+            using(var row=cmd.ExecuteReader())
+            {
+                if(!row.Read())throw new InvalidOperationException("Store count unavailable.");
+                for(int i=0;i<counts.Length;i++)counts[i]=row.GetInt64(i);
+            }
+            var storage=ReadStorage(tx,counts[0]);
+            return new(counts[0],counts[1],counts[2],counts[3],counts[4],counts[5],
+                counts[6],counts[7],counts[8],counts[9],StoreSchema.Current,null,DetailedLimit,
+                counts[10],counts[11],counts[12],RetentionDays,ExecutionBudget.Observe(active.Count),storage);
         }
+    }
+
+    // Same owned SQLite connection. File size inspection never opens a second
+    // database connection and readback failure does not hide the queue itself.
+    private StoreStorageSummary ReadStorage(SqliteTransaction? tx,long total)
+    {
+        long? tombstoned=null, pages=null, free=null, dbBytes=null, walBytes=null;
+        try
+        {
+            using(var count=Command("""
+                SELECT count(*) FROM jobs j WHERE j.history_pruned_utc IS NOT NULL
+                  AND j.state IN ('COMPLETED','FAILED','CANCELLED','RECONCILED')
+                  AND NOT EXISTS(SELECT 1 FROM job_steps s WHERE s.job_id=j.job_id)
+                """,tx))tombstoned=(long)count.ExecuteScalar()!;
+            using(var page=Command("PRAGMA page_count",tx))pages=(long)page.ExecuteScalar()!;
+            using(var freelist=Command("PRAGMA freelist_count",tx))free=(long)freelist.ExecuteScalar()!;
+            var file=new FileInfo(Db.DataSource);
+            if(!file.Exists)throw new IOException("Store file vanished.");
+            dbBytes=file.Length;
+            var wal=new FileInfo(Db.DataSource+"-wal");
+            walBytes=wal.Exists?wal.Length:0;
+        }
+        catch(Exception ex) when(ex is SqliteException or IOException or UnauthorizedAccessException or
+            InvalidOperationException or System.Security.SecurityException)
+        {
+            return new(null,null,null,null,tombstoned,MetadataLimit,DatabaseBytesLimit,
+                TombstoneDays,StoreStorageState.READBACK_FAILED);
+        }
+        return new(dbBytes,walBytes,pages,free,tombstoned,MetadataLimit,DatabaseBytesLimit,
+            TombstoneDays,ClassifyStorage(total,dbBytes,walBytes));
+    }
+
+    // Hard upper bound on metadata and SQLite bytes. Exhaustion is a typed
+    // admission refusal, never licence to erase unknown operations or keys.
+    internal static StoreStorageState ClassifyStorage(long total,long? dbBytes,long? walBytes,
+        long metadataLimit=MetadataLimit,long bytesLimit=DatabaseBytesLimit)
+    {
+        if(dbBytes is null || walBytes is null || dbBytes<0 || walBytes<0 ||
+            metadataLimit<=0 || bytesLimit<=AdmissionHeadroomBytes)return StoreStorageState.READBACK_FAILED;
+        long safe=bytesLimit-AdmissionHeadroomBytes;
+        if(total>=metadataLimit || dbBytes>=safe || walBytes>=safe-dbBytes)
+            return StoreStorageState.FULL;
+        if(total>=metadataLimit*8/10 || dbBytes>=bytesLimit*8/10 ||
+            walBytes>=bytesLimit*8/10-dbBytes)return StoreStorageState.WARNING;
+        return StoreStorageState.AVAILABLE;
+    }
+
+    // Cheap admission probe: avoids scanning tombstones or page statistics on
+    // every successful command. Full typed metrics remain on status/list.
+    private StoreStorageState AdmissionCapacity(SqliteTransaction tx)
+    {
+        using var count=Command("SELECT count(*) FROM jobs",tx);
+        long total=(long)count.ExecuteScalar()!;
+        try
+        {
+            var db=new FileInfo(Db.DataSource);
+            if(!db.Exists)return StoreStorageState.READBACK_FAILED;
+            var wal=new FileInfo(Db.DataSource+"-wal");
+            return ClassifyStorage(total,db.Length,wal.Exists?wal.Length:0);
+        }
+        catch(Exception ex) when(ex is IOException or UnauthorizedAccessException or
+            System.Security.SecurityException)
+        {return StoreStorageState.READBACK_FAILED;}
     }
 
     private void Signal() { if (wake.CurrentCount == 0) wake.Release(); }
@@ -191,9 +261,9 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
     {
         var dispatchClock=Stopwatch.StartNew();
         long gateMs=0;
-        JobReply Reply(StatusCode code, JobInfo? job = null, JobInfo[]? jobs = null, long? nextBeforeSeq = null,StoreSummary? store=null,int? prunedCount=null)
+        JobReply Reply(StatusCode code, JobInfo? job = null, JobInfo[]? jobs = null, long? nextBeforeSeq = null,StoreSummary? store=null,int? prunedCount=null,int? tombstonedCount=null)
             => new(code, correlation, job, jobs, request.Key, NextBeforeSeq:nextBeforeSeq,Store:store,PrunedCount:prunedCount,
-                Timing:new(StoreWaitMs:gateMs,StoreMs:Math.Max(0,dispatchClock.ElapsedMilliseconds-gateMs)));
+                Timing:new(StoreWaitMs:gateMs,StoreMs:Math.Max(0,dispatchClock.ElapsedMilliseconds-gateMs)),TombstonedCount:tombstonedCount);
         if (request.Action is not {} action || !Enum.IsDefined(action) ||
             request.Key is {Length:0 or >100} || request.JobId is {Length:0 or >64} ||
             (request.StepIndex is not null && action != JobAction.logs) ||
@@ -250,6 +320,11 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 }
                 if(owner is null && !Directory.Exists(cwd))return Reply(StatusCode.INVALID_ARGUMENT);
                 if(owner is not null && !UserAvailable(owner))return Reply(StatusCode.USER_CONTEXT_UNAVAILABLE);
+                var capacity=AdmissionCapacity(tx);
+                if(capacity==StoreStorageState.READBACK_FAILED)
+                    return Reply(StatusCode.STORE_UNAVAILABLE,store:Summary(tx));
+                if(capacity==StoreStorageState.FULL)
+                    return Reply(StatusCode.STORE_FULL,store:Summary(tx));
                 if(CountDetails(tx)>=DetailedLimit)
                 {
                     PruneExpired(tx,RetentionDays);
@@ -314,9 +389,10 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 if(request.Key is not null || request.JobId is not null)return Reply(StatusCode.INVALID_ARGUMENT);
                 using var compact=Db.BeginTransaction();
                 int pruned=PruneExpired(compact,request.RetainDays??RetentionDays);
+                int tombstoned=TombstoneExpired(compact,TombstoneDays);
                 var usage=Summary(compact);
                 compact.Commit();
-                return Reply(StatusCode.OK,store:usage,prunedCount:pruned);
+                return Reply(StatusCode.OK,store:usage,prunedCount:pruned,tombstonedCount:tombstoned);
             }
             if ((request.Key is null) == (request.JobId is null)) return Reply(StatusCode.INVALID_ARGUMENT);
             using var change = Db.BeginTransaction();
@@ -344,7 +420,15 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
                 bool unresolved=job.State==JobState.NEEDS_RECONCILIATION && index==job.CompletedSteps+1;
                 using var cmd = Command("SELECT result,command FROM job_steps WHERE job_id=$id AND step_index=$step",change,("$id",job.JobId),("$step",index));
                 using var row=cmd.ExecuteReader();
-                if(!row.Read())throw new InvalidOperationException("Missing job step.");
+                if(!row.Read())
+                {
+                    // A terminal job older than the cold-history horizon keeps
+                    // its durable idempotency key but has no step payload.
+                    if(job.HistoryPrunedUtc is not null && job.State is
+                        (JobState.COMPLETED or JobState.FAILED or JobState.CANCELLED or JobState.RECONCILED))
+                        return Reply(StatusCode.HISTORY_PRUNED,job with {ResultStep=index});
+                    throw new InvalidOperationException("Missing job step.");
+                }
                 var execution = row.IsDBNull(0)?null:(JsonSerializer.Deserialize<ExecutionResult>(
                     JobDataProtection.Open((byte[])row.GetValue(0),job.JobId,Field(index,"result")),PipeWire.Json)
                     ??throw new InvalidOperationException("Missing execution result."));
@@ -498,14 +582,49 @@ internal sealed class JobCoordinator(ILogger<JobCoordinator> logger) : IDisposab
         return ids.Count;
     }
 
-    private void MaintainHistory()
+    // Cold terminal rows lose encrypted step payload and cwd, but job_id,
+    // op_key, payload hash, final state and reconciliation proof remain.
+    // This is not deletion of idempotency keys.
+    private int TombstoneExpired(SqliteTransaction tx,int retainDays)
+    {
+        string cutoff=DateTimeOffset.UtcNow.AddDays(-retainDays).ToString("O");
+        var ids=new List<string>();
+        using(var candidates=Command("""
+            SELECT job_id FROM jobs j WHERE history_pruned_utc IS NOT NULL
+              AND state IN ('COMPLETED','FAILED','CANCELLED','RECONCILED')
+              AND updated_utc<$cutoff
+              AND EXISTS(SELECT 1 FROM job_steps s WHERE s.job_id=j.job_id)
+            ORDER BY updated_utc,seq LIMIT $limit
+            """,tx,("$cutoff",cutoff),("$limit",PruneBatch)))
+        using(var rows=candidates.ExecuteReader())
+            while(rows.Read())ids.Add(rows.GetString(0));
+        foreach(var id in ids)
+        {
+            using(var clear=Command("DELETE FROM job_steps WHERE job_id=$id",tx,("$id",id)))
+                if(clear.ExecuteNonQuery()<1)throw new InvalidOperationException("Cold job step vanished.");
+            using var compact=Command("""
+                UPDATE jobs SET cwd=X'' WHERE job_id=$id AND history_pruned_utc IS NOT NULL
+                  AND state IN ('COMPLETED','FAILED','CANCELLED','RECONCILED')
+                """,tx,("$id",id));
+            if(compact.ExecuteNonQuery()!=1)throw new InvalidOperationException("Cold job changed.");
+        }
+        return ids.Count;
+    }
+
+    // Optional injection exists only for isolated RunnerTests; production
+    // calls without it. The SQLite transaction owns both compaction stages.
+    internal (int Compacted,int Tombstoned) MaintainHistory(Action? beforeCommit=null)
     {
         lock(gate)
         {
             using var tx=Db.BeginTransaction();
             int count=PruneExpired(tx,RetentionDays);
+            int cold=TombstoneExpired(tx,TombstoneDays);
+            beforeCommit?.Invoke();
             tx.Commit();
-            if(count>0)logger.LogInformation("Compacted {Count} eligible job histories.",count);
+            if(count>0||cold>0)logger.LogInformation(
+                "History: compacted {Compacted}, cold tombstones {Tombstoned}.",count,cold);
+            return (count,cold);
         }
     }
 
