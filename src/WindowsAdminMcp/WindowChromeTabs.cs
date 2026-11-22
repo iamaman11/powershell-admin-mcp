@@ -76,7 +76,21 @@ internal static partial class WindowChromeCdp
     // state. A live authorized socket proves consent; an outstanding handshake
     // means only that consent has NOT YET been confirmed (not that it was denied).
     // Run one handshake independently of the short-lived MCP request deadline.
-    private static ChromeConnectionState ConnectionState(Uri endpoint, bool request, bool retry = false)
+    // Chrome displays the per-connection dialog in its last-active window.
+    // Select the verified native window immediately before the handshake;
+    // once authorized, all tab operations remain background-only.
+    private static bool PrepareConsentWindow(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero || !IsWindowVisible(hwnd)) return false;
+        if (IsIconic(hwnd)) _ = ShowWindow(hwnd, 9); // SW_RESTORE
+        if (GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd)) return false;
+        if (!SpinWait.SpinUntil(() => GetForegroundWindow() == hwnd, 500)) return false;
+        Thread.Sleep(150); // Let Chrome record its newly active window.
+        return GetForegroundWindow() == hwnd;
+    }
+
+    private static ChromeConnectionState ConnectionState(Uri endpoint, bool request,
+        IntPtr consentWindow, bool retry = false)
     {
         if (TabConnected && _tabEndpoint == endpoint) return ChromeConnectionState.CONNECTED;
         if (_pendingConnect is not null && _pendingEndpoint == endpoint)
@@ -102,6 +116,7 @@ internal static partial class WindowChromeCdp
             if (!retry) return failure;
         }
         if (!request) return ChromeConnectionState.NOT_REQUESTED;
+        if (!PrepareConsentWindow(consentWindow)) return ChromeConnectionState.CONSENT_WINDOW_UNAVAILABLE;
         CloseTabConnection();
         _pendingSocket = new ClientWebSocket();
         _pendingEndpoint = endpoint;
@@ -128,8 +143,10 @@ internal static partial class WindowChromeCdp
         if (!TryEndpoint(out var endpoint, out string failure))
             return new(ChromeConnectionCode.OK, ChromeConnectionState.DEBUGGING_UNAVAILABLE,
                 ChromeConnectionNextAction.ENABLE_CHROME_DEBUGGING, profile, Detail: failure);
+        if (WindowCatalog.ResolveId(request.WindowId, self.SessionId, out var hwnd) != WindowResolveCode.OK)
+            return new(ChromeConnectionCode.STALE_WINDOW, ChromeConnectionState.NOT_REQUESTED);
         var state = ConnectionState(endpoint!, request.Action == ChromeConnectionAction.REQUEST,
-            retry: request.Action == ChromeConnectionAction.REQUEST);
+            hwnd, retry: request.Action == ChromeConnectionAction.REQUEST);
         var next = state switch
         {
             ChromeConnectionState.CONSENT_PENDING => ChromeConnectionNextAction.ALLOW_CHROME_PROMPT,
@@ -405,7 +422,7 @@ internal static partial class WindowChromeCdp
                 return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: "NOT_CHROME");
             if (expectedProfile is not null && !VerifiedChromeProfile(hwnd, expectedProfile))
                 return new(WindowInspectCode.CDP_CONTEXT_MISMATCH, [], Detail: "PROFILE_NOT_VERIFIED");
-            var connection = ConnectionState(endpoint!, request: true);
+            var connection = ConnectionState(endpoint!, request: true, hwnd);
             if (connection == ChromeConnectionState.CONSENT_PENDING)
                 return new(WindowInspectCode.CDP_CONSENT_PENDING, [], Detail: "ALLOW_CHROME_PROMPT");
             if (connection != ChromeConnectionState.CONNECTED)
@@ -643,7 +660,7 @@ internal static partial class WindowChromeCdp
         if (!TryEndpoint(out var endpoint, out string endpointFailure))
             return new(WindowActionCode.CDP_UNAVAILABLE, FailureStage: WindowFailureStage.CDP_CONNECT,
                 Detail: endpointFailure);
-        var connection = ConnectionState(endpoint!, request: true);
+        var connection = ConnectionState(endpoint!, request: true, hwnd);
         if (connection == ChromeConnectionState.CONSENT_PENDING)
             return new(WindowActionCode.CDP_CONSENT_PENDING,
                 FailureStage: WindowFailureStage.CDP_CONNECT, Detail: "ALLOW_CHROME_PROMPT");
@@ -821,4 +838,17 @@ internal static partial class WindowChromeCdp
             TargetVerified: status == WindowActionCode.EXPECTED_STATE_ALREADY_TRUE,
             FailureStage: WindowFailureStage.CDP_TARGET, ElapsedMs: clock.ElapsedMilliseconds);
     }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsIconic(IntPtr hwnd);
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindow(IntPtr hwnd, int command);
 }

@@ -264,6 +264,9 @@ Check(new ChromeBrokerRequest(Connection: connectRequest).Valid &&
     System.Text.Json.JsonSerializer.Deserialize<ChromeConnectionResult>(
         System.Text.Json.JsonSerializer.Serialize(connectReply, PipeWire.Json), PipeWire.Json)?.State ==
         ChromeConnectionState.CONSENT_PENDING &&
+    System.Text.Json.JsonSerializer.Deserialize<ChromeConnectionState>(
+        "\"CONSENT_WINDOW_UNAVAILABLE\"", PipeWire.Json) ==
+        ChromeConnectionState.CONSENT_WINDOW_UNAVAILABLE &&
     connectReply.NextAction == ChromeConnectionNextAction.ALLOW_CHROME_PROMPT,
     "chrome.connection_consent_pending_is_typed_and_not_a_grant");
 Check(WindowAction.WindowTitleMatches("Example Domain — Camoufox", "Example Domain") &&
