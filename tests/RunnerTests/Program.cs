@@ -30,6 +30,9 @@ if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("GITHUB_A
         string empty = Path.Combine(root, "empty.bin");
         File.WriteAllBytes(empty, []);
         var emptyStat = await FileCall(FileRequest(NativeFileAction.STAT, empty, hash:true));
+        Console.WriteLine($"files.empty_stat_native status={emptyStat.Status} stage={emptyStat.Stage} " +
+            $"native_error={emptyStat.NativeError} kind={emptyStat.Info?.Kind} " +
+            $"size={emptyStat.Info?.Size} hash={emptyStat.Info?.Sha256}");
         Check(emptyStat is { Status: NativeFileCode.COMPLETED,
             Info: { Kind: NativeFileKind.FILE, Size: 0, Sha256: not null } } &&
             emptyStat.Info.Sha256 == Convert.ToHexString(System.Security.Cryptography.SHA256.HashData([])),

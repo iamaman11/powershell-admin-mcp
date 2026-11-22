@@ -55,6 +55,8 @@ public sealed class FileTools
             !new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
             return new(NativeFileCode.USER_CONTEXT_UNAVAILABLE, CommandContext.USER,
                 DateTimeOffset.UtcNow, Stage:"VALIDATE");
-        return await NativeFileReader.ExecuteAsync(request, ct);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(30));
+        return await NativeFileReader.ExecuteAsync(request, deadline.Token);
     }
 }
