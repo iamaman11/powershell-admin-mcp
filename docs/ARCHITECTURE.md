@@ -27,8 +27,14 @@ frontend, not a separate permanent browser manager. No extra HTTP API.
 1. Service-bound PowerShell jobs are durable by operation key. A timeout after
    dispatch can be `NEEDS_RECONCILIATION`; never resubmit automatically.
 2. UIA and CDP actions require fresh native window identity, session, target
-   and (for Chrome) profile/context/origin validation. A successful dispatch
-   does not prove the postcondition.
+   and (for Chrome) profile/origin validation. CDP `TargetInfo.browserContextId`
+   is optional: a missing field is preserved as an explicit null context,
+   never treated as proof that the page belongs to a different profile. A
+   browser target still needs a unique native HWND title/bounds to
+   `Browser.windowId` mapping; zero matches yield `CDP_TARGET_NOT_FOUND`,
+   multiple mappings `CDP_TARGET_AMBIGUOUS`. Neither condition dispatches a
+   UI effect, invents a foreground/profile match, or revokes native Chrome
+   consent. A successful dispatch does not prove the postcondition.
 3. `EFFECT_UNKNOWN` is not retryable. A read-only probe or a command demonstrably
    rejected **before dispatch** can be retried within a bounded budget.
 4. An update is an exact CI artifact tied to a commit. Trial installation keeps

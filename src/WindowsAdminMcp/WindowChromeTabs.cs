@@ -14,8 +14,7 @@ using System.Windows.Automation;
 // bounded CDP adapter, not a second browser manager or arbitrary script tool.
 internal static partial class WindowChromeCdp
 {
-    private sealed record TabTarget(string Id, string Title, string Url, int BrowserWindowId,
-        string BrowserContextId);
+    private sealed record TabTarget(string Id, string Title, string Url, int BrowserWindowId);
     private sealed record TabElementRef(long Stamp, string TargetId, int BackendId, string LoaderId,
         string Digest);
 
@@ -428,13 +427,45 @@ internal static partial class WindowChromeCdp
         return chrome.Width > 0 && chrome.Height > 0 && (At(1) || dpi is >= 1 and <= 4 && At(dpi));
     }
 
-    // A browser process hosts many Chrome profiles. Only a uniquely identified
-    // native window can establish the CDP browserContextId for a request.
-    internal static (int WindowId, string ContextId)? UniqueWindowContext(
-        IEnumerable<(int WindowId, string ContextId)> candidates)
+    internal enum CdpWindowMappingState { NOT_FOUND, AMBIGUOUS }
+
+    private sealed class CdpWindowMappingException(CdpWindowMappingState state)
+        : InvalidOperationException(state == CdpWindowMappingState.NOT_FOUND
+            ? "CDP_WINDOW_NO_MATCH" : "CDP_WINDOW_NOT_UNIQUE")
     {
-        var unique = candidates.Where(c => c.WindowId > 0 && !string.IsNullOrWhiteSpace(c.ContextId))
+        internal CdpWindowMappingState State { get; } = state;
+    }
+
+    internal static WindowInspectCode InspectMappingCode(CdpWindowMappingState state) =>
+        state == CdpWindowMappingState.NOT_FOUND ? WindowInspectCode.CDP_TARGET_NOT_FOUND :
+        WindowInspectCode.CDP_TARGET_AMBIGUOUS;
+
+    internal static bool TryTargetContextId(JsonElement target, out string? contextId)
+    {
+        contextId = null;
+        if (!target.TryGetProperty("browserContextId", out var value)) return true;
+        if (value.ValueKind != JsonValueKind.String) return false;
+        contextId = value.GetString();
+        return contextId is { Length: >= 1 and <= 512 } &&
+            !string.IsNullOrWhiteSpace(contextId);
+    }
+
+    // The CDP TargetInfo.browserContextId is optional for ordinary profile tabs.
+    // Preserve its absence as null, never silently conflate it with a nonempty
+    // context and never infer a native HWND from a shared Chrome process/URL.
+    // Matching title + native/CDP bounds must still select exactly one pair.
+    internal static (int WindowId, string? ContextId)? UniqueWindowContext(
+        IEnumerable<(int WindowId, string? ContextId)> candidates) =>
+        UniqueWindowContext(candidates, out _);
+
+    internal static (int WindowId, string? ContextId)? UniqueWindowContext(
+        IEnumerable<(int WindowId, string? ContextId)> candidates, out int distinctCount)
+    {
+        var unique = candidates.Where(c => c.WindowId > 0 &&
+                (c.ContextId is null || c.ContextId is { Length: >= 1 and <= 512 } &&
+                    !string.IsNullOrWhiteSpace(c.ContextId)))
             .Distinct().Take(2).ToArray();
+        distinctCount = unique.Length;
         return unique.Length == 1 ? unique[0] : null;
     }
 
@@ -446,16 +477,13 @@ internal static partial class WindowChromeCdp
         uint reportedDpi = GetDpiForWindow(hwnd);
         double dpi = reportedDpi == 0 ? 1 : reportedDpi / 96.0;
         var targets = await cdp.Call("Target.getTargets", new { });
-        var pages = new List<(string Id, string Title, string Url, string ContextId)>();
+        var pages = new List<(string Id, string Title, string Url, string? ContextId)>();
         foreach (var info in targets.GetProperty("targetInfos").EnumerateArray())
         {
             if (info.GetProperty("type").GetString() != "page" ||
-                !info.TryGetProperty("browserContextId", out var context) ||
-                context.ValueKind != JsonValueKind.String ||
                 !info.TryGetProperty("url", out var address) ||
                 address.ValueKind != JsonValueKind.String) continue;
-            string? contextId = context.GetString();
-            if (contextId is not { Length: >= 1 and <= 512 }) continue;
+            if (!TryTargetContextId(info, out string? contextId)) continue;
             string id = info.GetProperty("targetId").GetString() ?? "";
             if (!ValidTargetId(id)) continue;
             pages.Add((id, info.GetProperty("title").GetString() ?? "",
@@ -473,7 +501,7 @@ internal static partial class WindowChromeCdp
             return windowId;
         }
 
-        var titleMatches = new List<(int WindowId, string ContextId)>();
+        var titleMatches = new List<(int WindowId, string? ContextId)>();
         foreach (var page in pages.Where(p => nativeTitle.StartsWith(p.Title + " - Google Chrome",
                      StringComparison.Ordinal)))
         {
@@ -494,16 +522,17 @@ internal static partial class WindowChromeCdp
 
         // Title + bounds + Chrome context must agree. Do not guess from focus,
         // URL alone, or an overlapping window belonging to another profile.
-        var selected = UniqueWindowContext(titleMatches);
+        var selected = UniqueWindowContext(titleMatches, out int distinctCount);
         if (selected is null)
-            throw new InvalidOperationException("CDP_WINDOW_NOT_UNIQUE");
+            throw new CdpWindowMappingException(distinctCount == 0 ?
+                CdpWindowMappingState.NOT_FOUND : CdpWindowMappingState.AMBIGUOUS);
 
         var found = new List<TabTarget>();
         foreach (var page in pages.Where(p => p.ContextId == selected.Value.ContextId &&
                      TryHttpUri(p.Url, out _)))
         {
             if (await WindowId(page.Id) == selected.Value.WindowId)
-                found.Add(new(page.Id, page.Title, page.Url, selected.Value.WindowId, page.ContextId));
+                found.Add(new(page.Id, page.Title, page.Url, selected.Value.WindowId));
         }
         return found;
     }
@@ -538,6 +567,12 @@ internal static partial class WindowChromeCdp
                         offset, nameFilter, roleFilter, expectedProfile, expectedOrigin, expectedUrl)
                         .GetAwaiter().GetResult();
                 }
+                catch (CdpWindowMappingException e)
+                {
+                    // No target operation was dispatched. This is a mapping
+                    // failure, not CDP transport loss: keep native consent.
+                    return new(InspectMappingCode(e.State), [], Detail:e.Message);
+                }
                 catch (Exception e) when (e is WebSocketException or IOException or JsonException or
                     OperationCanceledException or InvalidOperationException or KeyNotFoundException)
                 {
@@ -550,11 +585,6 @@ internal static partial class WindowChromeCdp
                 }
             }
             return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: "CDP_RECONNECT_FAILED");
-        }
-        catch (InvalidOperationException e) when (e.Message == "CDP_WINDOW_NOT_UNIQUE")
-        {
-            // Ambiguous target mapping does not invalidate user consent.
-            return new(WindowInspectCode.CDP_TARGET_AMBIGUOUS, [], Detail: e.Message);
         }
         catch (Exception e) when (e is WebSocketException or IOException or JsonException or
             OperationCanceledException or InvalidOperationException or KeyNotFoundException or
@@ -1018,7 +1048,7 @@ internal static partial class WindowChromeCdp
                 ExpectedEnabledObserved: enabledObserved, ElapsedMs: clock.ElapsedMilliseconds,
                 ExecutionMethod: WindowExecutionMethod.CHROME_CDP);
         }
-        catch (InvalidOperationException e) when (!dispatched && e.Message == "CDP_WINDOW_NOT_UNIQUE")
+        catch (CdpWindowMappingException) when (!dispatched)
         {
             // Preserve the authorized socket when only the window lookup failed.
             return Rejected(WindowActionCode.CDP_TARGET_AMBIGUOUS);

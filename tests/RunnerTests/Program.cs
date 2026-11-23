@@ -808,17 +808,46 @@ using (var states = System.Text.Json.JsonDocument.Parse("""
             WindowActionKind.EXPAND) is null,
         "chrome.cdp_semantic_actions_observe_actual_ax_state");
 }
-var matchingCdpWindow = WindowChromeCdp.UniqueWindowContext(new (int WindowId, string ContextId)[]
+using (var contexts = System.Text.Json.JsonDocument.Parse("""
+    {"normal":{"targetId":"A"},"explicit":{"browserContextId":"profile5"},
+     "empty":{"browserContextId":""},"wrongType":{"browserContextId":42}}
+    """))
+{
+    var root = contexts.RootElement;
+    Check(WindowChromeCdp.TryTargetContextId(root.GetProperty("normal"), out var ordinaryContext) &&
+        ordinaryContext is null &&
+        WindowChromeCdp.TryTargetContextId(root.GetProperty("explicit"), out var namedContext) &&
+        namedContext == "profile5" &&
+        !WindowChromeCdp.TryTargetContextId(root.GetProperty("empty"), out _) &&
+        !WindowChromeCdp.TryTargetContextId(root.GetProperty("wrongType"), out _),
+        "chrome.cdp_targetinfo_optional_browser_context_with_strict_value_checks");
+}
+var matchingCdpWindow = WindowChromeCdp.UniqueWindowContext(new (int WindowId, string? ContextId)[]
     { (12, "profile5"), (12, "profile5") });
+var normalCdpWindow = WindowChromeCdp.UniqueWindowContext(new (int WindowId, string? ContextId)[]
+    { (12, null), (12, null) }, out int normalCount);
+var missingCdpWindow = WindowChromeCdp.UniqueWindowContext(
+    Array.Empty<(int WindowId, string? ContextId)>(), out int missingCount);
+var ambiguousCdpWindow = WindowChromeCdp.UniqueWindowContext(new (int WindowId, string? ContextId)[]
+    { (12, null), (13, null) }, out int ambiguousCount);
 Check(matchingCdpWindow.HasValue && matchingCdpWindow.Value.WindowId == 12 &&
     matchingCdpWindow.Value.ContextId == "profile5" &&
-    WindowChromeCdp.UniqueWindowContext(new (int WindowId, string ContextId)[]
+    normalCdpWindow is { WindowId: 12, ContextId: null } && normalCount == 1 &&
+    missingCdpWindow is null && missingCount == 0 &&
+    ambiguousCdpWindow is null && ambiguousCount == 2 &&
+    WindowChromeCdp.InspectMappingCode(WindowChromeCdp.CdpWindowMappingState.NOT_FOUND) ==
+        WindowInspectCode.CDP_TARGET_NOT_FOUND &&
+    WindowChromeCdp.InspectMappingCode(WindowChromeCdp.CdpWindowMappingState.AMBIGUOUS) ==
+        WindowInspectCode.CDP_TARGET_AMBIGUOUS &&
+    WindowChromeCdp.UniqueWindowContext(new (int WindowId, string? ContextId)[]
     { (12, "profile5"), (12, "profile9") }) is null &&
-    WindowChromeCdp.UniqueWindowContext(new (int WindowId, string ContextId)[]
+    WindowChromeCdp.UniqueWindowContext(new (int WindowId, string? ContextId)[]
     { (12, "profile5"), (13, "profile5") }) is null &&
-    WindowChromeCdp.UniqueWindowContext(new (int WindowId, string ContextId)[]
+    WindowChromeCdp.UniqueWindowContext(new (int WindowId, string? ContextId)[]
+    { (12, null), (12, "profile5") }) is null &&
+    WindowChromeCdp.UniqueWindowContext(new (int WindowId, string? ContextId)[]
     { (12, "") }) is null,
-    "chrome.cdp_context_requires_one_verified_window_and_profile");
+    "chrome.cdp_context_optional_but_window_and_profile_mapping_remain_unique");
 Check(WindowPhysicalClick.CanUseNativeFallback(null) &&
     WindowPhysicalClick.CanUseNativeFallback(new(WindowActionCode.CDP_UNAVAILABLE,
         FailureStage: WindowFailureStage.CDP_CONNECT)) &&
