@@ -66,6 +66,11 @@ internal static class WindowChromeBroker
                 : request.Connection is not null && reply.Connection is not null &&
                     reply.Inspect is null && reply.Action is null);
 
+    internal static int ExchangeTimeoutMs(ChromeBrokerRequest request, bool firstExchange) =>
+        request.Connection is not null ? 10000 : firstExchange
+            ? 30000 + (request.Action?.ObservationTimeoutMs ?? 0)
+            : request.Action is { } action ? action.ObservationTimeoutMs + 10000 : 16000;
+
     internal static async Task<ChromeConnectionResult> ConnectionAsync(ChromeConnectionRequest request,
         CancellationToken cancellationToken)
     {
@@ -165,9 +170,11 @@ internal static class WindowChromeBroker
             }
             if (_worker is null) return null;
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            int timeout = request.Connection is not null ? 10000 : _firstExchange
-                ? 30000 + (request.Action?.ObservationTimeoutMs ?? 0)
-                : request.Action is { } action ? action.ObservationTimeoutMs + 6000 : 8000;
+            // Inner warm tab-inspect can take 7.5s and background actions
+            // observation_timeout+5.5s. Leave serialization/worker headroom:
+            // killing the owner first would discard the consented socket and
+            // turn a known pre-dispatch timeout into an unknown-effect result.
+            int timeout = ExchangeTimeoutMs(request, _firstExchange);
             deadline.CancelAfter(timeout);
             try
             {
