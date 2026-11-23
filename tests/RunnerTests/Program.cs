@@ -450,6 +450,20 @@ if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("GITHUB_A
                 (await Execute(owner,copy)).Status==FileManageCode.COMPLETED &&
                 (await Execute(owner,copy with {Destination=source})).Status==FileManageCode.INVALID_ARGUMENT,
                 "filemanage.copy_atomic_cas_and_no_duplicate_effect");
+            using(var opened=new FileStream(source,FileMode.Open,FileAccess.Read,FileShare.Read))
+                Check(NativeFileReader.VersionOf(opened.SafeFileHandle)==stat.Info.Version,
+                    "filemanage.copy_uses_same_native_identity_as_stat");
+            string changedSource=Path.Combine(root,"changed-source.bin");
+            File.WriteAllBytes(changedSource,bytes);
+            var beforeChange=await NativeFileReader.ExecuteAsync(new(NativeFileAction.STAT,changedSource,
+                CommandContext.USER,IncludeSha256:true),CancellationToken.None);
+            File.AppendAllText(changedSource,"changed");
+            var changedCopy=Request(FileManageAction.COPY,changedSource,
+                Path.Combine(root,"changed-copy.bin"),version:beforeChange.Info!.Version,
+                hash:beforeChange.Info.Sha256);
+            Check((await Execute(owner,changedCopy)).Status==FileManageCode.SOURCE_CHANGED &&
+                !File.Exists(changedCopy.Destination),
+                "filemanage.copy_cas_rejects_changed_source_without_target");
             var stale=Request(FileManageAction.DELETE,source,version:"stale",hash:stat.Info.Sha256);
             Check((await Execute(owner,stale)).Status==FileManageCode.SOURCE_CHANGED &&
                 File.Exists(source),"filemanage.stale_version_prevents_delete");
@@ -503,6 +517,28 @@ if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("GITHUB_A
             "filemanage.sqlite_no_cleartext_paths_after_close");
     }
     finally{Directory.Delete(root,true);}
+}
+// A mid-read cancellation must stop before another chunk is written. This
+// deterministic fault is safer and faster than a timing-dependent huge file.
+{
+    byte[] data=System.Text.Encoding.UTF8.GetBytes("native binary \0 copy 🌍");
+    using(var input=new MemoryStream(data,false))
+    using(var output=new MemoryStream())
+    {
+        string? actual=NativeFileManager.CopyFileChecked(input,output,CancellationToken.None,hash:true);
+        Check(actual==Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data)) &&
+            output.ToArray().SequenceEqual(data),"filemanage.copy_chunk_hash_matches_actual_bytes");
+    }
+    using(var cancellation=new CancellationTokenSource())
+    using(var input=new CancelOnFirstReadStream(data,cancellation))
+    using(var output=new MemoryStream())
+    {
+        bool cancelled=false;
+        try{NativeFileManager.CopyFileChecked(input,output,cancellation.Token,hash:false);}
+        catch(OperationCanceledException){cancelled=true;}
+        Check(cancelled && output.Length==0,
+            "filemanage.copy_cancellation_before_first_staged_chunk");
+    }
 }
 Check(File.Exists(PowerShellRunner.Executable), "r2.machine_wide_pwsh");
 using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent())
@@ -2766,3 +2802,15 @@ await UserWorker.ExecuteAsync(expiredClaim,Environment.TickCount64-10000,LateHea
     CancellationToken.None,TimeSpan.FromMilliseconds(10)).WaitAsync(TimeSpan.FromSeconds(10));
 Check(lateHeartbeat==1 && lateResult is {Status:ExecutionState.CANCELLED_UNKNOWN_EFFECT,Stage:"USER_WATCHDOG_EXPIRED"},
     "h1.late_heartbeat_cannot_revive_expired_authority");
+
+internal sealed class CancelOnFirstReadStream(byte[] bytes,CancellationTokenSource cancellation)
+    :MemoryStream(bytes,false)
+{
+    private bool first=true;
+    public override int Read(byte[] buffer,int offset,int count)
+    {
+        int received=base.Read(buffer,offset,count);
+        if(first){first=false;cancellation.Cancel();}
+        return received;
+    }
+}
