@@ -2,6 +2,24 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 
+if (args is ["--chrome-pipe-probe", var probedWindow])
+{
+    var request = new ChromeBrokerRequest(Connection: new(probedWindow,
+        "CI_NO_CHROME", ChromeConnectionAction.STATUS),
+        TraceId: Guid.NewGuid().ToString("N"));
+    var result = await ChromeBrokerPipe.ExchangeAsync(request, CancellationToken.None);
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        owner_pid = result?.OwnerPid,
+        state = result?.Connection?.State.ToString(),
+        trace_verified = result?.TraceId == request.TraceId
+    }, PipeWire.Json));
+    Environment.ExitCode = result?.OwnerPid is > 0 &&
+        result.Connection?.State == ChromeConnectionState.NOT_REQUESTED &&
+        result.TraceId == request.TraceId ? 0 : 1;
+    return;
+}
+
 static void Check(bool ok, string label)
 {
     if (!ok) throw new InvalidOperationException("FAIL " + label);
@@ -1012,6 +1030,32 @@ using (var brokerStop = new CancellationTokenSource())
         reply.Connection?.State == ChromeConnectionState.NOT_REQUESTED &&
         reply.TraceId is { Length: 32 }),
         "chrome.ten_independent_pipe_requests_share_one_owner_without_consent");
+    var processProbes = await Task.WhenAll(Enumerable.Range(0, 10).Select(async _ =>
+    {
+        string executable = Environment.ProcessPath!;
+        var start = new ProcessStartInfo(executable)
+        {
+            UseShellExecute = false, RedirectStandardOutput = true,
+            CreateNoWindow = true
+        };
+        if (Path.GetFileNameWithoutExtension(executable).Equals("dotnet",
+            StringComparison.OrdinalIgnoreCase))
+            start.ArgumentList.Add(System.Reflection.Assembly.GetExecutingAssembly().Location);
+        start.ArgumentList.Add("--chrome-pipe-probe");
+        start.ArgumentList.Add(testWindowId);
+        using var child = Process.Start(start);
+        if (child is null) return false;
+        Task<string> response = child.StandardOutput.ReadToEndAsync();
+        await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        if (child.ExitCode != 0) return false;
+        using var parsed = System.Text.Json.JsonDocument.Parse(await response);
+        var root = parsed.RootElement;
+        return root.GetProperty("owner_pid").GetInt32() == Environment.ProcessId &&
+            root.GetProperty("state").GetString() == "NOT_REQUESTED" &&
+            root.GetProperty("trace_verified").GetBoolean();
+    }));
+    Check(processProbes.All(ok => ok),
+        "chrome.ten_distinct_frontend_processes_share_one_session_owner");
     await brokerStop.CancelAsync();
     await owner;
     Check(!ChromeBrokerPipe.IsOwner, "chrome.user_owner_shutdown_closes_pipe");
@@ -1227,7 +1271,8 @@ using (var model = System.Text.Json.JsonDocument.Parse("{\"quad\":[10,20,30,20,3
 }
 var providerFailed = new WindowActionResult(WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT,
     EffectUnknown: true, FailureStage: WindowFailureStage.DISPATCH_UIA,
-    HResult: "80040200", ExceptionType: "COMException", ProviderResponse: "FAIL");
+    HResult: "80040200", ExceptionType: "COMException", ProviderResponse: "FAIL",
+    ExecutionMethod: WindowExecutionMethod.UIA_PATTERN);
 var reconciled = WindowAction.ReconcileObserved(providerFailed, true);
 var unverified = WindowAction.ReconcileObserved(providerFailed, false);
 Check(reconciled.Status == WindowActionCode.EFFECT_VERIFIED_PROVIDER_REJECTED &&
