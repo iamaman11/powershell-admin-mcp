@@ -26,6 +26,50 @@ static void Check(bool ok, string label)
     Console.WriteLine("PASS " + label);
 }
 {
+    string fixture = """
+        # HELP commands_enqueued_total total
+        commands_enqueued_total{tunnel_id="sensitive-tunnel-identity"} 18
+        commands_polled_total{tunnel_id="sensitive-tunnel-identity"} 17
+        commands_queue_capacity{tunnel_id="sensitive-tunnel-identity"} 20
+        commands_queue_length{tunnel_id="sensitive-tunnel-identity"} 1
+        dispatcher_worker_pool_capacity{tunnel_id="sensitive-tunnel-identity"} 10
+        dispatcher_worker_pool_occupancy{tunnel_id="sensitive-tunnel-identity"} 2
+        commands_poll_latency_seconds_sum 0.5
+        commands_poll_latency_seconds_count 5
+        commands_age_seconds_sum 0.015
+        commands_age_seconds_count 3
+        command_end_to_end_latency_milliseconds_sum{latency_type="enqueue_to_response",request_method="tools/call",tunnel_id="sensitive-tunnel-identity"} 900
+        command_end_to_end_latency_milliseconds_count{latency_type="enqueue_to_response",request_method="tools/call",tunnel_id="sensitive-tunnel-identity"} 3
+        command_end_to_end_latency_milliseconds_sum{latency_type="poll_to_response",request_method="tools/call",tunnel_id="sensitive-tunnel-identity"} 1200
+        command_end_to_end_latency_milliseconds_count{latency_type="poll_to_response",request_method="tools/call",tunnel_id="sensitive-tunnel-identity"} 3
+        command_end_to_end_latency_milliseconds_sum{latency_type="enqueue_to_response",request_method="resources/list",tunnel_id="sensitive-tunnel-identity"} 999999
+        command_end_to_end_latency_milliseconds_count{latency_type="enqueue_to_response",request_method="resources/list",tunnel_id="sensitive-tunnel-identity"} 1
+        """;
+    var sampled = TunnelMetrics.Parse(fixture, DateTimeOffset.UnixEpoch);
+    string wire = System.Text.Json.JsonSerializer.Serialize(sampled, PipeWire.Json);
+    Check(sampled is { Status: TunnelMetricsCode.OK, CommandsEnqueued: 18,
+        CommandsPolled: 17, QueueLength: 1, QueueCapacity: 20,
+        WorkerActive: 2, WorkerCapacity: 10, PollSamples: 5,
+        PollMeanMs: 100, QueueAgeSamples: 3, QueueAgeMeanMs: 5,
+        ToolsEnqueueResponseSamples: 3, ToolsEnqueueResponseMeanMs: 300,
+        ToolsPollResponseSamples: 3, ToolsPollResponseMeanMs: 400 } &&
+        !wire.Contains("sensitive-tunnel-identity",StringComparison.Ordinal) &&
+        wire.Contains("\"tools_poll_response_mean_ms\":400",StringComparison.Ordinal),
+        "issue69.vendor_prometheus_typed_aggregates_without_sensitive_labels");
+    Check(TunnelMetrics.Parse("commands_queue_length 1\n",DateTimeOffset.UnixEpoch).Status ==
+        TunnelMetricsCode.INVALID_METRICS &&
+        TunnelMetrics.Parse(new string('x',TunnelMetrics.MaxBytes+1),DateTimeOffset.UnixEpoch).Status ==
+        TunnelMetricsCode.TOO_LARGE &&
+        TunnelMetrics.Parse(fixture.Replace("commands_queue_length{tunnel_id=\"sensitive-tunnel-identity\"} 1",
+            "commands_queue_length 1e999"),DateTimeOffset.UnixEpoch).Status ==
+        TunnelMetricsCode.INVALID_METRICS,
+        "issue69.vendor_prometheus_rejects_missing_oversize_and_nonfinite");
+    string defaultStatus = System.Text.Json.JsonSerializer.Serialize(
+        new AdminStatus(StatusCode.OK, "fixture-id"), PipeWire.Json);
+    Check(!defaultStatus.Contains("tunnel_metrics",StringComparison.Ordinal),
+        "issue69.vendor_metrics_are_optional_on_status_wire");
+}
+{
     string id = Guid.NewGuid().ToString("N");
     var metadata = new TransportTrace(1,id,TransportTimingSource.MONOTONIC_PROCESS_LOCAL,
         128,256,0.12,0.35,0.24,1.2,0.06,0.1,0.05,0.04,0.15,0.02);

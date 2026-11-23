@@ -101,6 +101,7 @@ public sealed class AdminTools
     [McpServerTool(Name="powershell_status",UseStructuredContent=true),
         Description("Service identity; optional typed read-only doctor diagnostics.")]
     public static async Task<AdminStatus> Status(bool include_diagnostics=false,bool include_trace=false,
+        bool include_tunnel_metrics=false,
         CancellationToken cancellationToken=default)
     {
         var reply=await Call(new(AdminOperation.Status),cancellationToken,include_trace);
@@ -114,8 +115,12 @@ public sealed class AdminTools
         var result=status with {Frontend=frontend,ExecutionContext=status.Status!=StatusCode.OK?CommandContext.UNCONFIRMED:
             identity.IsSystem?CommandContext.SYSTEM:
             status.UserContextAvailable==true?CommandContext.USER:CommandContext.UNCONFIRMED};
-        if (!include_diagnostics || result.Status!=StatusCode.OK) return result;
-        return result with {Diagnostics=DoctorSnapshot.FromReport(await Doctor.ObserveAsync())};
+        if(result.Status!=StatusCode.OK)return result;
+        if(include_tunnel_metrics)
+            result=result with {TunnelMetrics=await TunnelMetrics.ObserveAsync(cancellationToken)};
+        if(include_diagnostics)
+            result=result with {Diagnostics=DoctorSnapshot.FromReport(await Doctor.ObserveAsync())};
+        return result;
     }
 
     [McpServerTool(Name="powershell_job",UseStructuredContent=true),
