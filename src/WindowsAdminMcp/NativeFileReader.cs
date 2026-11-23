@@ -100,6 +100,13 @@ internal static class NativeFileReader
 
     private static string Version(ByHandleInfo i) =>
         $"{i.Volume:x8}:{i.IndexHigh:x8}{i.IndexLow:x8}:{i.SizeHigh:x8}{i.SizeLow:x8}:{i.WrittenHigh:x8}{i.WrittenLow:x8}";
+    // Compare the identity of the handle actually used for COPY with the
+    // earlier STAT receipt. A pathname may be replaced between those steps.
+    internal static string? VersionOf(SafeFileHandle handle)
+    {
+        try { return Version(Observe(handle)); }
+        catch (NativeFileException) { return null; }
+    }
     private static long Size(ByHandleInfo i) => (long)(((ulong)i.SizeHigh << 32) | i.SizeLow);
     private static DateTimeOffset When(uint low, uint high) =>
         DateTimeOffset.FromFileTime((long)(((ulong)high << 32) | low));

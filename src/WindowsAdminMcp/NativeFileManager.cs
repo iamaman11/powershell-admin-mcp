@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -132,10 +133,23 @@ internal static class NativeFileManager
                 else
                 {
                     using var input=new FileStream(source,FileMode.Open,FileAccess.Read,FileShare.Read);
+                    // The preflight STAT and this open are separate operations.
+                    // Compare the *opened handle*, not the path again, before
+                    // allowing the destination to become visible.
+                    if(r.ExpectedVersion is not null &&
+                        NativeFileReader.VersionOf(input.SafeFileHandle)!=r.ExpectedVersion)
+                        return Result(FileManageCode.SOURCE_CHANGED,"SOURCE_HANDLE");
                     using var output=new FileStream(stage,FileMode.CreateNew,FileAccess.Write,FileShare.None,
                         65536,FileOptions.WriteThrough);
                     stageCreated=true;
-                    input.CopyTo(output);output.Flush(flushToDisk:true);
+                    string? copiedSha=CopyFileChecked(input,output,ct,r.ExpectedSha256 is not null);
+                    if(r.ExpectedSha256 is not null &&
+                        !string.Equals(copiedSha,r.ExpectedSha256,StringComparison.OrdinalIgnoreCase))
+                        return Result(FileManageCode.SOURCE_CHANGED,"COPIED_HASH");
+                    if(r.ExpectedVersion is not null &&
+                        NativeFileReader.VersionOf(input.SafeFileHandle)!=r.ExpectedVersion)
+                        return Result(FileManageCode.SOURCE_CHANGED,"SOURCE_HANDLE");
+                    output.Flush(flushToDisk:true);
                 }
                 stageCreated=true;
                 ct.ThrowIfCancellationRequested();
@@ -233,9 +247,34 @@ internal static class NativeFileManager
                 using var input=new FileStream(entry,FileMode.Open,FileAccess.Read,FileShare.Read);
                 using var output=new FileStream(target,FileMode.CreateNew,FileAccess.Write,
                     FileShare.None,65536,FileOptions.WriteThrough);
-                input.CopyTo(output);output.Flush(flushToDisk:true);
+                CopyFileChecked(input,output,ct,hash:false);output.Flush(flushToDisk:true);
             }
         }
+    }
+
+    // The outer file workflow is synchronous on a bounded background worker.
+    // Stream.CopyTo ignores its CancellationToken; check it at each 64-KiB
+    // boundary so an interrupted multi-GiB copy does not continue unbounded.
+    // The optional digest proves that the bytes actually staged match CAS.
+    internal static string? CopyFileChecked(Stream input,Stream output,CancellationToken ct,bool hash)
+    {
+        using IncrementalHash? digest=hash?IncrementalHash.CreateHash(HashAlgorithmName.SHA256):null;
+        byte[] buffer=ArrayPool<byte>.Shared.Rent(65536);
+        try
+        {
+            while(true)
+            {
+                ct.ThrowIfCancellationRequested();
+                int count=input.Read(buffer,0,65536);
+                ct.ThrowIfCancellationRequested();
+                if(count==0)break;
+                digest?.AppendData(buffer,0,count);
+                output.Write(buffer,0,count);
+            }
+            ct.ThrowIfCancellationRequested();
+            return digest is null?null:Convert.ToHexString(digest.GetHashAndReset());
+        }
+        finally {ArrayPool<byte>.Shared.Return(buffer,clearArray:true);}
     }
 
     private sealed class FileManageReparseException:Exception { }
