@@ -2,27 +2,33 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Text.Json;
 
-// One USER-session child owns Chrome's consented CDP connection. Profiles in
-// the same browser process share that connection; each request still verifies
-// its own native window and explicit profile selector. No extra service.
+// Only the existing USER TunnelHost may spawn the consented CDP child.
+// MCP stdio processes reach it through the USER-session pipe, never by
+// constructing their own broker/consent state.
 internal sealed record ChromeBrokerRequest(WindowInspectRequest? Inspect = null,
-    WindowActionRequest? Action = null, ChromeConnectionRequest? Connection = null)
+    WindowActionRequest? Action = null, ChromeConnectionRequest? Connection = null,
+    string? TraceId = null)
 {
     internal string WindowId => Inspect?.WindowId ?? Action?.WindowId ?? Connection?.WindowId ?? "";
     internal string? Profile => Inspect?.ExpectedProfile ?? Action?.ExpectedProfile ?? Connection?.ExpectedProfile;
     internal bool Valid => (Inspect is not null ? 1 : 0) + (Action is not null ? 1 : 0) +
         (Connection is not null ? 1 : 0) == 1 &&
         WindowCatalog.TryParseId(WindowId, out _) &&
-        Profile is { Length: >= 1 and <= 100 } && !string.IsNullOrWhiteSpace(Profile) &&
+        (TraceId is null || Guid.TryParseExact(TraceId, "N", out _)) &&
+        (Profile is { Length: >= 1 and <= 100 } && !string.IsNullOrWhiteSpace(Profile) ||
+            Action is { ExpectedProfile: null } actionWithoutProfile &&
+            WindowInspector.WellFormedElementRef(actionWithoutProfile.ElementId, out _)) &&
         (Inspect is null || Inspect.Scope is WindowInspectScope.TABS or WindowInspectScope.TAB) &&
-        (Action is null || WindowChromeCdp.WellFormedTabElementRef(Action.ElementId) ||
-            WindowInspector.WellFormedElementRef(Action.ElementId, out _)) &&
+        (Action is null || !Action.ResolveOnly &&
+            (WindowChromeCdp.WellFormedTabElementRef(Action.ElementId) ||
+             WindowInspector.WellFormedElementRef(Action.ElementId, out _))) &&
         (Connection is null || Connection.Action is ChromeConnectionAction.REQUEST or
-            ChromeConnectionAction.STATUS);
+            ChromeConnectionAction.STATUS or ChromeConnectionAction.DISCONNECT);
 }
 
 internal sealed record ChromeBrokerReply(WindowInspectResult? Inspect = null,
-    WindowActionResult? Action = null, ChromeConnectionResult? Connection = null);
+    WindowActionResult? Action = null, ChromeConnectionResult? Connection = null,
+    int? OwnerPid = null, string? TraceId = null);
 
 internal static class WindowChromeBroker
 {
@@ -33,6 +39,9 @@ internal static class WindowChromeBroker
     private static bool _firstExchange;
     private static bool _hadConnected;
     private static string? _lastConnectedBinding;
+    private static bool _dedicatedWorker;
+
+    internal static bool IsDedicatedWorker => _dedicatedWorker;
 
     static WindowChromeBroker() => AppDomain.CurrentDomain.ProcessExit += (_, _) => Stop();
 
@@ -49,7 +58,8 @@ internal static class WindowChromeBroker
     }
 
     internal static bool ReplyMatches(ChromeBrokerRequest request, ChromeBrokerReply? reply) =>
-        reply is not null && (request.Inspect is not null
+        reply is not null && (request.TraceId is null || request.TraceId == reply.TraceId) &&
+        (request.Inspect is not null
             ? reply.Inspect is not null && reply.Action is null && reply.Connection is null
             : request.Action is not null
                 ? reply.Action is not null && reply.Inspect is null && reply.Connection is null
@@ -59,45 +69,70 @@ internal static class WindowChromeBroker
     internal static async Task<ChromeConnectionResult> ConnectionAsync(ChromeConnectionRequest request,
         CancellationToken cancellationToken)
     {
-        if (request.Action == ChromeConnectionAction.DISCONNECT)
-        {
-            try { await Gate.WaitAsync(cancellationToken); }
-            catch (OperationCanceledException)
-            { return new(ChromeConnectionCode.WORKER_FAILED, ChromeConnectionState.NOT_REQUESTED); }
-            try
-            {
-                if (_binding == Binding(new(Connection: request)))
-                {
-                    Stop();
-                    _hadConnected = false;
-                    _lastConnectedBinding = null;
-                }
-                return new(ChromeConnectionCode.OK, ChromeConnectionState.DISCONNECTED);
-            }
-            finally { Gate.Release(); }
-        }
-        var reply = await ExchangeAsync(new(Connection: request), cancellationToken);
-        return reply?.Connection ?? new(ChromeConnectionCode.WORKER_FAILED,
-            ChromeConnectionState.NOT_REQUESTED, Detail: "CDP_BROKER_UNAVAILABLE");
+        var reply = await RouteAsync(new(Connection: request), cancellationToken);
+        return reply?.Connection is { } connection
+            ? connection with { BrokerOwnerPid = reply.OwnerPid, TraceId = reply.TraceId }
+            : new(ChromeConnectionCode.WORKER_FAILED,
+                ChromeConnectionState.NOT_REQUESTED, Detail: "CDP_OWNER_UNAVAILABLE");
     }
 
     internal static async Task<WindowInspectResult> InspectAsync(WindowInspectRequest request,
         CancellationToken cancellationToken)
     {
-        var reply = await ExchangeAsync(new(Inspect: request), cancellationToken);
-        return reply?.Inspect ?? new(WindowInspectCode.WORKER_FAILED, [], Detail: "CDP_BROKER_UNAVAILABLE");
+        var reply = await RouteAsync(new(Inspect: request), cancellationToken);
+        return reply?.Inspect is { } inspect
+            ? inspect with { BrokerOwnerPid = reply.OwnerPid, TraceId = reply.TraceId }
+            : new(WindowInspectCode.WORKER_FAILED, [], Detail: "CDP_OWNER_UNAVAILABLE");
     }
 
     internal static async Task<WindowActionResult> InvokeAsync(WindowActionRequest request,
         CancellationToken cancellationToken)
     {
-        var reply = await ExchangeAsync(new(Action: request), cancellationToken);
-        return reply?.Action ?? new(WindowActionCode.WORKER_FAILED_UNKNOWN_EFFECT,
+        var reply = await RouteAsync(new(Action: request), cancellationToken);
+        return reply?.Action is { } action
+            ? action with { BrokerOwnerPid = reply.OwnerPid, TraceId = reply.TraceId }
+            : new(WindowActionCode.WORKER_FAILED_UNKNOWN_EFFECT,
             EffectUnknown: true, FailureStage: WindowFailureStage.WORKER,
-            Detail: "CDP_BROKER_UNAVAILABLE");
+            Detail: "CDP_OWNER_UNAVAILABLE");
     }
 
-    private static async Task<ChromeBrokerReply?> ExchangeAsync(ChromeBrokerRequest request,
+    private static Task<ChromeBrokerReply?> RouteAsync(ChromeBrokerRequest request,
+        CancellationToken cancellationToken)
+    {
+        request = request with { TraceId = Guid.NewGuid().ToString("N") };
+        return ChromeBrokerPipe.IsOwner
+            ? ExchangeOwnedAsync(request, cancellationToken)
+            : ChromeBrokerPipe.ExchangeAsync(request, cancellationToken);
+    }
+
+    internal static async Task<ChromeBrokerReply?> ExchangeOwnedAsync(ChromeBrokerRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!ChromeBrokerPipe.IsOwner || !request.Valid) return null;
+        if (request.Connection?.Action != ChromeConnectionAction.DISCONNECT)
+        {
+            var reply = await ExchangeLocalAsync(request, cancellationToken);
+            return reply is null ? null : reply with { TraceId = request.TraceId };
+        }
+        try { await Gate.WaitAsync(cancellationToken); }
+        catch (OperationCanceledException) { return null; }
+        try
+        {
+            if (_binding == Binding(request))
+            {
+                Stop();
+                _hadConnected = false;
+                _lastConnectedBinding = null;
+            }
+            return new(Connection: new(ChromeConnectionCode.OK, ChromeConnectionState.DISCONNECTED),
+                TraceId: request.TraceId);
+        }
+        finally { Gate.Release(); }
+    }
+
+    internal static void StopOwnedWorker() => Stop();
+
+    private static async Task<ChromeBrokerReply?> ExchangeLocalAsync(ChromeBrokerRequest request,
         CancellationToken cancellationToken)
     {
         if (!request.Valid) return null;
@@ -152,7 +187,7 @@ internal static class WindowChromeBroker
                     _lastConnectedBinding = binding;
                 }
                 _firstExchange = false;
-                return reply;
+                return reply with { TraceId = request.TraceId };
             }
             catch (Exception e) when (e is IOException or OperationCanceledException or
                 InvalidOperationException or JsonException)
@@ -202,6 +237,7 @@ internal static class WindowChromeBroker
         if (parentPid <= 0) return;
         using var parent = TryParent(parentPid);
         if (parent is null) return;
+        _dedicatedWorker = true;
         Task parentExit = parent.WaitForExitAsync();
         string? boundWindow = null;
         try
@@ -233,8 +269,13 @@ internal static class WindowChromeBroker
                                 inspect.NameContains, inspect.RoleFilter, inspect.WaitMs,
                                 inspect.Scope, inspect.TabId, inspect.ExpectedProfile,
                                 inspect.ExpectedOrigin, inspect.ExpectedUrl))
-                            : new(Action: WindowAction.InvokeInWorker(request.Action!));
+                            : new(Action: InvokeBoundAction(request.Action!));
                     }
+                    reply = reply with { TraceId = request?.TraceId,
+                        Inspect = reply.Inspect is { } inspect ? inspect with
+                            { SessionGeneration = WindowChromeCdp.CurrentGeneration } : null,
+                        Action = reply.Action is { } action ? action with
+                            { SessionGeneration = WindowChromeCdp.CurrentGeneration } : null };
                 }
                 catch (Exception e) when (e is JsonException or ArgumentException or InvalidOperationException)
                 { reply = new(Inspect: new(WindowInspectCode.WORKER_FAILED, [], Detail: e.GetType().Name)); }
@@ -242,7 +283,26 @@ internal static class WindowChromeBroker
                 await Console.Out.FlushAsync();
             }
         }
-        finally { WindowChromeCdp.CloseTabConnection(); }
+        finally
+        {
+            WindowChromeCdp.CloseTabConnection();
+            _dedicatedWorker = false;
+        }
+    }
+
+    private static WindowActionResult InvokeBoundAction(WindowActionRequest request)
+    {
+        if (request.ExpectedProfile is null)
+        {
+            using var self = Process.GetCurrentProcess();
+            var profile = ChromeProfileCatalog.ReadWindowProfile(request.WindowId, self.SessionId);
+            if (profile is null)
+                return new(WindowActionCode.CDP_CONTEXT_MISMATCH,
+                    FailureStage: WindowFailureStage.CDP_TARGET, Detail: "PROFILE_NOT_VERIFIED");
+            request = request with { ExpectedProfile = profile.ProfileId ?? profile.Email ??
+                profile.DisplayName };
+        }
+        return WindowAction.InvokeInWorker(request);
     }
 
     private static Process? TryParent(int pid)

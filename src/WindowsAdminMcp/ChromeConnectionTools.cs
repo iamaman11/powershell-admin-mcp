@@ -67,7 +67,24 @@ public sealed record ChromeConnectionResult(
     [property: JsonPropertyName("failure_reason"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         ChromeConnectionFailureReason? FailureReason = null,
     [property: JsonPropertyName("last_loss_reason"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        ChromeConnectionFailureReason? LastLossReason = null);
+        ChromeConnectionFailureReason? LastLossReason = null,
+    [property: JsonPropertyName("broker_owner_pid"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        int? BrokerOwnerPid = null,
+    [property: JsonPropertyName("session_generation"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        string? SessionGeneration = null,
+    [property: JsonPropertyName("trace_id"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        string? TraceId = null)
+{
+    [JsonPropertyName("transport_connected")]
+    public bool TransportConnected => State == ChromeConnectionState.CONNECTED;
+
+    [JsonPropertyName("consent_confirmed")]
+    public bool ConsentConfirmed => State == ChromeConnectionState.CONNECTED;
+
+    // A WebSocket STATUS does not prove a particular tab/action is ready.
+    [JsonPropertyName("target_ready")]
+    public bool TargetReady => false;
+}
 
 internal sealed record ChromeConnectionRequest(string WindowId, string ExpectedProfile,
     ChromeConnectionAction Action);

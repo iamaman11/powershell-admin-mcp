@@ -662,6 +662,11 @@ Check(!WindowInspector.ValidArguments(testWindowId, 16, 50,
     WindowInspector.ValidArguments(testWindowId, 16, 50,
         scope: WindowInspectScope.TAB, tabId: "0123456789abcdef0123456789abcdef",
         expectedProfile: "Valer") &&
+    WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.TAB, expectedProfile: "Valer",
+        expectedOrigin: "https://example.com") &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.TAB, expectedProfile: "Valer") &&
     !WindowInspector.ValidArguments(testWindowId, 16, 50,
         scope: WindowInspectScope.TAB, tabId: "invalid") &&
     !WindowInspector.ValidArguments(testWindowId, 16, 50,
@@ -963,8 +968,9 @@ Check(WindowChromeCdp.ValidTabElementRef(freshTabRef) && WindowAction.Valid(chro
     !WindowAction.Valid(chromeAction with { ExpectedProfile = null }) &&
     new ChromeBrokerRequest(Action: chromeAction).Valid &&
     new ChromeBrokerRequest(Action: chromeUiaAction).Valid &&
-    !new ChromeBrokerRequest(Action: chromeUiaAction with { ExpectedProfile = null }).Valid &&
+    new ChromeBrokerRequest(Action: chromeUiaAction with { ExpectedProfile = null }).Valid &&
     !new ChromeBrokerRequest(Action: chromeAction with { ExpectedProfile = null }).Valid &&
+    !new ChromeBrokerRequest(Action: chromeUiaAction with { ResolveOnly = true }).Valid &&
     new ChromeBrokerRequest(Inspect: new(testWindowId, 16, 50, null, null, 0,
         false, null, null, 0, WindowInspectScope.TABS, ExpectedProfile: "Valer")).Valid &&
     !new ChromeBrokerRequest(Inspect: new(testWindowId, 16, 50, null, null, 0,
@@ -979,6 +985,30 @@ Check(WindowChromeCdp.ValidTabElementRef(freshTabRef) && WindowAction.Valid(chro
     !WindowChromeBroker.ReplyMatches(new(Action: chromeAction),
         new(Inspect: new(WindowInspectCode.COMPLETED, []))),
     "chrome.browser_bound_broker_reuses_connection_across_profiles");
+using (var brokerStop = new CancellationTokenSource())
+{
+    Task owner = ChromeBrokerPipe.RunOwnerAsync(brokerStop.Token);
+    Check(ChromeBrokerPipe.IsOwner, "chrome.single_user_owner_started_in_existing_process");
+    bool duplicateRejected = false;
+    try { await ChromeBrokerPipe.RunOwnerAsync(brokerStop.Token); }
+    catch (InvalidOperationException e) when (e.Message == "CHROME_BROKER_ALREADY_OWNED")
+    { duplicateRejected = true; }
+    Check(duplicateRejected, "chrome.second_user_owner_denied_by_session_semaphore");
+    var responses = await Task.WhenAll(Enumerable.Range(0, 10).Select(_ =>
+    {
+        var request = new ChromeBrokerRequest(Connection: new(testWindowId,
+            "CI_NO_CHROME", ChromeConnectionAction.STATUS),
+            TraceId: Guid.NewGuid().ToString("N"));
+        return ChromeBrokerPipe.ExchangeAsync(request, CancellationToken.None);
+    }));
+    Check(responses.All(reply => reply?.OwnerPid == Environment.ProcessId &&
+        reply.Connection?.State == ChromeConnectionState.NOT_REQUESTED &&
+        reply.TraceId is { Length: 32 }),
+        "chrome.ten_independent_pipe_requests_share_one_owner_without_consent");
+    await brokerStop.CancelAsync();
+    await owner;
+    Check(!ChromeBrokerPipe.IsOwner, "chrome.user_owner_shutdown_closes_pipe");
+}
 Check(Enum.GetValues<WindowActionKind>().Where(WindowChromeCdp.PointerAction).ToHashSet().SetEquals(
         [WindowActionKind.CLICK, WindowActionKind.DOUBLE_CLICK, WindowActionKind.RIGHT_CLICK,
          WindowActionKind.INVOKE, WindowActionKind.SELECT,
@@ -1193,13 +1223,15 @@ var providerFailed = new WindowActionResult(WindowActionCode.ACTION_FAILED_UNKNO
     HResult: "80040200", ExceptionType: "COMException", ProviderResponse: "FAIL");
 var reconciled = WindowAction.ReconcileObserved(providerFailed, true);
 var unverified = WindowAction.ReconcileObserved(providerFailed, false);
-Check(reconciled.Status == WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT &&
+Check(reconciled.Status == WindowActionCode.EFFECT_VERIFIED_PROVIDER_REJECTED &&
     reconciled.EffectState == WindowEffectState.EFFECT_VERIFIED && !reconciled.EffectUnknown &&
+    reconciled.ProviderOutcome == WindowProviderOutcome.REJECTED && !reconciled.SafeToRetry &&
     reconciled.ExpectedStateObserved == true &&
     reconciled.HResult == providerFailed.HResult &&
     reconciled.FailureStage == WindowFailureStage.DISPATCH_UIA &&
     reconciled.ProviderResponse == providerFailed.ProviderResponse &&
     unverified.EffectState == WindowEffectState.EFFECT_UNKNOWN &&
+    unverified.Status == WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT &&
     unverified.FailureStage == WindowFailureStage.DISPATCH_UIA,
     "windows.provider_error_reconciles_actual_effect_without_retry_or_losing_diagnostics");
 Check(WindowAction.CanFallbackAfterNativeClick(new(WindowActionCode.UIA_UNAVAILABLE,
@@ -1468,6 +1500,16 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             .WaitAsync(TimeSpan.FromSeconds(8));
         Check(located.Status==WindowActionCode.COMPLETED && located.TargetVerified,
             "windows.locator_unique_match_dispatches_only_once");
+        int clicksBeforeResolve = Volatile.Read(ref clickCount);
+        var resolvedOnly = await Task.Run(() => WindowAction.InvokeInWorker(new WindowActionRequest(
+            realWindowId, "locator", WindowActionKind.INVOKE, null,
+            LocatorName: "CI_UIA_DELAYED_READY", LocatorRole: WindowRoleFilter.BUTTON,
+            ResolveOnly: true))).WaitAsync(TimeSpan.FromSeconds(8));
+        Check(resolvedOnly.Status == WindowActionCode.LOCATOR_RESOLVED &&
+            WindowInspector.TryParseElementRef(resolvedOnly.ResolvedElementId, out _) &&
+            WindowInspector.TryParsePath(resolvedOnly.ResolvedElementPath, out _) &&
+            Volatile.Read(ref clickCount) == clicksBeforeResolve,
+            "windows.disposable_locator_resolves_without_dispatching_click");
         var ambiguous=await Task.Run(()=>WindowAction.InvokeInWorker(new WindowActionRequest(
             realWindowId,"locator",WindowActionKind.INVOKE,null,
             LocatorRole:WindowRoleFilter.BUTTON))).WaitAsync(TimeSpan.FromSeconds(8));

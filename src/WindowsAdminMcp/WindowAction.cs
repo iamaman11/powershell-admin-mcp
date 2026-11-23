@@ -31,6 +31,9 @@ public enum WindowEffectState { NO_EFFECT, EFFECT_VERIFIED, EFFECT_UNKNOWN }
 [JsonConverter(typeof(JsonStringEnumConverter<WindowExecutionMethod>))]
 public enum WindowExecutionMethod { UIA_PATTERN, WIN32_SENDINPUT, CHROME_CDP }
 
+[JsonConverter(typeof(JsonStringEnumConverter<WindowProviderOutcome>))]
+public enum WindowProviderOutcome { NOT_DISPATCHED, ACKNOWLEDGED, REJECTED, UNKNOWN }
+
 [JsonConverter(typeof(JsonStringEnumConverter<WindowFailureStage>))]
 public enum WindowFailureStage { RESOLVE_ELEMENT, PREPARE_UIA, DISPATCH_UIA, ACTIVATE_WINDOW, PREPARE_FOCUS, HIT_TEST, DISPATCH_INPUT, VERIFY_EFFECT, WORKER, CDP_CONNECT, CDP_TARGET }
 
@@ -46,7 +49,9 @@ public enum WindowActionCode
     CLICK_POINT_UNAVAILABLE, TARGET_OCCLUDED, INPUT_FAILED_UNKNOWN_EFFECT,
     FOCUS_UNAVAILABLE, CDP_UNAVAILABLE, CDP_TARGET_AMBIGUOUS, CDP_CONTEXT_MISMATCH,
     CDP_TARGET_NOT_VISIBLE, CDP_FAILED_UNKNOWN_EFFECT, CDP_CONSENT_PENDING,
-    LOCATOR_NOT_FOUND, LOCATOR_AMBIGUOUS
+    LOCATOR_NOT_FOUND, LOCATOR_AMBIGUOUS, LOCATOR_RESOLVED,
+    LOCATOR_TIMEOUT, LOCATOR_WORKER_FAILED,
+    EFFECT_VERIFIED_PROVIDER_REJECTED
 }
 
 internal sealed record WindowActionRequest(
@@ -77,7 +82,8 @@ internal sealed record WindowActionRequest(
     [property: JsonPropertyName("target_y")] int? TargetY = null,
     [property: JsonPropertyName("locator_automation_id")] string? LocatorAutomationId = null,
     [property: JsonPropertyName("locator_name")] string? LocatorName = null,
-    [property: JsonPropertyName("locator_role")] WindowRoleFilter? LocatorRole = null);
+    [property: JsonPropertyName("locator_role")] WindowRoleFilter? LocatorRole = null,
+    [property: JsonPropertyName("resolve_only")] bool ResolveOnly = false);
 
 public sealed record WindowActionResult(
     [property: JsonPropertyName("status")] WindowActionCode Status,
@@ -97,13 +103,26 @@ public sealed record WindowActionResult(
     [property: JsonPropertyName("observation_state")] WindowObservationState ObservationState = WindowObservationState.NOT_REQUESTED,
     [property: JsonPropertyName("expected_enabled_observed")] bool? ExpectedEnabledObserved = null,
     [property: JsonPropertyName("execution_method"), JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)]
-        WindowExecutionMethod? ExecutionMethod = null)
+        WindowExecutionMethod? ExecutionMethod = null,
+    [property: JsonPropertyName("enabled_before"), JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)]
+        bool? EnabledBefore = null,
+    [property: JsonPropertyName("broker_owner_pid"), JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)]
+        int? BrokerOwnerPid = null,
+    [property: JsonPropertyName("trace_id"), JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)]
+        string? TraceId = null,
+    [property: JsonPropertyName("session_generation"), JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)]
+        string? SessionGeneration = null,
+    [property: JsonPropertyName("resolved_element_id"), JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)]
+        string? ResolvedElementId = null,
+    [property: JsonPropertyName("resolved_element_path"), JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)]
+        string? ResolvedElementPath = null)
 {
     [JsonPropertyName("safe_to_retry")]
     public bool SafeToRetry => EffectState==WindowEffectState.NO_EFFECT &&
         Status is WindowActionCode.INVALID_ARGUMENT or WindowActionCode.CONFIRMATION_REQUIRED or
             WindowActionCode.STALE_WINDOW or WindowActionCode.STALE_ELEMENT or
             WindowActionCode.LOCATOR_NOT_FOUND or WindowActionCode.LOCATOR_AMBIGUOUS or
+            WindowActionCode.LOCATOR_TIMEOUT or WindowActionCode.LOCATOR_WORKER_FAILED or
             WindowActionCode.AUDIT_UNAVAILABLE;
 
     // A successful provider call is dispatch acknowledgement, NOT proof that the UI changed.
@@ -112,6 +131,14 @@ public sealed record WindowActionResult(
         ? WindowEffectState.EFFECT_VERIFIED
         : EffectUnknown || Status == WindowActionCode.COMPLETED
             ? WindowEffectState.EFFECT_UNKNOWN : WindowEffectState.NO_EFFECT;
+
+    [JsonPropertyName("provider_outcome")]
+    public WindowProviderOutcome ProviderOutcome =>
+        ExecutionMethod is null ? WindowProviderOutcome.NOT_DISPATCHED :
+        FailureStage == WindowFailureStage.DISPATCH_UIA && HResult is not null
+            ? WindowProviderOutcome.REJECTED :
+        Status == WindowActionCode.COMPLETED ? WindowProviderOutcome.ACKNOWLEDGED :
+        WindowProviderOutcome.UNKNOWN;
 }
 
 // The disposable child uses native UIA2 with AutoSetFocus disabled. An untrusted
@@ -140,6 +167,7 @@ internal static class WindowAction
         (tabRef ||
             request.ExpectedOrigin is null && request.ExpectedUrl is null) &&
         (uiaRef || tabRef || locator) &&
+        (!request.ResolveOnly || locator) &&
         (locator ? request.ElementId=="locator" &&
             request.LocatorAutomationId is null or {Length:>=1 and <=128} &&
             request.LocatorName is null or {Length:>=1 and <=128} &&
@@ -248,7 +276,11 @@ internal static class WindowAction
                     pending.Push((children[i],depth+1,[..path,i]));
             }
             if(pending.Count>0)return new(WindowActionCode.LOCATOR_AMBIGUOUS,Detail:"TRAVERSAL_LIMIT");
-            return match is null?new(WindowActionCode.LOCATOR_NOT_FOUND):InvokeCore(hwnd,match);
+            if(match is null)return new(WindowActionCode.LOCATOR_NOT_FOUND);
+            return request.ResolveOnly
+                ? new(WindowActionCode.LOCATOR_RESOLVED,
+                    ResolvedElementId: match.ElementId, ResolvedElementPath: match.ElementPath)
+                : InvokeCore(hwnd,match);
         }
         catch(ElementNotAvailableException){return new(WindowActionCode.STALE_ELEMENT);}
         catch(COMException e){return new(WindowActionCode.UIA_UNAVAILABLE,
@@ -279,7 +311,7 @@ internal static class WindowAction
             WindowActionResult ActOnMatch(AutomationElement element, int[] path)
             {
                 var current = element.Current;
-                if (!current.IsEnabled) return new(WindowActionCode.DISABLED);
+                if (!current.IsEnabled) return new(WindowActionCode.DISABLED, EnabledBefore: false);
                 // Creation checks compare identities, not a boolean "process exists":
                 // another Camoufox instance may already be running.
                 WindowEffectBaseline baseline;
@@ -382,7 +414,8 @@ internal static class WindowAction
                         request with { Action = WindowActionKind.CLICK }, clock)
                     : WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(), request,
                         clock, radioInvoke);
-                result = result with { TargetVerified = true, TargetIdentity = request.ElementId };
+                result = result with { TargetVerified = true, TargetIdentity = request.ElementId,
+                    EnabledBefore = true };
                 if ((request.Action is WindowActionKind.SET_VALUE or WindowActionKind.TYPE_TEXT) &&
                     (result.Status == WindowActionCode.COMPLETED || result.EffectUnknown))
                 {
@@ -629,7 +662,10 @@ internal static class WindowAction
     // Preserve the original provider code and diagnostics even when the
     // requested transition is observed after a reported dispatch failure.
     internal static WindowActionResult ReconcileObserved(WindowActionResult result, bool observed) =>
-        result with { ExpectedStateObserved = observed,
+        result with { Status = observed && result.Status == WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT &&
+                result.FailureStage == WindowFailureStage.DISPATCH_UIA && result.HResult is not null
+                ? WindowActionCode.EFFECT_VERIFIED_PROVIDER_REJECTED : result.Status,
+            ExpectedStateObserved = observed,
             ObservationState = observed ? WindowObservationState.OBSERVED : WindowObservationState.NOT_OBSERVED,
             EffectUnknown = result.EffectUnknown && !observed,
             FailureStage = observed ? result.FailureStage :
@@ -725,12 +761,50 @@ internal static class WindowAction
         var auditId = Guid.NewGuid().ToString("N");
         if (!WriteAudit(auditId, "INTENT", request, null))
             return new(WindowActionCode.AUDIT_UNAVAILABLE, AuditId: auditId);
-        WindowActionResult result = request.ExpectedProfile is not null && request.ElementId!="locator"
+        bool chrome = request.ExpectedProfile is not null ||
+            WindowChromeCdp.WellFormedTabElementRef(request.ElementId) ||
+            IsChromeWindow(request.WindowId);
+        if (chrome && request.ElementId == "locator")
+        {
+            // Resolve UIA only in the disposable process. It never performs the
+            // effect or owns CDP. The broker rechecks the fresh fingerprint.
+            var resolved = await RunDisposableWorkerAsync(request with { ResolveOnly = true },
+                cancellationToken);
+            if (resolved.Status == WindowActionCode.LOCATOR_RESOLVED &&
+                resolved.ResolvedElementId is not null)
+                request = request with { ElementId = resolved.ResolvedElementId,
+                    ElementPath = resolved.ResolvedElementPath,
+                    ResolveOnly = false, LocatorAutomationId = null,
+                    LocatorName = null, LocatorRole = null };
+            else return FinalizeAudit(auditId, request, resolved);
+        }
+        WindowActionResult result = chrome
             ? await WindowChromeBroker.InvokeAsync(request, cancellationToken)
             : await RunDisposableWorkerAsync(request, cancellationToken);
+        return FinalizeAudit(auditId, request, result);
+    }
+
+    private static WindowActionResult FinalizeAudit(string auditId, WindowActionRequest request,
+        WindowActionResult result)
+    {
         if (!WriteAudit(auditId, "RESULT", request, result))
             return new(WindowActionCode.AUDIT_RESULT_FAILED, AuditId: auditId, EffectUnknown: true);
         return result with { AuditId = auditId };
+    }
+
+    internal static bool IsChromeWindow(string windowId)
+    {
+        if (!WindowCatalog.TryParseId(windowId, out var identity)) return false;
+        using var self = Process.GetCurrentProcess();
+        if (WindowCatalog.ResolveId(windowId, self.SessionId, out _) != WindowResolveCode.OK)
+            return false;
+        try
+        {
+            using var owner = Process.GetProcessById(identity.ProcessId);
+            return owner.ProcessName.Equals("chrome", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception e) when (e is ArgumentException or Win32Exception or InvalidOperationException or
+            System.Security.SecurityException) { return false; }
     }
 
     private static async Task<WindowActionResult> RunDisposableWorkerAsync(WindowActionRequest request,
@@ -741,7 +815,8 @@ internal static class WindowAction
         using var process = new Process();
         var executable = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(executable))
-            result = new(WindowActionCode.WORKER_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
+            result = new(request.ResolveOnly ? WindowActionCode.LOCATOR_WORKER_FAILED :
+                WindowActionCode.WORKER_FAILED_UNKNOWN_EFFECT, EffectUnknown: !request.ResolveOnly,
                 FailureStage: WindowFailureStage.WORKER);
         else
         {
@@ -769,19 +844,23 @@ internal static class WindowAction
                 string json = await output;
                 if (json.Length > 2048) throw new JsonException("OUTPUT_LIMIT");
                 result = JsonSerializer.Deserialize<WindowActionResult>(json, PipeWire.Json) ??
-                    new(WindowActionCode.WORKER_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
+                    new(request.ResolveOnly ? WindowActionCode.LOCATOR_WORKER_FAILED :
+                        WindowActionCode.WORKER_FAILED_UNKNOWN_EFFECT, EffectUnknown: !request.ResolveOnly,
                         FailureStage: WindowFailureStage.WORKER);
             }
             catch (OperationCanceledException)
             {
                 Stop(process, launched);
-                result = new(WindowActionCode.TIMEOUT_UNKNOWN_EFFECT, EffectUnknown: true,
+                result = new(request.ResolveOnly ? WindowActionCode.LOCATOR_TIMEOUT :
+                    WindowActionCode.TIMEOUT_UNKNOWN_EFFECT, EffectUnknown: !request.ResolveOnly,
                     FailureStage: WindowFailureStage.WORKER);
             }
             catch (Exception e) when (e is Win32Exception or IOException or JsonException or InvalidOperationException)
             {
                 Stop(process, launched);
-                result = new(WindowActionCode.WORKER_FAILED_UNKNOWN_EFFECT, EffectUnknown: launched,
+                result = new(request.ResolveOnly ? WindowActionCode.LOCATOR_WORKER_FAILED :
+                    WindowActionCode.WORKER_FAILED_UNKNOWN_EFFECT,
+                    EffectUnknown: launched && !request.ResolveOnly,
                     Detail: e.GetType().Name, FailureStage: WindowFailureStage.WORKER,
                     ExceptionType: e.GetType().Name, HResult: e.HResult.ToString("X8"));
             }

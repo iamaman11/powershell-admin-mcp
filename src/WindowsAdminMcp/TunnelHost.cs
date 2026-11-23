@@ -110,6 +110,9 @@ internal static class TunnelHost
             using var workerStop=new CancellationTokenSource();
             // USER jobs are local; an unavailable TUN does not own their lifetime.
             Task workerTask=UserWorker.RunAsync(workerStop.Token);
+            // The same scheduler-owned USER process is the sole CDP owner for
+            // every independent vendor/MCP frontend in this Windows session.
+            Task chromeBrokerTask=ChromeBrokerPipe.RunOwnerAsync(workerStop.Token);
             bool workerFailureReported=false;
             int WorkerEnded(Task worker)
             {
@@ -137,6 +140,7 @@ internal static class TunnelHost
                 while(true)
                 {
                     if(workerTask.IsCompleted)return WorkerEnded(workerTask);
+                    if(chromeBrokerTask.IsCompleted)return WorkerEnded(chromeBrokerTask);
                     var dependency=TunDependency.Observe();
                     if(dependency!=previous)
                     {
@@ -238,6 +242,9 @@ internal static class TunnelHost
                 await workerStop.CancelAsync();
                 try{await workerTask;}
                 catch when(workerFailureReported && workerTask.IsFaulted)
+                { /* already reported, return nonzero to Task Scheduler */ }
+                try{await chromeBrokerTask;}
+                catch when(workerFailureReported && chromeBrokerTask.IsFaulted)
                 { /* already reported, return nonzero to Task Scheduler */ }
             }
         }

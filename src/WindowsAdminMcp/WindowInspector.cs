@@ -61,7 +61,10 @@ public sealed record WindowInspectResult(
     [property: JsonPropertyName("elapsed_ms")] long? ElapsedMs = null,
     [property: JsonPropertyName("element_ref_expires_utc")] DateTimeOffset? ElementRefExpiresUtc = null,
     [property: JsonPropertyName("next_offset")] int? NextOffset = null,
-    [property: JsonPropertyName("tabs"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] WindowTab[]? Tabs = null);
+    [property: JsonPropertyName("tabs"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] WindowTab[]? Tabs = null,
+    [property: JsonPropertyName("broker_owner_pid"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? BrokerOwnerPid = null,
+    [property: JsonPropertyName("trace_id"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? TraceId = null,
+    [property: JsonPropertyName("session_generation"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? SessionGeneration = null);
 
 internal sealed record WindowInspectRequest(
     string WindowId, int MaxDepth, int MaxElements,
@@ -160,8 +163,10 @@ internal static class WindowInspector
             return "tab_id: only valid with scope=TAB";
         if (scope == WindowInspectScope.TABS && tabId is not null)
             return "tab_id: omit for scope=TABS";
-        if (scope == WindowInspectScope.TAB && !WindowChromeCdp.ValidTargetId(tabId))
-            return "tab_id: expected a target ID from scope=TABS";
+        if (scope == WindowInspectScope.TAB &&
+            (tabId is not null && !WindowChromeCdp.ValidTargetId(tabId) ||
+             tabId is null && expectedOrigin is null && expectedUrl is null))
+            return "tab_id: provide a target ID or an exact expected_origin/expected_url";
         if (scope != WindowInspectScope.WINDOW && expectedProfile is null)
             return "expected_profile: required for Chrome TABS/TAB";
         if (scope != WindowInspectScope.WINDOW && (startPath is not null || startElementId is not null || waitMs != 0))
