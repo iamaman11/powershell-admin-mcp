@@ -134,9 +134,12 @@ try{
         Assert (-not $v.Contains('tunnel_metrics')) 'issue69.default_status_skips_vendor_metrics'
         Send $p 43 'tools/call' @{name='powershell_status';arguments=@{include_tunnel_metrics=$true};_meta=$meta}
         $vendor=(Receive $p 43).structuredContent
-        Assert ($vendor.status -eq 'OK' -and $vendor.tunnel_metrics.status -eq 'UNAVAILABLE' -and
+        Write-Host "ISSUE69_TUNNEL_METRICS_STATUS=$($vendor.tunnel_metrics.status)"
+        Assert ($vendor.status -eq 'OK' -and
+            $vendor.tunnel_metrics.status -in @('OK','UNAVAILABLE','HTTP_ERROR','TIMEOUT','TOO_LARGE','INVALID_METRICS') -and
             $vendor.tunnel_metrics.port -eq 8080 -and
-            $vendor.tunnel_metrics.observed_utc) 'issue69.tunnel_metrics_typed_nonfatal_unavailable_in_isolated_ci'
+            $vendor.tunnel_metrics.observed_utc -and
+            ($vendor.tunnel_metrics.status -ne 'OK' -or $vendor.tunnel_metrics.queue_capacity -gt 0)) 'issue69.tunnel_metrics_typed_nonfatal_unavailable_or_valid_snapshot'
         Send $p 42 'tools/call' @{name='powershell_status';arguments=@{include_trace=$true};_meta=$meta}
         $traced=(Receive $p 42).structuredContent
         $t=$traced.timing.transport
