@@ -10,6 +10,7 @@ internal static class WindowPhysicalClick
     private const uint InputMouse = 0;
     private const uint LeftDown = 0x0002;
     private const uint LeftUp = 0x0004;
+    private const uint RightDown=0x0008,RightUp=0x0010;
     private const uint Wheel = 0x0800, HorizontalWheel=0x1000;
     private const uint InputKeyboard = 1;
     private const uint KeyUp = 0x0002;
@@ -69,6 +70,13 @@ internal static class WindowPhysicalClick
         return units;
     }
 
+    internal static (uint Down,uint Up,int Count) PointerPlan(WindowActionKind action)=> action switch
+    {
+        WindowActionKind.RIGHT_CLICK=>(RightDown,RightUp,1),
+        WindowActionKind.DOUBLE_CLICK=>(LeftDown,LeftUp,2),
+        _=>(LeftDown,LeftUp,1)
+    };
+
     internal static WindowActionResult Click(IntPtr hwnd, AutomationElement target,
         WindowActionRequest request, Stopwatch clock, bool allowCdp = true)
     {
@@ -125,11 +133,13 @@ internal static class WindowPhysicalClick
                     ForegroundChanged: foregroundAtEntry != GetForegroundWindow(), FailureStage: stage);
 
             stage = WindowFailureStage.DISPATCH_INPUT;
-            var inputs = new[]
+            var plan=PointerPlan(request.Action);
+            var inputs=new Input[plan.Count*2];
+            for(int click=0;click<plan.Count;click++)
             {
-                new Input { Type = InputMouse, Mouse = new MouseInput { Flags = LeftDown } },
-                new Input { Type = InputMouse, Mouse = new MouseInput { Flags = LeftUp } }
-            };
+                inputs[click*2]=new Input {Type=InputMouse,Mouse=new MouseInput {Flags=plan.Down}};
+                inputs[click*2+1]=new Input {Type=InputMouse,Mouse=new MouseInput {Flags=plan.Up}};
+            }
             dispatched = true;
             uint inserted = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<Input>());
             bool changed = foregroundAtEntry != GetForegroundWindow();

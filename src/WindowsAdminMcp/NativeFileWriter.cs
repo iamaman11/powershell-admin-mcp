@@ -11,6 +11,8 @@ internal static class NativeFileWriter
 {
     internal const long MaxUploadBytes=64L*1024*1024;
     internal const int MaxChunkBytes=262144,MaxReceiptsPerDirectory=1024;
+    // Keep the inline MCP payload small; larger transfers use BEGIN/APPEND/COMMIT.
+    internal const int MaxInlineBytes=16384;
 
     private sealed record Journal(int V,string OperationId,string Path,CommandContext Context,
         long Length,string Sha256,FileOverwritePolicy Policy,string? OriginalVersion,
@@ -33,10 +35,44 @@ internal static class NativeFileWriter
                 r.ExpectedVersion is null && r.OriginalSha256 is null &&
                 r.OverwritePolicy==FileOverwritePolicy.FAIL_IF_EXISTS && r.Offset is >=0 and <=MaxUploadBytes &&
                 r.DataBase64 is {Length:>=4 and <=349528} && Digest(r.ChunkSha256),
+            FileWriteAction.WRITE_ATOMIC=>false, // Facade expands it before SQLite dispatch.
             _=>r.ExpectedBytes is null && r.ExpectedSha256 is null && r.ExpectedVersion is null &&
                 r.OriginalSha256 is null && r.Offset is null && r.DataBase64 is null &&
                 r.ChunkSha256 is null && r.OverwritePolicy==FileOverwritePolicy.FAIL_IF_EXISTS
         });
+
+    // A convenience action, not a second writer. Every actual effect passes
+    // through the existing durable owner/sidecar and can be recovered by STATUS.
+    // Validation and hashing complete before BEGIN creates a receipt or file.
+    internal static bool TryInlineSteps(FileWriteRequest request,out FileWriteRequest[] steps,
+        out FileWriteCode error)
+    {
+        steps=[];
+        error=FileWriteCode.INVALID_ARGUMENT;
+        if(request.Action!=FileWriteAction.WRITE_ATOMIC || request.Offset is not null ||
+            request.ChunkSha256 is not null || request.ExpectedBytes is not null ||
+            request.DataBase64 is not {Length:<=((MaxInlineBytes+2)/3)*4} ||
+            request.ExpectedSha256 is not null && !Digest(request.ExpectedSha256))return false;
+        byte[] bytes;
+        try{bytes=Convert.FromBase64String(request.DataBase64);}
+        catch(FormatException){return false;}
+        if(bytes.Length>MaxInlineBytes)return false;
+        string sha=Convert.ToHexString(SHA256.HashData(bytes));
+        if(request.ExpectedSha256 is not null &&
+            !string.Equals(request.ExpectedSha256,sha,StringComparison.OrdinalIgnoreCase))
+        {error=FileWriteCode.HASH_MISMATCH;return false;}
+        var begin=request with {Action=FileWriteAction.BEGIN,ExpectedBytes=bytes.LongLength,
+            ExpectedSha256=sha,DataBase64=null};
+        if(!Valid(begin))return false;
+        var commit=new FileWriteRequest(FileWriteAction.COMMIT,request.Path,request.OperationId,
+            request.ExecutionContext);
+        if(bytes.Length==0){steps=[begin,commit];return true;}
+        var append=commit with {Action=FileWriteAction.APPEND,Offset=0,
+            DataBase64=request.DataBase64,ChunkSha256=sha};
+        steps=[begin,append,commit];
+        error=FileWriteCode.STAGED;
+        return true;
+    }
 
     private static string FullPath(string path)
     {

@@ -29,7 +29,14 @@ public sealed record UpdateToolResult(
     [property: JsonPropertyName("operation_action"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         UpdateToolAction? OperationAction = null,
     [property: JsonPropertyName("deleted_count"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? DeletedCount = null,
-    [property: JsonPropertyName("remaining_count"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? RemainingCount = null);
+    [property: JsonPropertyName("remaining_count"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? RemainingCount = null,
+    // stage describes the last installer trial, never the current live state.
+    [property: JsonPropertyName("current_service_status"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        StatusCode? CurrentServiceStatus = null,
+    [property: JsonPropertyName("current_local_operational_ready"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        bool? CurrentLocalOperationalReady = null,
+    [property: JsonPropertyName("current_observed_utc"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        DateTimeOffset? CurrentObservedUtc = null);
 
 internal sealed record UpdateTaskWire(
     [property: JsonPropertyName("status")] string Status,
@@ -155,10 +162,15 @@ public sealed class UpdateTools
             if (wire is null || !Enum.TryParse<UpdateToolCode>(wire.Status, false, out var code))
                 return new(UpdateToolCode.OPERATOR_FAILED, operationId, InstalledCommit: package.Commit,
                     Detail: "OPERATOR_PROTOCOL_ERROR");
-            return new(code, wire.OperationId ?? operationId, wire.Stage, package.Commit,
+            var result=new UpdateToolResult(code, wire.OperationId ?? operationId, wire.Stage, package.Commit,
                 wire.Commit, wire.RollbackPending ?? pending, wire.TaskState, wire.LastTaskResult, wire.Reason,
                 wire.OperationAction ?? (action == UpdateToolAction.STATUS ? null : action),
                 wire.DeletedCount, wire.RemainingCount);
+            if(action!=UpdateToolAction.STATUS)return result;
+            // Historical trial outcome and live state are separate observations.
+            // Never infer current readiness from the saved TRIAL_NOT_READY stage.
+            var current=await AdminTools.Status(include_diagnostics:true,cancellationToken:cancellationToken);
+            return WithCurrentReadiness(result,current);
         }
         catch (Exception e) when (e is OperationCanceledException or IOException or
                                   Win32Exception or JsonException or InvalidOperationException)
@@ -171,6 +183,11 @@ public sealed class UpdateTools
                 OperationAction: action == UpdateToolAction.STATUS ? null : action);
         }
     }
+
+    internal static UpdateToolResult WithCurrentReadiness(UpdateToolResult result,AdminStatus current) =>
+        result with {CurrentServiceStatus=current.Status,
+            CurrentLocalOperationalReady=current.Diagnostics?.LocalOperationalReady,
+            CurrentObservedUtc=DateTimeOffset.UtcNow};
 
     internal static bool ValidArguments(UpdateToolAction action, bool confirmed, string? commit) =>
         action switch

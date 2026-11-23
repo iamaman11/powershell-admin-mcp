@@ -624,6 +624,17 @@ internal static partial class WindowChromeCdp
         string? nameFilter, WindowRoleFilter? roleFilter,
         string? expectedProfile = null, string? expectedOrigin = null, string? expectedUrl = null)
     {
+        var clock=Stopwatch.StartNew();
+        return InspectTabCore(hwnd,windowId,scope,tabId,maxElements,offset,nameFilter,
+            roleFilter,expectedProfile,expectedOrigin,expectedUrl) with
+            {ElapsedMs=clock.ElapsedMilliseconds};
+    }
+
+    private static WindowInspectResult InspectTabCore(IntPtr hwnd, string windowId,
+        WindowInspectScope scope, string? tabId, int maxElements, int offset,
+        string? nameFilter, WindowRoleFilter? roleFilter,
+        string? expectedProfile, string? expectedOrigin, string? expectedUrl)
+    {
         if (hwnd == IntPtr.Zero)
             return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: "WINDOW_NOT_AVAILABLE");
         if (!TryEndpoint(out var endpoint, out string endpointFailure))
@@ -853,7 +864,8 @@ internal static partial class WindowChromeCdp
     // editable field may be exposed as "generic" or "textbox". Route every
     // pointer-like action through the same verified DOM hit test.
     internal static bool PointerAction(WindowActionKind action) => action is
-        WindowActionKind.CLICK or WindowActionKind.INVOKE or WindowActionKind.SELECT or
+        WindowActionKind.CLICK or WindowActionKind.DOUBLE_CLICK or WindowActionKind.RIGHT_CLICK or
+        WindowActionKind.INVOKE or WindowActionKind.SELECT or
         WindowActionKind.TOGGLE or WindowActionKind.EXPAND or WindowActionKind.COLLAPSE;
 
     internal static bool? AxActionState(JsonElement node, WindowActionKind action)
@@ -1050,10 +1062,15 @@ internal static partial class WindowChromeCdp
                 if (!hit.GetProperty("result").TryGetProperty("value", out var ok) ||
                     ok.ValueKind != JsonValueKind.True) return Rejected(WindowActionCode.TARGET_OCCLUDED);
                 dispatched = true;
-                await cdp.Call("Input.dispatchMouseEvent", new { type = "mousePressed", x, y,
-                    button = "left", clickCount = 1 }, sessionId);
-                await cdp.Call("Input.dispatchMouseEvent", new { type = "mouseReleased", x, y,
-                    button = "left", clickCount = 1 }, sessionId);
+                string button=request.Action==WindowActionKind.RIGHT_CLICK?"right":"left";
+                int repeats=request.Action==WindowActionKind.DOUBLE_CLICK?2:1;
+                for(int click=1;click<=repeats;click++)
+                {
+                    await cdp.Call("Input.dispatchMouseEvent", new { type = "mousePressed", x, y,
+                        button, clickCount = click }, sessionId);
+                    await cdp.Call("Input.dispatchMouseEvent", new { type = "mouseReleased", x, y,
+                        button, clickCount = click }, sessionId);
+                }
             }
             else if (request.Action is WindowActionKind.KEY_PRESS or WindowActionKind.TYPE_TEXT or
                      WindowActionKind.SET_VALUE)

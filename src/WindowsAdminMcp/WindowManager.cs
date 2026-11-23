@@ -7,7 +7,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowManageAction>))]
-public enum WindowManageAction { ACTIVATE, RESTORE, MINIMIZE, MAXIMIZE, MOVE, RESIZE }
+public enum WindowManageAction { ACTIVATE, RESTORE, MINIMIZE, MAXIMIZE, MOVE, RESIZE, CLOSE }
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowManageCode>))]
 public enum WindowManageCode
@@ -44,6 +44,7 @@ public sealed record WindowGeometry(int X,int Y,int Width,int Height,bool Minimi
 internal static class WindowManager
 {
     private const int Restore=9,Minimize=6,Maximize=3;
+    private const uint WmClose=0x0010;
     private const uint NoZOrder=0x0004,NoActivate=0x0010,NoMove=0x0002,NoSize=0x0001;
 
     [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left,Top,Right,Bottom; }
@@ -63,6 +64,8 @@ internal static class WindowManager
     private static extern bool SetWindowPos(IntPtr hwnd,IntPtr after,int x,int y,int width,int height,uint flags);
     [DllImport("user32.dll",SetLastError=true)][return:MarshalAs(UnmanagedType.Bool)]
     private static extern bool ShowWindow(IntPtr hwnd,int command);
+    [DllImport("user32.dll",EntryPoint="PostMessageW",SetLastError=true)][return:MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PostMessage(IntPtr hwnd,uint message,IntPtr wparam,IntPtr lparam);
 
     internal static bool Valid(WindowManageAction action,int? x,int? y,int? width,int? height) =>
         Enum.IsDefined(action) && (action switch
@@ -124,6 +127,23 @@ internal static class WindowManager
         var before=Observe(hwnd);
         if(before is null)return Done(WindowManageCode.NATIVE_FAILURE);
         if(action==WindowManageAction.ACTIVATE && !IsWindowVisible(hwnd))return Done(WindowManageCode.WINDOW_NOT_VISIBLE,before);
+        if(action==WindowManageAction.CLOSE)
+        {
+            // Graceful WM_CLOSE; never terminate the process or dismiss an app's
+            // unsaved-work prompt. Message acceptance is not effect verification.
+            if(!PostMessage(hwnd,WmClose,IntPtr.Zero,IntPtr.Zero))
+                return Done(WindowManageCode.NATIVE_FAILURE,before,Observe(hwnd),Marshal.GetLastPInvokeError());
+            for(int attempt=0;attempt<30;attempt++)
+            {
+                var state=WindowCatalog.ResolveId(id,session,out _);
+                if(state==WindowResolveCode.STALE_WINDOW)
+                    return Done(WindowManageCode.COMPLETED,before,effect:WindowEffectState.EFFECT_VERIFIED);
+                if(state!=WindowResolveCode.OK)break;
+                Thread.Sleep(25);
+            }
+            return Done(WindowManageCode.EFFECT_UNKNOWN,before,Observe(hwnd),
+                effect:WindowEffectState.EFFECT_UNKNOWN);
+        }
         bool ok=action switch
         {
             WindowManageAction.ACTIVATE=>SetForegroundWindow(hwnd),

@@ -29,7 +29,7 @@ public sealed class FileTools
             Offset:offset, Length:length, ExpectedVersion:expected_version), cancellationToken);
 
     [McpServerTool(Name="windows.file_write",UseStructuredContent=true),
-     Description("Native staged file upload BEGIN/APPEND/COMMIT/ABORT/STATUS with stable operation_id, SHA-256, same-volume atomic replacement and durable readback.")]
+     Description("WRITE_ATOMIC writes up to 16 KiB of base64 in one call; larger files use BEGIN/APPEND/COMMIT. Supply stable operation_id (GUID N format). STATUS recovers lost replies. CAS replacement requires expected_version and original_sha256.")]
     public static async Task<FileWriteReply> Write(FileWriteAction action,string path,string operation_id,
         long? expected_bytes=null,string? expected_sha256=null,
         FileOverwritePolicy overwrite_policy=FileOverwritePolicy.FAIL_IF_EXISTS,
@@ -39,6 +39,31 @@ public sealed class FileTools
     {
         var request=new FileWriteRequest(action,path,operation_id,execution_context,expected_bytes,
             expected_sha256,overwrite_policy,expected_version,original_sha256,offset,data_base64,chunk_sha256);
+        if(action==FileWriteAction.WRITE_ATOMIC)
+        {
+            if(!NativeFileWriter.TryInlineSteps(request,out var steps,out var error))
+                return new(error,operation_id,execution_context,Stage:"VALIDATE",
+                    ObservedAt:DateTimeOffset.UtcNow);
+            FileWriteReply? result=null;
+            foreach(var step in steps)
+            {
+                result=await WriteStep(step,cancellationToken);
+                // A retry of the same operation_id may have committed before
+                // its response was lost. Never upload or commit twice.
+                if(result.Status==FileWriteCode.COMMITTED ||
+                    step.Action!=FileWriteAction.COMMIT && result.Status!=FileWriteCode.STAGED)
+                    return result;
+            }
+            return result!;
+        }
+        return await WriteStep(request,cancellationToken);
+    }
+
+    private static async Task<FileWriteReply> WriteStep(FileWriteRequest request,
+        CancellationToken cancellationToken)
+    {
+        string operation_id=request.OperationId;
+        var execution_context=request.ExecutionContext;
         if(!NativeFileWriter.Valid(request))return new(FileWriteCode.INVALID_ARGUMENT,operation_id,execution_context,
             Stage:"VALIDATE",ObservedAt:DateTimeOffset.UtcNow);
         if(execution_context==CommandContext.SYSTEM)
