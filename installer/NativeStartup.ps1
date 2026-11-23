@@ -49,8 +49,13 @@ function Get-ExpectedTunnels {
         $plain=[Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($entry.path),$null,[Security.Cryptography.DataProtectionScope]::LocalMachine)
         try{
             $cred=[Text.Encoding]::UTF8.GetString($plain)|ConvertFrom-Json
-            $id=if($cred.profile_id){[string]$cred.profile_id}else{'primary'}
-            $port=if($cred.health_port){[int]$cred.health_port}else{8080}
+            # Legacy primary credentials contain only version/tunnel_id/runtime_key.
+            # StrictMode throws on absent PSCustomObject properties, so distinguish
+            # missing optional fields from explicit invalid values.
+            $profileProperty=$cred.PSObject.Properties['profile_id']
+            $portProperty=$cred.PSObject.Properties['health_port']
+            $id=if($null -eq $profileProperty){'primary'}else{[string]$profileProperty.Value}
+            $port=if($null -eq $portProperty){8080}else{[int]$portProperty.Value}
             if($cred.version -ne 1 -or $id -cne $entry.id -or $cred.tunnel_id -cnotmatch '^tunnel_[0-9a-f]{32}$' -or
                 [string]::IsNullOrWhiteSpace([string]$cred.runtime_key) -or $port -lt 1024 -or $port -gt 65535 -or
                 ($id -eq 'primary') -ne ($port -eq 8080) -or $ids.ContainsKey($id) -or $tunnels.ContainsKey($cred.tunnel_id) -or $ports.ContainsKey($port)){
