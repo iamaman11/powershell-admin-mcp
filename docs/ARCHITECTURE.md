@@ -34,8 +34,13 @@ frontend, not a separate permanent browser manager. No extra HTTP API.
    `Browser.windowId` mapping. Multiple contexts within that **same verified
    browser window** do not make its window identity ambiguous; tabs are
    selected by `Browser.getWindowForTarget` window ID, never by URL or context
-   alone. Zero matching window IDs yield `CDP_TARGET_NOT_FOUND`; multiple
-   matching window IDs yield `CDP_TARGET_AMBIGUOUS`. Neither condition dispatches a
+   alone. When overlapping/maximized Chrome windows contain the same titled
+   page, an on-demand **isolated and bounded** UIA snapshot of the selected
+   window's real tab-strip siblings must supply a page title belonging to
+   exactly one candidate CDP browser window. Mixed, truncated, absent or
+   contradictory evidence fails closed; no page contents or title fingerprints
+   are logged. Zero matching window IDs yield `CDP_TARGET_NOT_FOUND`; unresolved
+   multiple window IDs yield `CDP_TARGET_AMBIGUOUS`. Neither condition dispatches a
    UI effect, invents a foreground/profile match, or revokes native Chrome
    consent. A successful dispatch does not prove the postcondition.
 3. `EFFECT_UNKNOWN` is not retryable. A read-only probe or a command demonstrably
