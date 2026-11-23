@@ -32,6 +32,8 @@ internal static partial class WindowChromeCdp
     private static readonly Dictionary<string, string> AttachedTabs = new(StringComparer.Ordinal);
     private static bool TabConnected => _tabSocket?.State == WebSocketState.Open && _tabSession is not null;
     private static bool _hadConnection;
+    private static string? _sessionGeneration;
+    internal static string? CurrentGeneration => _sessionGeneration;
     private static ChromeConnectionFailureReason? _lastFailure;
     private static ChromeConnectionFailureReason? _lastLossReason;
 
@@ -80,6 +82,7 @@ internal static partial class WindowChromeCdp
         _tabEndpoint = null;
         _tabSocket?.Dispose();
         _tabSocket = null;
+        _sessionGeneration = null;
     }
 
     private static void CancelPendingConnection()
@@ -156,6 +159,8 @@ internal static partial class WindowChromeCdp
     private static ChromeConnectionState ConnectionState(Uri endpoint, bool request,
         IntPtr consentWindow, bool retry = false)
     {
+        if (!WindowChromeBroker.IsDedicatedWorker)
+            return ChromeConnectionState.CONNECTION_FAILED;
         if (!TabConnected && _tabSession is not null)
         {
             _lastFailure ??= ChromeConnectionFailureReason.SOCKET_CLOSED;
@@ -178,6 +183,7 @@ internal static partial class WindowChromeCdp
                 _tabSocket = socket;
                 _tabEndpoint = endpoint;
                 _tabSession = new Session(socket, CancellationToken.None);
+                _sessionGeneration = Guid.NewGuid().ToString("N");
                 _hadConnection = true;
                 _lastFailure = null;
                 return ChromeConnectionState.CONNECTED;
@@ -252,7 +258,8 @@ internal static partial class WindowChromeCdp
         };
         return new(ChromeConnectionCode.OK, state, next, profile,
             FailureReason: state == ChromeConnectionState.CONNECTED ? null : _lastFailure,
-            LastLossReason: _lastLossReason);
+            LastLossReason: _lastLossReason,
+            SessionGeneration: state == ChromeConnectionState.CONNECTED ? _sessionGeneration : null);
     }
 
     internal static bool ValidTargetId(string? id) => id is { Length: >= 16 and <= 64 } &&
@@ -649,7 +656,7 @@ internal static partial class WindowChromeCdp
                 return new(WindowInspectCode.CDP_CONTEXT_MISMATCH, [], Detail: "PROFILE_NOT_VERIFIED");
             for (int attempt = 0; attempt < 2; attempt++)
             {
-                var connection = ConnectionState(endpoint!, request: true, hwnd);
+                var connection = ConnectionState(endpoint!, request: false, hwnd);
                 if (connection == ChromeConnectionState.CONSENT_PENDING)
                     return new(WindowInspectCode.CDP_CONSENT_PENDING, [], Detail: "ALLOW_CHROME_PROMPT");
                 if (connection != ChromeConnectionState.CONNECTED)
@@ -712,7 +719,18 @@ internal static partial class WindowChromeCdp
                 NextOffset: tabs.Count > offset + page.Length ? offset + page.Length : null,
                 Tabs: page);
         }
-        var selected = tabs.SingleOrDefault(t => string.Equals(t.Id, tabId, StringComparison.Ordinal));
+        TabTarget? selected;
+        if (tabId is null)
+        {
+            // No preliminary TABS enumeration: resolve only the caller's
+            // explicitly addressed domain/URL, never expose other targets.
+            var matching = tabs.Where(t => MatchesContext(t.Url, expectedOrigin, expectedUrl))
+                .Take(2).ToArray();
+            if (matching.Length == 0) return new(WindowInspectCode.CDP_TARGET_NOT_FOUND, []);
+            if (matching.Length != 1) return new(WindowInspectCode.CDP_TARGET_AMBIGUOUS, []);
+            selected = matching[0];
+        }
+        else selected = tabs.SingleOrDefault(t => string.Equals(t.Id, tabId, StringComparison.Ordinal));
         if (selected is null) return new(WindowInspectCode.CDP_TARGET_NOT_FOUND, []);
         if (!MatchesContext(selected.Url, expectedOrigin, expectedUrl))
             return new(WindowInspectCode.CDP_CONTEXT_MISMATCH, [], Detail: "TAB_URL_MISMATCH");
@@ -743,9 +761,13 @@ internal static partial class WindowChromeCdp
                 "", true, false, password,
                 backend > 0 ? ["CDP"] : [], token));
         }
+        var selectedAddress = new Uri(selected.Url);
         return new(WindowInspectCode.COMPLETED, [.. elements], more,
             ElementRefExpiresUtc: DateTimeOffset.FromUnixTimeMilliseconds(stamp).AddSeconds(30),
-            NextOffset: more ? offset + elements.Count : null);
+            NextOffset: more ? offset + elements.Count : null,
+            Tabs: [new WindowTab(selected.Id, selected.Title,
+                selectedAddress.GetLeftPart(UriPartial.Path),
+                selectedAddress.GetLeftPart(UriPartial.Authority))]);
     }
 
     private static string RoleName(string role) => role switch
@@ -958,7 +980,7 @@ internal static partial class WindowChromeCdp
         {
             for (int attempt = 0; attempt < 2; attempt++)
             {
-                var connection = ConnectionState(endpoint!, request: true, hwnd);
+                var connection = ConnectionState(endpoint!, request: false, hwnd);
                 if (connection == ChromeConnectionState.CONSENT_PENDING)
                     return new(WindowActionCode.CDP_CONSENT_PENDING,
                         FailureStage: WindowFailureStage.CDP_CONNECT, Detail: "ALLOW_CHROME_PROMPT");

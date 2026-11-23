@@ -2,6 +2,24 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 
+if (args is ["--chrome-pipe-probe", var probedWindow])
+{
+    var request = new ChromeBrokerRequest(Connection: new(probedWindow,
+        "CI_NO_CHROME", ChromeConnectionAction.STATUS),
+        TraceId: Guid.NewGuid().ToString("N"));
+    var result = await ChromeBrokerPipe.ExchangeAsync(request, CancellationToken.None);
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        owner_pid = result?.OwnerPid,
+        state = result?.Connection?.State.ToString(),
+        trace_verified = result?.TraceId == request.TraceId
+    }, PipeWire.Json));
+    Environment.ExitCode = result?.OwnerPid is > 0 &&
+        result.Connection?.State == ChromeConnectionState.NOT_REQUESTED &&
+        result.TraceId == request.TraceId ? 0 : 1;
+    return;
+}
+
 static void Check(bool ok, string label)
 {
     if (!ok) throw new InvalidOperationException("FAIL " + label);
@@ -662,6 +680,11 @@ Check(!WindowInspector.ValidArguments(testWindowId, 16, 50,
     WindowInspector.ValidArguments(testWindowId, 16, 50,
         scope: WindowInspectScope.TAB, tabId: "0123456789abcdef0123456789abcdef",
         expectedProfile: "Valer") &&
+    WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.TAB, expectedProfile: "Valer",
+        expectedOrigin: "https://example.com") &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.TAB, expectedProfile: "Valer") &&
     !WindowInspector.ValidArguments(testWindowId, 16, 50,
         scope: WindowInspectScope.TAB, tabId: "invalid") &&
     !WindowInspector.ValidArguments(testWindowId, 16, 50,
@@ -963,8 +986,9 @@ Check(WindowChromeCdp.ValidTabElementRef(freshTabRef) && WindowAction.Valid(chro
     !WindowAction.Valid(chromeAction with { ExpectedProfile = null }) &&
     new ChromeBrokerRequest(Action: chromeAction).Valid &&
     new ChromeBrokerRequest(Action: chromeUiaAction).Valid &&
-    !new ChromeBrokerRequest(Action: chromeUiaAction with { ExpectedProfile = null }).Valid &&
+    new ChromeBrokerRequest(Action: chromeUiaAction with { ExpectedProfile = null }).Valid &&
     !new ChromeBrokerRequest(Action: chromeAction with { ExpectedProfile = null }).Valid &&
+    !new ChromeBrokerRequest(Action: chromeUiaAction with { ResolveOnly = true }).Valid &&
     new ChromeBrokerRequest(Inspect: new(testWindowId, 16, 50, null, null, 0,
         false, null, null, 0, WindowInspectScope.TABS, ExpectedProfile: "Valer")).Valid &&
     !new ChromeBrokerRequest(Inspect: new(testWindowId, 16, 50, null, null, 0,
@@ -979,6 +1003,63 @@ Check(WindowChromeCdp.ValidTabElementRef(freshTabRef) && WindowAction.Valid(chro
     !WindowChromeBroker.ReplyMatches(new(Action: chromeAction),
         new(Inspect: new(WindowInspectCode.COMPLETED, []))),
     "chrome.browser_bound_broker_reuses_connection_across_profiles");
+string trace = Guid.NewGuid().ToString("N");
+Check(WindowChromeBroker.ReplyMatches(new(Action: chromeAction, TraceId: trace),
+        new(Action: new(WindowActionCode.COMPLETED), TraceId: trace)) &&
+    !WindowChromeBroker.ReplyMatches(new(Action: chromeAction, TraceId: trace),
+        new(Action: new(WindowActionCode.COMPLETED), TraceId: Guid.NewGuid().ToString("N"))) &&
+    new WindowActionResult(WindowActionCode.LOCATOR_TIMEOUT).SafeToRetry,
+    "chrome.trace_identity_and_locator_only_timeout_are_typed");
+using (var brokerStop = new CancellationTokenSource())
+{
+    Task owner = ChromeBrokerPipe.RunOwnerAsync(brokerStop.Token);
+    Check(ChromeBrokerPipe.IsOwner, "chrome.single_user_owner_started_in_existing_process");
+    bool duplicateRejected = false;
+    try { await ChromeBrokerPipe.RunOwnerAsync(brokerStop.Token); }
+    catch (InvalidOperationException e) when (e.Message == "CHROME_BROKER_ALREADY_OWNED")
+    { duplicateRejected = true; }
+    Check(duplicateRejected, "chrome.second_user_owner_denied_by_session_semaphore");
+    var responses = await Task.WhenAll(Enumerable.Range(0, 10).Select(_ =>
+    {
+        var request = new ChromeBrokerRequest(Connection: new(testWindowId,
+            "CI_NO_CHROME", ChromeConnectionAction.STATUS),
+            TraceId: Guid.NewGuid().ToString("N"));
+        return ChromeBrokerPipe.ExchangeAsync(request, CancellationToken.None);
+    }));
+    Check(responses.All(reply => reply?.OwnerPid == Environment.ProcessId &&
+        reply.Connection?.State == ChromeConnectionState.NOT_REQUESTED &&
+        reply.TraceId is { Length: 32 }),
+        "chrome.ten_independent_pipe_requests_share_one_owner_without_consent");
+    var processProbes = await Task.WhenAll(Enumerable.Range(0, 10).Select(async _ =>
+    {
+        string executable = Environment.ProcessPath!;
+        var start = new ProcessStartInfo(executable)
+        {
+            UseShellExecute = false, RedirectStandardOutput = true,
+            CreateNoWindow = true
+        };
+        if (Path.GetFileNameWithoutExtension(executable).Equals("dotnet",
+            StringComparison.OrdinalIgnoreCase))
+            start.ArgumentList.Add(System.Reflection.Assembly.GetExecutingAssembly().Location);
+        start.ArgumentList.Add("--chrome-pipe-probe");
+        start.ArgumentList.Add(testWindowId);
+        using var child = Process.Start(start);
+        if (child is null) return false;
+        Task<string> response = child.StandardOutput.ReadToEndAsync();
+        await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        if (child.ExitCode != 0) return false;
+        using var parsed = System.Text.Json.JsonDocument.Parse(await response);
+        var root = parsed.RootElement;
+        return root.GetProperty("owner_pid").GetInt32() == Environment.ProcessId &&
+            root.GetProperty("state").GetString() == "NOT_REQUESTED" &&
+            root.GetProperty("trace_verified").GetBoolean();
+    }));
+    Check(processProbes.All(ok => ok),
+        "chrome.ten_distinct_frontend_processes_share_one_session_owner");
+    await brokerStop.CancelAsync();
+    await owner;
+    Check(!ChromeBrokerPipe.IsOwner, "chrome.user_owner_shutdown_closes_pipe");
+}
 Check(Enum.GetValues<WindowActionKind>().Where(WindowChromeCdp.PointerAction).ToHashSet().SetEquals(
         [WindowActionKind.CLICK, WindowActionKind.DOUBLE_CLICK, WindowActionKind.RIGHT_CLICK,
          WindowActionKind.INVOKE, WindowActionKind.SELECT,
@@ -1190,16 +1271,19 @@ using (var model = System.Text.Json.JsonDocument.Parse("{\"quad\":[10,20,30,20,3
 }
 var providerFailed = new WindowActionResult(WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT,
     EffectUnknown: true, FailureStage: WindowFailureStage.DISPATCH_UIA,
-    HResult: "80040200", ExceptionType: "COMException", ProviderResponse: "FAIL");
+    HResult: "80040200", ExceptionType: "COMException", ProviderResponse: "FAIL",
+    ExecutionMethod: WindowExecutionMethod.UIA_PATTERN);
 var reconciled = WindowAction.ReconcileObserved(providerFailed, true);
 var unverified = WindowAction.ReconcileObserved(providerFailed, false);
-Check(reconciled.Status == WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT &&
+Check(reconciled.Status == WindowActionCode.EFFECT_VERIFIED_PROVIDER_REJECTED &&
     reconciled.EffectState == WindowEffectState.EFFECT_VERIFIED && !reconciled.EffectUnknown &&
+    reconciled.ProviderOutcome == WindowProviderOutcome.REJECTED && !reconciled.SafeToRetry &&
     reconciled.ExpectedStateObserved == true &&
     reconciled.HResult == providerFailed.HResult &&
     reconciled.FailureStage == WindowFailureStage.DISPATCH_UIA &&
     reconciled.ProviderResponse == providerFailed.ProviderResponse &&
     unverified.EffectState == WindowEffectState.EFFECT_UNKNOWN &&
+    unverified.Status == WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT &&
     unverified.FailureStage == WindowFailureStage.DISPATCH_UIA,
     "windows.provider_error_reconciles_actual_effect_without_retry_or_losing_diagnostics");
 Check(WindowAction.CanFallbackAfterNativeClick(new(WindowActionCode.UIA_UNAVAILABLE,
@@ -1468,6 +1552,16 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             .WaitAsync(TimeSpan.FromSeconds(8));
         Check(located.Status==WindowActionCode.COMPLETED && located.TargetVerified,
             "windows.locator_unique_match_dispatches_only_once");
+        int clicksBeforeResolve = Volatile.Read(ref clickCount);
+        var resolvedOnly = await Task.Run(() => WindowAction.InvokeInWorker(new WindowActionRequest(
+            realWindowId, "locator", WindowActionKind.INVOKE, null,
+            LocatorName: "CI_UIA_DELAYED_READY", LocatorRole: WindowRoleFilter.BUTTON,
+            ResolveOnly: true))).WaitAsync(TimeSpan.FromSeconds(8));
+        Check(resolvedOnly.Status == WindowActionCode.LOCATOR_RESOLVED &&
+            WindowInspector.TryParseElementRef(resolvedOnly.ResolvedElementId, out _) &&
+            WindowInspector.TryParsePath(resolvedOnly.ResolvedElementPath, out _) &&
+            Volatile.Read(ref clickCount) == clicksBeforeResolve,
+            "windows.disposable_locator_resolves_without_dispatching_click");
         var ambiguous=await Task.Run(()=>WindowAction.InvokeInWorker(new WindowActionRequest(
             realWindowId,"locator",WindowActionKind.INVOKE,null,
             LocatorRole:WindowRoleFilter.BUTTON))).WaitAsync(TimeSpan.FromSeconds(8));

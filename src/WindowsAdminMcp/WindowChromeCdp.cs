@@ -81,6 +81,9 @@ internal static partial class WindowChromeCdp
     internal static WindowActionResult? TryDispatch(IntPtr hwnd, AutomationElement target,
         WindowActionRequest request, Stopwatch clock)
     {
+        // Disposable UIA/locator workers cannot initiate Chrome consent or
+        // acquire their own CDP socket, even for a missing expected_profile.
+        if (!WindowChromeBroker.IsDedicatedWorker) return null;
         if (request.Action is not (WindowActionKind.CLICK or WindowActionKind.DOUBLE_CLICK or
             WindowActionKind.RIGHT_CLICK or WindowActionKind.KEY_PRESS or
             WindowActionKind.TYPE_TEXT or WindowActionKind.SET_VALUE) ||
@@ -103,7 +106,8 @@ internal static partial class WindowChromeCdp
             return new(WindowActionCode.CDP_UNAVAILABLE, FailureStage: WindowFailureStage.CDP_CONNECT,
                 Detail: endpointFailure, ElapsedMs: clock.ElapsedMilliseconds);
         }
-        var connection = ConnectionState(endpoint!, request: true, hwnd);
+        // Only windows.chrome_connection(REQUEST) may initiate Chrome consent.
+        var connection = ConnectionState(endpoint!, request: false, hwnd);
         if (connection == ChromeConnectionState.CONSENT_PENDING)
             return new(WindowActionCode.CDP_CONSENT_PENDING,
                 FailureStage: WindowFailureStage.CDP_CONNECT, Detail: "ALLOW_CHROME_PROMPT",
