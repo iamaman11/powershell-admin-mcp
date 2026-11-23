@@ -569,12 +569,13 @@ try{
         $doctor.externalAcceptanceStatus -eq 'NOT_TESTED') 'r6.doctor_operational_ready_despite_historical_reconciliation'
     Assert (@($doctor.checks|Where-Object {$_.component -eq 'Remote' -and $_.status -eq 'NOT_TESTED'}).Count -eq 1) 'r6.doctor_no_false_remote_acceptance'
     if($Performance){
-        $performance=& (Join-Path $PSScriptRoot 'Test-NativePerformance.ps1') -Exe $Exe -DurationSeconds 12 -ClientCount 10 -ExerciseJobs|ConvertFrom-Json
-        Assert ($performance.status -eq 'PASS' -and $performance.clients -eq 10 -and
-            $performance.status_latency.count -ge 100 -and
-            $performance.status_latency.p95_ms -le 500 -and
-            $performance.admission_latency.count -eq 12 -and $performance.cancel_latency.count -eq 12) 'r7.bounded_performance_fixture'
-        Write-Host ('PERFORMANCE_BASELINE='+($performance|ConvertTo-Json -Depth 8 -Compress))
+        # PowerShell is case-insensitive: never shadow the $Performance switch.
+        $perfResult=& (Join-Path $PSScriptRoot 'Test-NativePerformance.ps1') -Exe $Exe -DurationSeconds 12 -ClientCount 10 -ExerciseJobs|ConvertFrom-Json
+        Write-Host ('PERFORMANCE_BASELINE='+($perfResult|ConvertTo-Json -Depth 8 -Compress))
+        Assert ($perfResult.status -eq 'PASS' -and $perfResult.clients -eq 10 -and
+            $perfResult.status_latency.count -ge 100 -and
+            $perfResult.status_latency.p95_ms -le 500 -and
+            $perfResult.admission_latency.count -eq 12 -and $perfResult.cancel_latency.count -eq 12) 'r7.bounded_performance_fixture'
     }
 
 
