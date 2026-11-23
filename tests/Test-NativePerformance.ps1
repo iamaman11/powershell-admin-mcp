@@ -3,6 +3,7 @@
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$Exe,
       [ValidateRange(5,86400)][int]$DurationSeconds=30,
+      [ValidateRange(3,10)][int]$ClientCount=3,
       [switch]$ExerciseJobs)
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
 if($ExerciseJobs -and ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows')){throw 'JOB_EXERCISE_CI_ONLY'}
@@ -87,6 +88,7 @@ function Distribution($values){
     [pscustomobject]@{count=$sorted.Length;min_ms=[Math]::Round($sorted[0],3);
         p50_ms=[Math]::Round($sorted[[int][Math]::Ceiling($sorted.Length*0.50)-1],3);
         p95_ms=[Math]::Round($sorted[[int][Math]::Ceiling($sorted.Length*0.95)-1],3);
+        p99_ms=[Math]::Round($sorted[[int][Math]::Ceiling($sorted.Length*0.99)-1],3);
         max_ms=[Math]::Round($sorted[-1],3)}
 }
 function Resources {
@@ -97,7 +99,7 @@ function Resources {
     }finally{$p.Dispose()}
 }
 try{
-    for($i=0;$i -lt 3;$i++){
+    for($i=0;$i -lt $ClientCount;$i++){
         $watch=[Diagnostics.Stopwatch]::StartNew()
         $p=New-Client
         $sequence++
@@ -168,6 +170,7 @@ try{
             if($x.status -ne 'COMPLETED' -or $x.stdout.Trim() -cne 'perf-idle'){throw 'PERF_IDLE_EXEC_FAILED'}
         }
     }
+    $soakStatusStart=$statusSamples.Count
     $soak=[Diagnostics.Stopwatch]::StartNew()
     do{
         $sequence++;Status-Round $sequence
@@ -180,8 +183,12 @@ try{
     }while($soak.Elapsed.TotalSeconds -lt $DurationSeconds)
     $last=Resources
     $status=Distribution $statusSamples;$admissionStats=Distribution $admission;$cancelStats=Distribution $cancel
-    [pscustomobject]@{status='PASS';scope='LOCAL_RAW_SDK_NOT_REMOTE';clients=3;service_pid=$servicePid;
+    $soakStatusCount=$statusSamples.Count-$soakStatusStart
+    [pscustomobject]@{status='PASS';scope='LOCAL_RAW_SDK_NOT_REMOTE';clients=$ClientCount;service_pid=$servicePid;
         soak_seconds=[Math]::Round($soak.Elapsed.TotalSeconds,3);job_exercise=[bool]$ExerciseJobs;
+        status_rounds=($statusSamples.Count/$ClientCount);
+        soak_status_count=$soakStatusCount;
+        soak_status_throughput_per_sec=[Math]::Round($soakStatusCount/$soak.Elapsed.TotalSeconds,3);
         cold_client_latency=(Distribution $cold);status_latency=$status;admission_latency=$admissionStats;cancel_latency=$cancelStats;
         logs_latency=(Distribution $logs);exec_idle_latency=(Distribution $execIdle);exec_queued_wait=(Distribution $execQueued);
         cancel_phase_samples=$cancelPhases.ToArray();
