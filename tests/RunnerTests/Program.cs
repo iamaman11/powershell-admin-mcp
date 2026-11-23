@@ -856,6 +856,21 @@ Check(WindowInspector.ValidArguments(testWindowId, 16, 50,
         "https://example.com/form?a=1") &&
     !WindowChromeCdp.MatchesContext("https://other.example/form", "https://example.com", null),
     "chrome.explicit_native_profile_origin_and_full_url_scope");
+Check(WindowChromeCdp.IsRequestedTabCandidate("tab-a", "https://example.com/form",
+        null, "https://example.com", null) &&
+    !WindowChromeCdp.IsRequestedTabCandidate("tab-b", "https://other.example/form",
+        null, "https://example.com", null) &&
+    WindowChromeCdp.IsRequestedTabCandidate("tab-a", "https://example.com/form",
+        null, "https://example.com", "https://example.com/form") &&
+    !WindowChromeCdp.IsRequestedTabCandidate("tab-a", "https://example.com/form?other=1",
+        null, null, "https://example.com/form") &&
+    WindowChromeCdp.IsRequestedTabCandidate("tab-a", "https://other.example/form",
+        "tab-a", "https://example.com", null) && // Keep URL mismatch for typed post-selection rejection.
+    !WindowChromeCdp.IsRequestedTabCandidate("tab-b", "https://example.com/form",
+        "tab-a", null, null) &&
+    !WindowChromeCdp.IsRequestedTabCandidate("tab-a", "file:///C:/other.html",
+        "tab-a", null, null),
+    "chrome.exact_target_mapping_skips_other_http_tabs_without_leaking_neighbor_urls");
 Check(WindowInspector.InspectCore(IntPtr.Zero, 1, 20).Status == WindowInspectCode.INVALID_ARGUMENT,
     "windows.inspect_reject_null_hwnd");
 var invalidInspect = await WindowTools.InspectWindow("invalid");
@@ -1147,6 +1162,11 @@ Check(WindowChromeBroker.ReplyMatches(new(Action: chromeAction, TraceId: trace),
         new(Action: new(WindowActionCode.COMPLETED), TraceId: trace)) &&
     !WindowChromeBroker.ReplyMatches(new(Action: chromeAction, TraceId: trace),
         new(Action: new(WindowActionCode.COMPLETED), TraceId: Guid.NewGuid().ToString("N"))) &&
+    WindowChromeBroker.ExchangeTimeoutMs(new(Inspect: new(testWindowId,16,50,null,null,0,
+        false,null,null,0,WindowInspectScope.TAB,ExpectedProfile:"Valer",
+        ExpectedOrigin:"https://example.com")),false) >= 15000 &&
+    WindowChromeBroker.ExchangeTimeoutMs(new(Action:chromeAction),false) >=
+        chromeAction.ObservationTimeoutMs+9000 &&
     new WindowActionResult(WindowActionCode.LOCATOR_TIMEOUT).SafeToRetry,
     "chrome.trace_identity_and_locator_only_timeout_are_typed");
 using (var brokerStop = new CancellationTokenSource())

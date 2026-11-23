@@ -294,6 +294,16 @@ internal static partial class WindowChromeCdp
                 string.Equals(actual!.AbsoluteUri, expected!.AbsoluteUri, StringComparison.Ordinal));
     }
 
+    // Resolve the native Chrome window using its active title *before* this
+    // predicate. Afterwards only address the requested tab or URL; mapping
+    // every unrelated HTTP tab with Browser.getWindowForTarget was O(all tabs)
+    // for even a single exact-origin action and could exhaust the CDP budget.
+    // For an opaque exact tab ID, preserve the later URL-mismatch diagnostic.
+    internal static bool IsRequestedTabCandidate(string id, string url, string? tabId,
+        string? expectedOrigin, string? expectedUrl) =>
+        tabId is not null ? string.Equals(id, tabId, StringComparison.Ordinal) &&
+            TryHttpUri(url, out _) : MatchesContext(url, expectedOrigin, expectedUrl);
+
     // Verify the *native Chrome toolbar* profile button, never page content or
     // an inferred profile from a tab title. A missing/ambiguous button fails closed.
     // Chrome's native accessibility label often appends account details. A
@@ -533,7 +543,8 @@ internal static partial class WindowChromeCdp
     }
 
     private static async Task<List<TabTarget>> TargetsForWindow(Session cdp, IntPtr hwnd,
-        string windowId, CancellationToken cancellationToken)
+        string windowId, CancellationToken cancellationToken, string? expectedOrigin = null,
+        string? expectedUrl = null, string? exactTabId = null)
     {
         if (!GetWindowRect(hwnd, out var rect)) return [];
         string nativeTitle = GetTitle(hwnd);
@@ -618,7 +629,8 @@ internal static partial class WindowChromeCdp
                 CdpWindowMappingState.NOT_FOUND : CdpWindowMappingState.AMBIGUOUS);
 
         var found = new List<TabTarget>();
-        foreach (var page in pages.Where(p => TryHttpUri(p.Url, out _)))
+        foreach (var page in pages.Where(p => IsRequestedTabCandidate(p.Id, p.Url,
+                     exactTabId, expectedOrigin, expectedUrl)))
         {
             if (await WindowId(page.Id) == selected.Value)
                 found.Add(new(page.Id, page.Title, page.Url, selected.Value));
@@ -705,7 +717,8 @@ internal static partial class WindowChromeCdp
         using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(
             TabConnected ? 7500 : 24000));
         var cdp = await TabSessionAsync(endpoint, timeout.Token);
-        var tabs = await TargetsForWindow(cdp, hwnd, windowId, timeout.Token);
+        var tabs = await TargetsForWindow(cdp, hwnd, windowId, timeout.Token,
+            expectedOrigin, expectedUrl, tabId);
         if (scope == WindowInspectScope.TABS)
         {
             tabs = tabs.Where(t => MatchesContext(t.Url, expectedOrigin, expectedUrl)).ToList();
@@ -1020,7 +1033,8 @@ internal static partial class WindowChromeCdp
         try
         {
             var cdp = await TabSessionAsync(endpoint, timeout.Token);
-            var tabs = await TargetsForWindow(cdp, hwnd, request.WindowId, timeout.Token);
+            var tabs = await TargetsForWindow(cdp, hwnd, request.WindowId, timeout.Token,
+                request.ExpectedOrigin, request.ExpectedUrl, target.TargetId);
             var selected = tabs.SingleOrDefault(t => t.Id == target.TargetId);
             if (selected is null) return Rejected(WindowActionCode.CDP_TARGET_AMBIGUOUS);
             if (!MatchesContext(selected.Url, request.ExpectedOrigin, request.ExpectedUrl) ||
