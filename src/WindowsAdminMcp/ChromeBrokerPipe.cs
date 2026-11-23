@@ -36,7 +36,7 @@ internal static class ChromeBrokerPipe
 
     internal static bool IsOwner => Volatile.Read(ref _owner) == 1;
 
-    private static string Name(int sessionId) => $"WindowsAdminMCP.ChromeBroker.s{sessionId}";
+    internal static string Name(int sessionId) => $"WindowsAdminMCP.ChromeBroker.s{sessionId}";
 
     internal static async Task RunOwnerAsync(CancellationToken stop)
     {
@@ -108,9 +108,9 @@ internal static class ChromeBrokerPipe
                         reply with { OwnerPid = Environment.ProcessId }, PipeWire.Json),
                         MaxReplyBytes, timeout.Token);
             }
-            catch (Exception e) when (e is IOException or EndOfStreamException or JsonException or
+            catch (Exception e) when (e is IOException or InvalidDataException or JsonException or
                 OperationCanceledException or InvalidOperationException or ArgumentException)
-            { /* Client abort or invalid frame; no dispatch replay. */ }
+            { /* Client abort or malformed bounded frame; preserve the shared CDP owner. */ }
         }
     }
 
@@ -153,10 +153,10 @@ internal static class ChromeBrokerPipe
             var decoded = JsonSerializer.Deserialize<ChromeBrokerReply>(reply, PipeWire.Json);
             return WindowChromeBroker.ReplyMatches(request, decoded) ? decoded : null;
         }
-        catch (Exception e) when (e is IOException or EndOfStreamException or JsonException or
+        catch (Exception e) when (e is IOException or InvalidDataException or JsonException or
             OperationCanceledException or TimeoutException or InvalidOperationException or
             UnauthorizedAccessException)
-        { return null; }
+        { return null; } // No action replay when a reply or send effect is uncertain.
     }
 
     private static async Task<byte[]> ReadFrameAsync(Stream stream, int limit, CancellationToken stop)
