@@ -9,10 +9,10 @@ using System.Text.Json.Serialization;
 using ModelContextProtocol.Server;
 
 [JsonConverter(typeof(JsonStringEnumConverter<SystemQueryKind>))]
-public enum SystemQueryKind { PROCESSES, SERVICES, NETWORK_INTERFACES, EVENT_LOG, REGISTRY, SCHEDULED_TASKS }
+public enum SystemQueryKind { PROCESSES, SERVICES, NETWORK_INTERFACES, EVENT_LOG, REGISTRY, SCHEDULED_TASKS, TCP_CONNECTIONS }
 
 [JsonConverter(typeof(JsonStringEnumConverter<SystemQueryCode>))]
-public enum SystemQueryCode { COMPLETED, INVALID_ARGUMENT, NOT_FOUND, ACCESS_DENIED, QUERY_FAILED, TIMEOUT, UNSUPPORTED_PLATFORM }
+public enum SystemQueryCode { COMPLETED, INVALID_ARGUMENT, NOT_FOUND, ACCESS_DENIED, QUERY_FAILED, TIMEOUT, UNSUPPORTED_PLATFORM, RESOURCE_LIMIT }
 
 public sealed record SystemProcessInfo(
     [property:JsonPropertyName("pid")] int Pid,
@@ -54,6 +54,7 @@ public sealed record SystemQueryResult(
     [property:JsonPropertyName("events"),JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] SystemEventInfo[]? Events = null,
     [property:JsonPropertyName("registry_entries"),JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] SystemRegistryEntry[]? RegistryEntries = null,
     [property:JsonPropertyName("scheduled_tasks"),JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] SystemScheduledTaskInfo[]? ScheduledTasks = null,
+    [property:JsonPropertyName("tcp_connections"),JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] SystemTcpConnectionInfo[]? TcpConnections = null,
     [property:JsonPropertyName("next_offset"),JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] int? NextOffset = null,
     [property:JsonPropertyName("native_error"),JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] int? NativeError = null,
     [property:JsonPropertyName("elapsed_ms")] long ElapsedMs = 0);
@@ -79,6 +80,8 @@ internal static class SystemSnapshot
                 (serviceName is null || offset==0),
             SystemQueryKind.NETWORK_INTERFACES => NoExtra(eventLog,eventId,registryHive,registryPath,registryView,
                 includeValue,taskFolder) && pid is null && serviceName is null,
+            SystemQueryKind.TCP_CONNECTIONS => NoExtra(eventLog,eventId,registryHive,registryPath,registryView,
+                includeValue,taskFolder) && (pid is null or >0) && serviceName is null,
             SystemQueryKind.EVENT_LOG => pid is null && serviceName is null && eventLog is not null &&
                 Enum.IsDefined(eventLog.Value) && (eventId is null or >=0 and <=65535) &&
                 registryHive is null && registryPath is null && registryView==SystemRegistryView.DEFAULT &&
@@ -227,6 +230,8 @@ internal static class SystemSnapshot
                         registryView,includeValue,pageSize,offset,ct);
                 case SystemQueryKind.SCHEDULED_TASKS:
                     return SystemExtraQueries.Tasks(kind,at,watch,taskFolder??"\\",pageSize,offset,ct);
+                case SystemQueryKind.TCP_CONNECTIONS:
+                    return SystemTcpQueries.Connections(kind,at,watch,pid,pageSize,offset,ct);
                 default:return Result(SystemQueryCode.INVALID_ARGUMENT);
             }
         }
@@ -247,7 +252,7 @@ internal static class SystemSnapshot
 public sealed class SystemTools
 {
     [McpServerTool(Name="windows.system_query",UseStructuredContent=true),
-     Description("Native bounded read-only Windows process, SCM service, network, Event Log, registry and Task Scheduler queries. Exact target or paged list; no PowerShell or second service.")]
+     Description("Native bounded read-only Windows process, SCM service, network interfaces, TCP connections by PID, Event Log, registry and Task Scheduler queries. Exact target or paged list; no PowerShell or second service.")]
     public static Task<SystemQueryResult> Query(SystemQueryKind kind,int? pid=null,
         string? service_name=null,int page_size=50,int offset=0,
         SystemEventLogKind? event_log=null,int? event_id=null,
