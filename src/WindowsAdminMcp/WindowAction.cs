@@ -788,8 +788,9 @@ internal static class WindowAction
         WindowActionResult result)
     {
         if (!WriteAudit(auditId, "RESULT", request, result))
-            return new(WindowActionCode.AUDIT_RESULT_FAILED, AuditId: auditId, EffectUnknown: true);
-        return result with { AuditId = auditId };
+            return new(WindowActionCode.AUDIT_RESULT_FAILED, AuditId: auditId,
+                TraceId: auditId, EffectUnknown: true);
+        return result with { AuditId = auditId, TraceId = result.TraceId ?? auditId };
     }
 
     internal static bool IsChromeWindow(string windowId)
