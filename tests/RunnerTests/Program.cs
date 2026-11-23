@@ -58,6 +58,56 @@ static void Check(bool ok, string label)
         "issue72.system_query_typed_variant_wire_without_command_payload");
 }
 {
+    Check(SystemTcpQueries.NativeLayoutsValid &&
+        SystemTcpQueries.NativePort(0x901f) == 8080 &&
+        SystemTcpQueries.NativePort(0x5000) == 80 &&
+        SystemTcpQueries.NativeScope(0) == 0 &&
+        SystemSnapshot.Valid(SystemQueryKind.TCP_CONNECTIONS,null,null,50,0) &&
+        SystemSnapshot.Valid(SystemQueryKind.TCP_CONNECTIONS,Environment.ProcessId,null,5,10) &&
+        !SystemSnapshot.Valid(SystemQueryKind.TCP_CONNECTIONS,-1,null,5,0) &&
+        !SystemSnapshot.Valid(SystemQueryKind.TCP_CONNECTIONS,null,"ignored",5,0) &&
+        !SystemSnapshot.Valid(SystemQueryKind.TCP_CONNECTIONS,null,null,5,0,
+            eventLog:SystemEventLogKind.APPLICATION),
+        "issue72.tcp_native_layout_endianness_and_discriminated_validation");
+    async Task<bool> ListenerVisible(IPAddress address,SystemTcpFamily family)
+    {
+        var fixture=new TcpListener(address,0);
+        fixture.Start();
+        try
+        {
+            int port=((IPEndPoint)fixture.LocalEndpoint).Port;
+            bool found=false,validResponse=true;
+            for(int attempt=0;attempt<10 && !found;attempt++)
+            {
+                int offset=0;
+                do
+                {
+                    var result=SystemSnapshot.Observe(SystemQueryKind.TCP_CONNECTIONS,
+                        Environment.ProcessId,null,50,offset,CancellationToken.None);
+                    validResponse &= result.Status==SystemQueryCode.COMPLETED &&
+                        result.TcpConnections is {Length:<=50} &&
+                        result.Events is null && result.Processes is null && result.Services is null;
+                    if(!validResponse)break;
+                    found=result.TcpConnections!.Any(c=>c.Pid==(uint)Environment.ProcessId &&
+                        c.Family==family && c.State==SystemTcpState.LISTEN &&
+                        c.LocalAddress==address.ToString() && c.LocalPort==port &&
+                        c.RemoteAddress is null && c.RemotePort is null);
+                    if(found || result.NextOffset is null)break;
+                    offset=result.NextOffset.Value;
+                }while(offset<=1000);
+                if(!found)await Task.Delay(50);
+            }
+            return validResponse && found;
+        }
+        finally {fixture.Stop();}
+    }
+    Check(await ListenerVisible(IPAddress.Loopback,SystemTcpFamily.IPV4),
+        "issue72.native_tcp4_listener_pid_port_state_and_no_remote_leak");
+    if(System.Net.Sockets.Socket.OSSupportsIPv6)
+        Check(await ListenerVisible(IPAddress.IPv6Loopback,SystemTcpFamily.IPV6),
+            "issue72.native_tcp6_listener_pid_port_state_and_no_remote_leak");
+}
+{
     Check(SystemSnapshot.Valid(SystemQueryKind.EVENT_LOG,null,null,5,0,
             eventLog:SystemEventLogKind.APPLICATION,eventId:1000) &&
         SystemSnapshot.Valid(SystemQueryKind.REGISTRY,null,null,5,0,
@@ -1741,7 +1791,10 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
     System.Windows.Forms.Form? ownedForm = null;
     try
     {
-        var created = await ready.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        // This is only the isolated CI fixture's cold WinForms startup budget,
+        // not an action/worker deadline. Hosted Windows can delay first Shown
+        // during unrelated UIA provider initialization.
+        var created = await ready.Task.WaitAsync(TimeSpan.FromSeconds(15));
         ownedForm = created.Form;
         using var current = Process.GetCurrentProcess();
         var realWindowId = WindowCatalog.FormatId(new WindowIdentity(created.Handle.ToInt64(),

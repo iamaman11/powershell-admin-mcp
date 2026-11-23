@@ -17,7 +17,7 @@ are needed for the native operations below.
 | Read binary, text, or a large file exactly | `windows.file_read_chunk` |
 | Create or replace a file atomically | `windows.file_write` |
 | Create, copy, move or delete files and folders | `windows.file_manage` |
-| Read processes, services, adapters, Windows events, registry metadata or scheduled tasks with native typed fields | `windows.system_query` |
+| Read processes, services, adapters, TCP connections with owning PID, Windows events, registry metadata or scheduled tasks with native typed fields | `windows.system_query` |
 | Find a window | `windows.list_windows` |
 | Inspect window controls or Chrome tabs | `windows.inspect_window` |
 | Capture a single covered window | `windows.capture_window` |
@@ -30,9 +30,14 @@ These 17 tools share native Windows identities and typed results. There is no
 arbitrary path, UI-role or administrator-cmdlet allowlist. Windows ACLs, desktop
 sessions, Chrome's permission dialog, and exact resource identity still apply.
 
-`windows.system_query(kind=PROCESSES|SERVICES|NETWORK_INTERFACES|EVENT_LOG|REGISTRY|SCHEDULED_TASKS)`
+`windows.system_query(kind=PROCESSES|SERVICES|NETWORK_INTERFACES|TCP_CONNECTIONS|EVENT_LOG|REGISTRY|SCHEDULED_TASKS)`
 is read-only and uses the MCP frontend's real Windows token. Process ID and
 service name select exact subjects; lists are paged (up to 50 entries per call).
+For `TCP_CONNECTIONS`, `pid` optionally selects the owning process. Each
+IPv4/IPv6 row exposes local/remote endpoint, state and PID; listening endpoints
+omit the meaningless remote address and port. A TCP snapshot is not a stable
+transaction across separate `offset` pages; retry the read-only query if the
+socket table changes materially. No network connection is initiated.
 For `EVENT_LOG`, select `event_log=APPLICATION|SYSTEM|SECURITY` and optionally
 `event_id` (0–65535); results expose event identity, provider, level and time,
 not event messages. The newest events come first and offsets are bounded to 200.

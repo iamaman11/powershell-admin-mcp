@@ -82,7 +82,7 @@ try{
             $chromeTool[0].inputSchema.properties.Contains('activate_window_for_consent')) 'issue72.chrome_consent_foreground_is_explicit_opt_in'
         Assert ($systemQuery.Count -eq 1 -and
             @(@('kind','pid','service_name','page_size','offset','event_log','event_id','registry_hive','registry_path','registry_view','include_value','task_folder')|Where-Object {-not $systemQuery[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
-            @(@('status','kind','processes','services','network_interfaces','events','registry_entries','scheduled_tasks','next_offset','native_error')|Where-Object {-not $systemQuery[0].outputSchema.properties.Contains($_)}).Count -eq 0) 'issue72.native_typed_system_query_catalog'
+            @(@('status','kind','processes','services','network_interfaces','tcp_connections','events','registry_entries','scheduled_tasks','next_offset','native_error')|Where-Object {-not $systemQuery[0].outputSchema.properties.Contains($_)}).Count -eq 0) 'issue72.native_typed_system_query_catalog'
         Assert ($fileWrite.Count -eq 1 -and $locator.Count -eq 1 -and $manage.Count -eq 1 -and
             $actionTool[0].inputSchema.properties.Contains('input_mode') -and
             $locator[0].inputSchema.properties.Contains('input_mode') -and
@@ -165,6 +165,11 @@ try{
         Send $p 49 'tools/call' @{name='windows.system_query';arguments=@{kind='EVENT_LOG';event_log='APPLICATION';registry_hive='USERS'};_meta=$meta}
         $invalidExtra=(Receive $p 49).structuredContent
         Assert ($invalidExtra.status -eq 'INVALID_ARGUMENT') 'issue72.system_query_rejects_mixed_domains'
+        Send $p 50 'tools/call' @{name='windows.system_query';arguments=@{kind='TCP_CONNECTIONS';page_size=5};_meta=$meta}
+        $tcp=(Receive $p 50).structuredContent
+        Assert ($tcp.status -eq 'COMPLETED' -and $tcp.kind -eq 'TCP_CONNECTIONS' -and
+            $tcp.Contains('tcp_connections') -and @($tcp.tcp_connections).Count -le 5 -and
+            -not $tcp.Contains('processes') -and -not $tcp.Contains('events')) 'issue72.windows_tcp_ipv4_ipv6_pid_native_readonly'
         Send $p 43 'tools/call' @{name='powershell_status';arguments=@{include_tunnel_metrics=$true};_meta=$meta}
         $vendor=(Receive $p 43).structuredContent
         Write-Host "ISSUE69_TUNNEL_METRICS_STATUS=$($vendor.tunnel_metrics.status)"
