@@ -131,6 +131,12 @@ internal sealed partial class JobCoordinator
                      request.OriginalVersion!=knownVersion ||
                      !string.Equals(request.OriginalSha256,knownOriginalSha,StringComparison.OrdinalIgnoreCase)))
                     return new(FileReceiptCode.CONFLICT);
+                // A native file-management operation uses the same bounded
+                // identity ledger, with a hash of its complete immutable spec.
+                // File-write STATUS/COMMIT omit Sha256 and remain compatible.
+                if(request.Action!=FileWriteAction.BEGIN && request.Sha256 is not null &&
+                    !string.Equals(request.Sha256,knownSha,StringComparison.OrdinalIgnoreCase))
+                    return new(FileReceiptCode.CONFLICT);
                 if(request.Phase==FileReceiptPhase.PREPARE)
                 {
                     if(state is FileReceiptState.EFFECT_UNKNOWN or FileReceiptState.COMMITTING &&
