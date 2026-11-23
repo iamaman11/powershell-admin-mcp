@@ -411,10 +411,21 @@ internal static class WindowAction
                         : WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(), request,
                             clock, radioInvoke);
                 }
+                WindowActionResult CdpPointerWithNativeFallback()
+                {
+                    var background = WindowChromeCdp.TryDispatch(hwnd, element, request, clock);
+                    if (!WindowPhysicalClick.CanUseNativeFallback(background)) return background!;
+                    return request.Action == WindowActionKind.SCROLL
+                        ? ScrollTarget(hwnd, element, request, clock)
+                        : WindowPhysicalClick.Pointer(hwnd, element, request, clock);
+                }
                 var result = request.Action == WindowActionKind.CLICK
                     ? ClickWithNativeFallback()
                     : request.Action is WindowActionKind.DOUBLE_CLICK or WindowActionKind.RIGHT_CLICK
                     ? WindowPhysicalClick.Click(hwnd,element,request,clock)
+                    : (request.Action is WindowActionKind.HOVER or WindowActionKind.SCROLL) &&
+                      WindowChromeCdp.IsInsideDocument(element)
+                    ? CdpPointerWithNativeFallback()
                     : request.Action == WindowActionKind.SCROLL
                     ? ScrollTarget(hwnd,element,request,clock)
                     : request.Action is WindowActionKind.HOVER or WindowActionKind.DRAG

@@ -1386,6 +1386,18 @@ Check(Enum.GetValues<WindowActionKind>().Where(WindowChromeCdp.PointerAction).To
     !WindowChromeCdp.PointerAction(WindowActionKind.TYPE_TEXT) &&
     !WindowChromeCdp.PointerAction(WindowActionKind.KEY_PRESS),
     "chrome.cdp_all_semantic_pointer_actions_ignore_ax_role_whitelist");
+Check(Enum.GetValues<WindowActionKind>().Where(WindowChromeCdp.CdpPointerAction).ToHashSet().SetEquals(
+        [WindowActionKind.CLICK, WindowActionKind.DOUBLE_CLICK, WindowActionKind.RIGHT_CLICK,
+         WindowActionKind.INVOKE, WindowActionKind.SELECT, WindowActionKind.TOGGLE,
+         WindowActionKind.EXPAND, WindowActionKind.COLLAPSE,
+         WindowActionKind.HOVER, WindowActionKind.SCROLL]) &&
+    WindowChromeCdp.WheelDelta(WindowScrollDirection.UP, 3) == (0, -360) &&
+    WindowChromeCdp.WheelDelta(WindowScrollDirection.DOWN, 3) == (0, 360) &&
+    WindowChromeCdp.WheelDelta(WindowScrollDirection.LEFT, 3) == (-360, 0) &&
+    WindowChromeCdp.WheelDelta(WindowScrollDirection.RIGHT, 3) == (360, 0) &&
+    !WindowChromeCdp.CdpPointerAction(WindowActionKind.DRAG) &&
+    !WindowChromeCdp.CdpPointerAction(WindowActionKind.KEY_PRESS),
+    "chrome.cdp_hover_and_wheel_are_bounded_background_pointer_actions");
 using (var states = System.Text.Json.JsonDocument.Parse("""
     {"nodes":[{"properties":[{"name":"expanded","value":{"value":false}},
                                {"name":"selected","value":{"value":true}},
@@ -2198,6 +2210,21 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             (string)created.Form.Invoke(new Func<string>(() => created.Input.Text)) ==
                 "CI_UIA_UPDATED_VALUE", "windows.physical_fallback_rejects_occluded_edit_before_input");
         var freshButton = freshClickTree.Elements.Single(e => e.Name == "CI_UIA_OWNED_BUTTON");
+        var backgroundHover = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, freshButton.ElementId, WindowActionKind.HOVER,
+                null, freshButton.Path))).WaitAsync(TimeSpan.FromSeconds(5));
+        var backgroundScroll = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, freshButton.ElementId, WindowActionKind.SCROLL,
+                null, freshButton.Path, ScrollDirection: WindowScrollDirection.DOWN,
+                ScrollUnits: 2))).WaitAsync(TimeSpan.FromSeconds(5));
+        Check(backgroundHover.Status == WindowActionCode.FOREGROUND_INPUT_DISALLOWED &&
+            backgroundScroll.Status == WindowActionCode.FOREGROUND_INPUT_DISALLOWED &&
+            backgroundHover.EffectState == WindowEffectState.NO_EFFECT &&
+            backgroundScroll.EffectState == WindowEffectState.NO_EFFECT &&
+            backgroundHover.ProviderOutcome == WindowProviderOutcome.NOT_DISPATCHED &&
+            backgroundScroll.ProviderOutcome == WindowProviderOutcome.NOT_DISPATCHED &&
+            Volatile.Read(ref clickCount) == 1,
+            "windows.background_hover_scroll_reject_physical_input_on_owned_uia_fixture");
         var backgroundClick = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, freshButton.ElementId, WindowActionKind.CLICK,
                 null, freshButton.Path, ExpectedName: "CI_UIA_CLICKED",
