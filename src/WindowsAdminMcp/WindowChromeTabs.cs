@@ -952,6 +952,48 @@ internal static partial class WindowChromeCdp
         WindowActionKind.INVOKE or WindowActionKind.SELECT or
         WindowActionKind.TOGGLE or WindowActionKind.EXPAND or WindowActionKind.COLLAPSE;
 
+    internal static bool CdpPointerAction(WindowActionKind action) =>
+        PointerAction(action) || action is WindowActionKind.HOVER or WindowActionKind.SCROLL;
+
+    internal static (int DeltaX, int DeltaY) WheelDelta(WindowScrollDirection direction, int units) =>
+        direction switch
+        {
+            WindowScrollDirection.UP => (0, -120 * units),
+            WindowScrollDirection.DOWN => (0, 120 * units),
+            WindowScrollDirection.LEFT => (-120 * units, 0),
+            WindowScrollDirection.RIGHT => (120 * units, 0),
+            _ => throw new ArgumentOutOfRangeException(nameof(direction))
+        };
+
+    // One CDP pointer gesture, with all target/viewport/identity checks made
+    // by the caller before this first effectful command. No desktop input.
+    private static async Task DispatchPointer(Session cdp, string sessionId,
+        WindowActionRequest request, double x, double y)
+    {
+        if (request.Action == WindowActionKind.HOVER)
+        {
+            await cdp.Call("Input.dispatchMouseEvent", new { type = "mouseMoved", x, y }, sessionId);
+        }
+        else if (request.Action == WindowActionKind.SCROLL)
+        {
+            var (deltaX, deltaY) = WheelDelta(request.ScrollDirection!.Value, request.ScrollUnits);
+            await cdp.Call("Input.dispatchMouseEvent", new { type = "mouseWheel", x, y,
+                deltaX, deltaY }, sessionId);
+        }
+        else
+        {
+            string button = request.Action == WindowActionKind.RIGHT_CLICK ? "right" : "left";
+            int repeats = request.Action == WindowActionKind.DOUBLE_CLICK ? 2 : 1;
+            for (int click = 1; click <= repeats; click++)
+            {
+                await cdp.Call("Input.dispatchMouseEvent", new { type = "mousePressed", x, y,
+                    button, clickCount = click }, sessionId);
+                await cdp.Call("Input.dispatchMouseEvent", new { type = "mouseReleased", x, y,
+                    button, clickCount = click }, sessionId);
+            }
+        }
+    }
+
     internal static bool? AxActionState(JsonElement node, WindowActionKind action)
     {
         string? property = action switch
@@ -1157,7 +1199,7 @@ internal static partial class WindowChromeCdp
             if (desiredState is not null && stateBefore == desiredState)
                 return Rejected(WindowActionCode.EXPECTED_STATE_ALREADY_TRUE);
             string provider = "CDP_BACKGROUND";
-            if (PointerAction(request.Action))
+            if (CdpPointerAction(request.Action))
             {
                 var box = await cdp.Call("DOM.getBoxModel", new { backendNodeId = target.BackendId }, sessionId);
                 var metrics = await cdp.Call("Page.getLayoutMetrics", new { }, sessionId);
@@ -1179,15 +1221,7 @@ internal static partial class WindowChromeCdp
                     target.TargetId, selected.Url, selected.BrowserWindowId, target.LoaderId);
                 if (checkpoint is not null) return Rejected(checkpoint.Value);
                 dispatched = true;
-                string button=request.Action==WindowActionKind.RIGHT_CLICK?"right":"left";
-                int repeats=request.Action==WindowActionKind.DOUBLE_CLICK?2:1;
-                for(int click=1;click<=repeats;click++)
-                {
-                    await cdp.Call("Input.dispatchMouseEvent", new { type = "mousePressed", x, y,
-                        button, clickCount = click }, sessionId);
-                    await cdp.Call("Input.dispatchMouseEvent", new { type = "mouseReleased", x, y,
-                        button, clickCount = click }, sessionId);
-                }
+                await DispatchPointer(cdp, sessionId, request, x, y);
             }
             else if (request.Action is WindowActionKind.KEY_PRESS or WindowActionKind.TYPE_TEXT or
                      WindowActionKind.SET_VALUE)
