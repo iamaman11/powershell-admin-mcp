@@ -30,7 +30,9 @@ internal sealed record AdminRequest([property: JsonRequired] AdminOperation Oper
     [property: JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] NativeFileRequest? File = null,
     [property: JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] FileWriteRequest? FileWrite = null,
     [property: JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] FileReceiptRequest? FileReceipt = null,
-    [property: JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] FileManageRequest? FileManage = null);
+    [property: JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] FileManageRequest? FileManage = null,
+    [property: JsonPropertyName("trace_timing"), JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingDefault)]
+        bool TraceTiming = false);
 
 [JsonConverter(typeof(JsonStringEnumConverter<CommandContext>))]
 public enum CommandContext { SYSTEM, USER, UNCONFIRMED }
@@ -80,4 +82,29 @@ public sealed record ToolTiming(
     [property:JsonPropertyName("store_wait_ms")] long? StoreWaitMs=null,
     [property:JsonPropertyName("store_ms")] long? StoreMs=null,
     [property:JsonPropertyName("capture_ms")] long? CaptureMs=null,
-    [property:JsonPropertyName("ipc_calls")] int? IpcCalls=null);
+    [property:JsonPropertyName("ipc_calls")] int? IpcCalls=null,
+    [property:JsonPropertyName("transport"), JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)]
+        TransportTrace? Transport=null);
+
+// Metadata only: never include command text, paths, stdout, credentials or window content.
+// Each duration is measured by a monotonic clock within one process; no clocks
+// from different processes/machines are subtracted to manufacture attribution.
+[JsonConverter(typeof(JsonStringEnumConverter<TransportTimingSource>))]
+public enum TransportTimingSource { MONOTONIC_PROCESS_LOCAL }
+
+public sealed record TransportTrace(
+    [property:JsonPropertyName("diagnostics_version")] int DiagnosticsVersion,
+    [property:JsonPropertyName("trace_id")] string TraceId,
+    [property:JsonPropertyName("timing_source")] TransportTimingSource TimingSource,
+    [property:JsonPropertyName("request_bytes")] int? RequestBytes,
+    [property:JsonPropertyName("response_bytes")] int? ResponseBytes,
+    [property:JsonPropertyName("frontend_encode_ms")] double? FrontendEncodeMs,
+    [property:JsonPropertyName("ipc_connect_ms")] double? IpcConnectMs,
+    [property:JsonPropertyName("ipc_write_ms")] double? IpcWriteMs,
+    [property:JsonPropertyName("ipc_read_ms")] double? IpcReadMs,
+    [property:JsonPropertyName("frontend_decode_ms")] double? FrontendDecodeMs,
+    [property:JsonPropertyName("service_read_ms")] double? ServiceReadMs,
+    [property:JsonPropertyName("service_decode_ms")] double? ServiceDecodeMs,
+    [property:JsonPropertyName("service_auth_ms")] double? ServiceAuthMs,
+    [property:JsonPropertyName("service_dispatch_ms")] double? ServiceDispatchMs,
+    [property:JsonPropertyName("frontend_unattributed_ms")] double? FrontendUnattributedMs);
