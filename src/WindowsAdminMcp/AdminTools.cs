@@ -10,7 +10,7 @@ using ModelContextProtocol.Protocol;
 [McpServerToolType]
 public sealed class AdminTools
 {
-    internal static async Task<AdminResponse> Call(AdminRequest request,CancellationToken ct)
+    internal static async Task<AdminResponse> Call(AdminRequest request,CancellationToken ct,bool includeTrace=false)
     {
         string correlation=Guid.NewGuid().ToString("N");
         var started=DateTimeOffset.UtcNow;
@@ -18,11 +18,27 @@ public sealed class AdminTools
         long? scm=null,ipc=null;
         long ipcStarted=0;
         bool sent=false;
+        double? scmPrecise=null,ipcPrecise=null,encodedMs=null,decodedMs=null;
+        int? requestBytes=null,responseBytes=null;
+        PipeWire.PipePhases? phases=null;
+        ServiceTrace? servicePhases=null;
+        TransportTrace? Trace()
+        {
+            if(!includeTrace)return null;
+            double? unattributed=scmPrecise is not null && ipcPrecise is not null &&
+                encodedMs is not null && decodedMs is not null
+                ?Math.Round(Math.Max(0,clock.Elapsed.TotalMilliseconds-
+                    (scmPrecise.Value+ipcPrecise.Value+encodedMs.Value+decodedMs.Value)),3):null;
+            return new(1,correlation,TransportTimingSource.MONOTONIC_PROCESS_LOCAL,
+                requestBytes,responseBytes,encodedMs,phases?.ConnectMs,phases?.WriteMs,
+                phases?.ReadMs,decodedMs,servicePhases?.ReadMs,servicePhases?.DecodeMs,
+                servicePhases?.AuthMs,servicePhases?.DispatchMs,unattributed);
+        }
         ToolTiming Timing(AdminResponse? response=null) => (response?.Job?.Timing??new ToolTiming()) with
         {
             StartedUtc=started,ToolMs=clock.ElapsedMilliseconds,ScmMs=scm,
             IpcMs=ipc??(sent?clock.ElapsedMilliseconds-ipcStarted:null),
-            ServiceMs=response?.ServiceElapsedMs,IpcCalls=sent?1:0
+            ServiceMs=response?.ServiceElapsedMs,IpcCalls=sent?1:0,Transport=Trace()
         };
         AdminResponse Fail(StatusCode code,int? native=null)
         {
@@ -35,12 +51,30 @@ public sealed class AdminTools
         {
             uint pid=ServiceIdentity.RunningProcessId();
             scm=clock.ElapsedMilliseconds;
-            string payload=JsonSerializer.Serialize(request with {TraceId=correlation},PipeWire.Json);
+            scmPrecise=clock.Elapsed.TotalMilliseconds;
+            long encodeStarted=includeTrace?Stopwatch.GetTimestamp():0;
+            string payload=JsonSerializer.Serialize(request with {TraceId=correlation,
+                TraceTiming=includeTrace},PipeWire.Json);
+            if(includeTrace)
+            {
+                encodedMs=Math.Round(Stopwatch.GetElapsedTime(encodeStarted).TotalMilliseconds,3);
+                requestBytes=Encoding.UTF8.GetByteCount(payload);
+            }
             ipcStarted=clock.ElapsedMilliseconds;sent=true;
+            double ipcStartedPrecise=clock.Elapsed.TotalMilliseconds;
+            Action<PipeWire.PipePhases>? observe=includeTrace?value=>phases=value:null;
             string raw=await PipeWire.RoundTripAsync(ServiceIdentity.Pipe,payload,pid,ct,
-                request.Operation is AdminOperation.File or AdminOperation.FileWrite or AdminOperation.FileManage ?35:5);
+                request.Operation is AdminOperation.File or AdminOperation.FileWrite or AdminOperation.FileManage ?35:5,observe);
             ipc=clock.ElapsedMilliseconds-ipcStarted;
+            ipcPrecise=clock.Elapsed.TotalMilliseconds-ipcStartedPrecise;
+            if(includeTrace)responseBytes=Encoding.UTF8.GetByteCount(raw);
+            long decodeStarted=includeTrace?Stopwatch.GetTimestamp():0;
             var reply=JsonSerializer.Deserialize<AdminResponse>(raw,PipeWire.Json);
+            if(includeTrace)
+            {
+                decodedMs=Math.Round(Stopwatch.GetElapsedTime(decodeStarted).TotalMilliseconds,3);
+                servicePhases=reply?.ServiceTrace;
+            }
             if(reply is null || reply.Correlation!=correlation ||
                 (reply.Info?.Status==StatusCode.OK && reply.Info.ServicePid!=pid))
                 return Fail(StatusCode.IPC_PROTOCOL_ERROR);
@@ -66,10 +100,10 @@ public sealed class AdminTools
 
     [McpServerTool(Name="powershell_status",UseStructuredContent=true),
         Description("Service identity; optional typed read-only doctor diagnostics.")]
-    public static async Task<AdminStatus> Status(bool include_diagnostics=false,
+    public static async Task<AdminStatus> Status(bool include_diagnostics=false,bool include_trace=false,
         CancellationToken cancellationToken=default)
     {
-        var reply=await Call(new(AdminOperation.Status),cancellationToken);
+        var reply=await Call(new(AdminOperation.Status),cancellationToken,include_trace);
         var status=reply.Info??new(reply.Code,reply.Correlation);
         using var identity=WindowsIdentity.GetCurrent();
         using var process=Process.GetCurrentProcess();
@@ -94,10 +128,11 @@ public sealed class AdminTools
         [Description("USER default; SYSTEM explicit.")] CommandContext? execution_context=null,
         [Description("Logs require authorization.")] bool include_interrupted_command=false,
         [Description("Serialize jobs; * exclusive.")] string? resource_key=null,
+        bool include_trace=false,
         CancellationToken cancellationToken=default)
     {
         var reply=await Call(new(AdminOperation.Job,action,operation_key,job_id,command,timeout_seconds,working_directory,steps,step_index,expected_completed_steps,state_filter,page_size,before_seq,decision,evidence,retain_days,
-            execution_context??(action==JobAction.submit?DefaultContext():null),IncludeInterruptedCommand:include_interrupted_command,ResourceKey:resource_key),cancellationToken);
+            execution_context??(action==JobAction.submit?DefaultContext():null),IncludeInterruptedCommand:include_interrupted_command,ResourceKey:resource_key),cancellationToken,include_trace);
         return reply.Job??new(reply.Code,reply.Correlation,OperationKey:operation_key);
     }
 
