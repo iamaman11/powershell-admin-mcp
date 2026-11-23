@@ -75,6 +75,49 @@ try{
     $svc=Get-CimInstance Win32_Service -Filter "Name='WindowsAdminMCP'"
     Check ($result.status -eq 'INSTALLED_OFFLINE' -and $svc.StartMode -eq 'Manual' -and $svc.State -eq 'Stopped' -and $svc.StartName -eq 'LocalSystem') 'r6.actual_offline_install'
     Check ((Test-Path (Join-Path $root 'client\tunnel-client-runtime.exe')) -and (Test-Path (Join-Path $root 'native\WindowsAdminMCP.exe')) -and (Test-Path (Join-Path $root '.rollback'))) 'r6.stable_install_paths_and_backup'
+    # The original primary credential predates optional profile_id/health_port
+    # fields. Exercise the real DPAPI reader under StrictMode using a synthetic
+    # key on this isolated CI machine; never use a user's live credential.
+    $tunnelConfig=Join-Path $env:ProgramData 'WindowsAdminMCP'
+    if(Test-Path -LiteralPath $tunnelConfig){throw 'FIXTURE_TUNNEL_CONFIG_EXISTS'}
+    [void][IO.Directory]::CreateDirectory($tunnelConfig)
+    try{
+        $configAcl=Get-Acl -LiteralPath $tunnelConfig
+        $configAcl.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
+        Set-Acl -LiteralPath $tunnelConfig -AclObject $configAcl
+        $credentialFile=Join-Path $tunnelConfig 'tunnel-credential.dpapi'
+        function Write-FixtureCredential($record){
+            $plain=[Text.Encoding]::UTF8.GetBytes(($record|ConvertTo-Json -Compress))
+            try{
+                $cipher=[Security.Cryptography.ProtectedData]::Protect($plain,$null,[Security.Cryptography.DataProtectionScope]::LocalMachine)
+                [IO.File]::WriteAllBytes($credentialFile,$cipher)
+            }finally{[Security.Cryptography.CryptographicOperations]::ZeroMemory($plain)}
+        }
+        $startup=Join-Path $root 'native\NativeStartup.ps1'
+        $legacy=@{version=1;tunnel_id=('tunnel_'+('a'*32));runtime_key='ci-only-test-key'}
+        Write-FixtureCredential $legacy
+        $legacyProfiles=@(& $startup -Action Profiles|ConvertFrom-Json)
+        Check ($legacyProfiles.Count -eq 1 -and $legacyProfiles[0].profile_id -ceq 'primary' -and
+            $legacyProfiles[0].health_port -eq 8080) 'r6.legacy_primary_tunnel_optional_defaults_under_strictmode'
+        $legacyStatus=& $startup -Action Status|ConvertFrom-Json
+        Check ($null -eq $legacyStatus.tunnel_config_error -and
+            @($legacyStatus.tunnel_profiles).Count -eq 1 -and
+            $legacyStatus.tunnel_profiles[0].profile_id -ceq 'primary') 'r6.legacy_primary_tunnel_status_readback'
+        $current=@{version=1;tunnel_id=('tunnel_'+('b'*32));runtime_key='ci-only-test-key';profile_id='primary';health_port=8080}
+        Write-FixtureCredential $current
+        $currentProfiles=@(& $startup -Action Profiles|ConvertFrom-Json)
+        Check ($currentProfiles.Count -eq 1 -and $currentProfiles[0].profile_id -ceq 'primary' -and
+            $currentProfiles[0].health_port -eq 8080) 'r6.current_primary_tunnel_explicit_fields'
+        $current.profile_id=$null
+        Write-FixtureCredential $current
+        $rejected=$false
+        try{& $startup -Action Profiles|Out-Null}catch{
+            if($_.Exception.Message -eq 'TUNNEL_PROFILE_CONFLICT'){$rejected=$true}else{throw}
+        }
+        Check $rejected 'r6.explicit_invalid_profile_not_defaulted'
+    }finally{
+        Remove-Item -LiteralPath $tunnelConfig -Recurse -Force
+    }
     $installedManifest=Get-Content -LiteralPath (Join-Path $root 'manifest.json') -Raw|ConvertFrom-Json
     $installedHelpers=@('native/installer/Install-Native.ps1','native/installer/Update-Native.ps1',
                         'native/installer/NativeFileSwap.ps1','native/installer/VendorLock.Generated.ps1')
