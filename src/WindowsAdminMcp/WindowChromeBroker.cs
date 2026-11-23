@@ -86,9 +86,9 @@ internal static class WindowChromeBroker
     }
 
     internal static async Task<WindowActionResult> InvokeAsync(WindowActionRequest request,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, string? traceId = null)
     {
-        var reply = await RouteAsync(new(Action: request), cancellationToken);
+        var reply = await RouteAsync(new(Action: request), cancellationToken, traceId);
         return reply?.Action is { } action
             ? action with { BrokerOwnerPid = reply.OwnerPid, TraceId = reply.TraceId }
             : new(WindowActionCode.WORKER_FAILED_UNKNOWN_EFFECT,
@@ -97,9 +97,9 @@ internal static class WindowChromeBroker
     }
 
     private static Task<ChromeBrokerReply?> RouteAsync(ChromeBrokerRequest request,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, string? traceId = null)
     {
-        request = request with { TraceId = Guid.NewGuid().ToString("N") };
+        request = request with { TraceId = traceId ?? Guid.NewGuid().ToString("N") };
         return ChromeBrokerPipe.IsOwner
             ? ExchangeOwnedAsync(request, cancellationToken)
             : ChromeBrokerPipe.ExchangeAsync(request, cancellationToken);

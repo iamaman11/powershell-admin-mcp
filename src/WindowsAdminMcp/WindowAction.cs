@@ -779,7 +779,7 @@ internal static class WindowAction
             else return FinalizeAudit(auditId, request, resolved);
         }
         WindowActionResult result = chrome
-            ? await WindowChromeBroker.InvokeAsync(request, cancellationToken)
+            ? await WindowChromeBroker.InvokeAsync(request, cancellationToken, auditId)
             : await RunDisposableWorkerAsync(request, cancellationToken);
         return FinalizeAudit(auditId, request, result);
     }
@@ -888,6 +888,12 @@ internal static class WindowAction
                 component = "WindowsAdminMCP.window_action", audit_id = id, phase,
                 window_hash = windowHash, element_id = req.ElementId,
                 action = req.Action.ToString(), result = result?.Status.ToString(),
+                trace_id = result?.TraceId ?? id,
+                broker_owner_pid = result?.BrokerOwnerPid,
+                session_generation = result?.SessionGeneration,
+                provider_outcome = result?.ProviderOutcome.ToString(),
+                enabled_before = result?.EnabledBefore,
+                safe_to_retry = result?.SafeToRetry,
                 effect_state = result?.EffectState.ToString(),
                 observation_state = result?.ObservationState.ToString(),
                 failure_stage = result?.FailureStage?.ToString(), hresult = result?.HResult,
