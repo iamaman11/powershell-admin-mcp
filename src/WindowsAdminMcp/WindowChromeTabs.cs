@@ -304,6 +304,20 @@ internal static partial class WindowChromeCdp
         tabId is not null ? string.Equals(id, tabId, StringComparison.Ordinal) &&
             TryHttpUri(url, out _) : MatchesContext(url, expectedOrigin, expectedUrl);
 
+    // A live browser socket does not mean a newly navigated page already has a
+    // responsive AX tree. Allow cold address-only targets to settle without
+    // treating their first slow inspection as lost Chrome consent.
+    internal static int InspectTimeoutMs(bool connected, bool exactTabId) =>
+        !connected ? 24000 : exactTabId ? 12000 : 18000;
+
+    internal static string CdpTimeoutDetail(OperationCanceledException failure) =>
+        failure.Data["cdp_method"] is string method && method is
+            ("Target.getTargets" or "Browser.getWindowForTarget" or
+             "Browser.getWindowBounds" or "Target.attachToTarget" or
+             "Page.getFrameTree" or "Accessibility.getFullAXTree" or
+             "Browser.getVersion" or "DOM.getBoxModel")
+            ? "CDP_TIMEOUT_" + method : "CDP_TIMEOUT";
+
     // Verify the *native Chrome toolbar* profile button, never page content or
     // an inferred profile from a tab title. A missing/ambiguous button fails closed.
     // Chrome's native accessibility label often appends account details. A
@@ -666,37 +680,34 @@ internal static partial class WindowChromeCdp
                 return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: "NOT_CHROME");
             if (expectedProfile is not null && !VerifiedChromeProfile(hwnd, expectedProfile))
                 return new(WindowInspectCode.CDP_CONTEXT_MISMATCH, [], Detail: "PROFILE_NOT_VERIFIED");
-            for (int attempt = 0; attempt < 2; attempt++)
+            var connection = ConnectionState(endpoint!, request: false, hwnd);
+            if (connection == ChromeConnectionState.CONSENT_PENDING)
+                return new(WindowInspectCode.CDP_CONSENT_PENDING, [], Detail: "ALLOW_CHROME_PROMPT");
+            if (connection != ChromeConnectionState.CONNECTED)
+                return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: connection.ToString());
+            try
             {
-                var connection = ConnectionState(endpoint!, request: false, hwnd);
-                if (connection == ChromeConnectionState.CONSENT_PENDING)
-                    return new(WindowInspectCode.CDP_CONSENT_PENDING, [], Detail: "ALLOW_CHROME_PROMPT");
-                if (connection != ChromeConnectionState.CONNECTED)
-                    return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: connection.ToString());
-                try
-                {
-                    return InspectTabAsync(endpoint!, hwnd, windowId, scope, tabId, maxElements,
-                        offset, nameFilter, roleFilter, expectedProfile, expectedOrigin, expectedUrl)
-                        .GetAwaiter().GetResult();
-                }
-                catch (CdpWindowMappingException e)
-                {
-                    // No target operation was dispatched. This is a mapping
-                    // failure, not CDP transport loss: keep native consent.
-                    return new(InspectMappingCode(e.State), [], Detail:e.Message);
-                }
-                catch (Exception e) when (e is WebSocketException or IOException or JsonException or
-                    OperationCanceledException or InvalidOperationException or KeyNotFoundException)
-                {
-                    bool transportLost = CdpTransportFailure(e);
-                    ObserveCdpFailure(e);
-                    if (transportLost && attempt == 0) continue; // Read-only retry.
-                    return new(WindowInspectCode.CDP_UNAVAILABLE, [],
-                        Detail: e is InvalidOperationException ? e.Message :
-                            transportLost ? "CDP_TRANSPORT_LOST" : e.GetType().Name);
-                }
+                return InspectTabAsync(endpoint!, hwnd, windowId, scope, tabId, maxElements,
+                    offset, nameFilter, roleFilter, expectedProfile, expectedOrigin, expectedUrl)
+                    .GetAwaiter().GetResult();
             }
-            return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: "CDP_RECONNECT_FAILED");
+            catch (CdpWindowMappingException e)
+            {
+                // A window-mapping failure is not CDP transport loss.
+                return new(InspectMappingCode(e.State), [], Detail:e.Message);
+            }
+            catch (Exception e) when (e is WebSocketException or IOException or JsonException or
+                OperationCanceledException or InvalidOperationException or KeyNotFoundException)
+            {
+                bool transportLost = CdpTransportFailure(e);
+                ObserveCdpFailure(e);
+                // Only explicit REQUEST may reconnect. Preserve the causal
+                // method instead of replacing it with CONNECTION_LOST.
+                return new(WindowInspectCode.CDP_UNAVAILABLE, [],
+                    Detail: e is OperationCanceledException canceled ? CdpTimeoutDetail(canceled) :
+                        e is InvalidOperationException ? e.Message :
+                        transportLost ? "CDP_TRANSPORT_LOST" : e.GetType().Name);
+            }
         }
         catch (Exception e) when (e is WebSocketException or IOException or JsonException or
             OperationCanceledException or InvalidOperationException or KeyNotFoundException or
@@ -704,7 +715,8 @@ internal static partial class WindowChromeCdp
         {
             ObserveCdpFailure(e);
             return new(WindowInspectCode.CDP_UNAVAILABLE,
-                [], Detail: e is InvalidOperationException ? e.Message : e is WebSocketException ws
+                [], Detail: e is OperationCanceledException canceled ? CdpTimeoutDetail(canceled) :
+                    e is InvalidOperationException ? e.Message : e is WebSocketException ws
                     ? $"CDP_WEBSOCKET_{ws.WebSocketErrorCode}" : e.GetType().Name);
         }
     }
@@ -715,7 +727,7 @@ internal static partial class WindowChromeCdp
         string? expectedProfile, string? expectedOrigin, string? expectedUrl)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(
-            TabConnected ? 7500 : 24000));
+            InspectTimeoutMs(TabConnected, tabId is not null)));
         var cdp = await TabSessionAsync(endpoint, timeout.Token);
         var tabs = await TargetsForWindow(cdp, hwnd, windowId, timeout.Token,
             expectedOrigin, expectedUrl, tabId);

@@ -871,6 +871,17 @@ Check(WindowChromeCdp.IsRequestedTabCandidate("tab-a", "https://example.com/form
     !WindowChromeCdp.IsRequestedTabCandidate("tab-a", "file:///C:/other.html",
         "tab-a", null, null),
     "chrome.exact_target_mapping_skips_other_http_tabs_without_leaking_neighbor_urls");
+var axTimeout = new OperationCanceledException();
+axTimeout.Data["cdp_method"] = "Accessibility.getFullAXTree";
+var unsafeMethodTimeout = new OperationCanceledException();
+unsafeMethodTimeout.Data["cdp_method"] = "https://private.example/?token=secret";
+Check(WindowChromeCdp.InspectTimeoutMs(true,false) == 18000 &&
+    WindowChromeCdp.InspectTimeoutMs(true,true) == 12000 &&
+    WindowChromeCdp.InspectTimeoutMs(false,true) == 24000 &&
+    WindowChromeCdp.CdpTimeoutDetail(axTimeout) ==
+        "CDP_TIMEOUT_Accessibility.getFullAXTree" &&
+    WindowChromeCdp.CdpTimeoutDetail(unsafeMethodTimeout) == "CDP_TIMEOUT",
+    "chrome.cold_target_readiness_and_redacted_cdp_method_timeout");
 Check(WindowInspector.InspectCore(IntPtr.Zero, 1, 20).Status == WindowInspectCode.INVALID_ARGUMENT,
     "windows.inspect_reject_null_hwnd");
 var invalidInspect = await WindowTools.InspectWindow("invalid");
@@ -1164,7 +1175,7 @@ Check(WindowChromeBroker.ReplyMatches(new(Action: chromeAction, TraceId: trace),
         new(Action: new(WindowActionCode.COMPLETED), TraceId: Guid.NewGuid().ToString("N"))) &&
     WindowChromeBroker.ExchangeTimeoutMs(new(Inspect: new(testWindowId,16,50,null,null,0,
         false,null,null,0,WindowInspectScope.TAB,ExpectedProfile:"Valer",
-        ExpectedOrigin:"https://example.com")),false) >= 15000 &&
+        ExpectedOrigin:"https://example.com")),false) >= 24000 &&
     WindowChromeBroker.ExchangeTimeoutMs(new(Action:chromeAction),false) >=
         chromeAction.ObservationTimeoutMs+9000 &&
     new WindowActionResult(WindowActionCode.LOCATOR_TIMEOUT).SafeToRetry,
