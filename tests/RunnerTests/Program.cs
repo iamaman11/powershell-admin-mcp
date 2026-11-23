@@ -441,7 +441,7 @@ if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("GITHUB_A
             byte[] bytes=System.Text.Encoding.UTF8.GetBytes("copy + move 🌍");
             File.WriteAllBytes(source,bytes);
             var stat=await NativeFileReader.ExecuteAsync(new(NativeFileAction.STAT,source,
-                CommandContext.USER,IncludeSha256:true));
+                CommandContext.USER,IncludeSha256:true),CancellationToken.None);
             var copy=Request(FileManageAction.COPY,source,Path.Combine(folder.Path,"copy.bin"),
                 version:stat.Info!.Version,hash:stat.Info.Sha256);
             Check((await Execute(owner,copy)).Status==FileManageCode.COMPLETED &&
@@ -467,10 +467,10 @@ if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("GITHUB_A
                 !File.Exists(delete.Path) &&
                 (await Execute(owner,delete with {ReadOnly=true})).Status==FileManageCode.COMPLETED,
                 "filemanage.delete_file_and_durable_readback");
-            string tree=Path.Combine(root,"tree");
-            Directory.CreateDirectory(Path.Combine(tree,"child"));
-            File.WriteAllBytes(Path.Combine(tree,"child","payload.bin"),bytes);
-            var treeCopy=Request(FileManageAction.COPY,tree,Path.Combine(root,"tree-copy"),true);
+            string fileTreeRoot=Path.Combine(root,"tree");
+            Directory.CreateDirectory(Path.Combine(fileTreeRoot,"child"));
+            File.WriteAllBytes(Path.Combine(fileTreeRoot,"child","payload.bin"),bytes);
+            var treeCopy=Request(FileManageAction.COPY,fileTreeRoot,Path.Combine(root,"tree-copy"),true);
             Check((await Execute(owner,treeCopy)).Status==FileManageCode.COMPLETED &&
                 File.ReadAllBytes(Path.Combine(treeCopy.Destination!,"child","payload.bin"))
                     .SequenceEqual(bytes),"filemanage.recursive_directory_copy_atomic_visibility");
