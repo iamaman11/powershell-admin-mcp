@@ -69,7 +69,10 @@ public sealed class FileTools
         if(execution_context==CommandContext.SYSTEM)
         {
             var response=await AdminTools.Call(new(AdminOperation.FileWrite,FileWrite:request),cancellationToken);
-            return response.FileWrite??new(FileWriteCode.SERVICE_UNAVAILABLE,operation_id,execution_context,
+            // IPC can fail *after* SCM received COMMIT. Missing typed receipt
+            // never proves NO_EFFECT, even if the transport says unavailable.
+            return response.FileWrite??new(FileWriteCode.EFFECT_UNKNOWN,operation_id,execution_context,
+                EffectState:WindowEffectState.EFFECT_UNKNOWN,
                 Stage:"TRANSPORT",ObservedAt:DateTimeOffset.UtcNow);
         }
         var status=await AdminTools.Status(cancellationToken:cancellationToken);

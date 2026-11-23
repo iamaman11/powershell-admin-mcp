@@ -838,7 +838,8 @@ Check(WindowChromeCdp.ValidTabElementRef(freshTabRef) && WindowAction.Valid(chro
         new(Inspect: new(WindowInspectCode.COMPLETED, []))),
     "chrome.browser_bound_broker_reuses_connection_across_profiles");
 Check(Enum.GetValues<WindowActionKind>().Where(WindowChromeCdp.PointerAction).ToHashSet().SetEquals(
-        [WindowActionKind.CLICK, WindowActionKind.INVOKE, WindowActionKind.SELECT,
+        [WindowActionKind.CLICK, WindowActionKind.DOUBLE_CLICK, WindowActionKind.RIGHT_CLICK,
+         WindowActionKind.INVOKE, WindowActionKind.SELECT,
          WindowActionKind.TOGGLE, WindowActionKind.EXPAND, WindowActionKind.COLLAPSE]) &&
     !WindowChromeCdp.PointerAction(WindowActionKind.SET_VALUE) &&
     !WindowChromeCdp.PointerAction(WindowActionKind.TYPE_TEXT) &&
