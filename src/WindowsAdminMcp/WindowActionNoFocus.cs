@@ -28,6 +28,13 @@ internal static class WindowActionNoFocus
     private const int ExpandCollapsePatternId = 10005;
     private const int UiaElementNotEnabled = unchecked((int)0x80040200);
 
+    // Do not report a stale/disabled *snapshot* when the provider rejected
+    // dispatch after a fresh IsEnabled=true read. The effect remains unknown.
+    internal static WindowActionCode ProviderErrorCode(int hresult) =>
+        hresult == UiaElementNotEnabled
+            ? WindowActionCode.UIA_ELEMENTNOTENABLED_UNKNOWN_EFFECT
+            : WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT;
+
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int SetAutoFocus(IntPtr self, int enabled);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
@@ -149,7 +156,7 @@ internal static class WindowActionNoFocus
                 changedDuringPreparation ? "FOREGROUND_PREPARE" :
                 changedDuringAction ? "FOREGROUND_ACTION" : null;
             return result < 0
-                ? new(WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT, EffectUnknown: true,
+                ? new(ProviderErrorCode(result), EffectUnknown: true,
                     ForegroundChanged: changed, Detail: (result == UiaElementNotEnabled
                         ? "UIA_E_ELEMENTNOTENABLED:" : "") + result.ToString("X8") +
                         (focusDetail is null ? "" : ":" + focusDetail),

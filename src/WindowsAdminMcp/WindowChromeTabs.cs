@@ -311,6 +311,26 @@ internal static partial class WindowChromeCdp
                 string.Equals(actual!.AbsoluteUri, expected!.AbsoluteUri, StringComparison.Ordinal));
     }
 
+    // Target.getTargetInfo is a second, just-before-dispatch readback. A page
+    // may navigate between the AX snapshot and a DOM hit-test/focus request.
+    // The original URL is part of the element fingerprint, even when the
+    // caller intentionally selected by origin rather than by exact URL.
+    internal static bool MatchesDispatchTarget(JsonElement response, string targetId,
+        string snapshotUrl, string? expectedOrigin, string? expectedUrl)
+    {
+        if (response.ValueKind != JsonValueKind.Object ||
+            !response.TryGetProperty("targetInfo", out var info) ||
+            info.ValueKind != JsonValueKind.Object ||
+            !info.TryGetProperty("targetId", out var id) || id.ValueKind != JsonValueKind.String ||
+            !info.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.String ||
+            !info.TryGetProperty("url", out var url) || url.ValueKind != JsonValueKind.String)
+            return false;
+        string? actualUrl = url.GetString();
+        return id.GetString() == targetId && type.GetString() == "page" &&
+            string.Equals(actualUrl, snapshotUrl, StringComparison.Ordinal) &&
+            MatchesContext(actualUrl!, expectedOrigin, expectedUrl);
+    }
+
     // Resolve the native Chrome window using its active title *before* this
     // predicate. Afterwards only address the requested tab or URL; mapping
     // every unrelated HTTP tab with Browser.getWindowForTarget was O(all tabs)
@@ -1053,6 +1073,35 @@ internal static partial class WindowChromeCdp
         result.Status == WindowActionCode.CDP_UNAVAILABLE && !result.EffectUnknown &&
         result.ExecutionMethod is null && !connected;
 
+    // Keep the final readback close to the *first* effectful CDP command.
+    // This cannot make a remote navigation atomic with dispatch, but it
+    // rejects a tab move, URL change, new loader, or replaced native window
+    // that occurs during earlier, potentially slow DOM/AX preparation.
+    private static async Task<WindowActionCode?> DispatchCheckpoint(Session cdp,
+        string sessionId, IntPtr hwnd, WindowActionRequest request, string targetId,
+        string snapshotUrl, int browserWindowId, string loaderId)
+    {
+        using var self = Process.GetCurrentProcess();
+        if (WindowCatalog.ResolveId(request.WindowId, self.SessionId, out var current) !=
+            WindowResolveCode.OK || current != hwnd)
+            return WindowActionCode.STALE_WINDOW;
+        if (request.ExpectedProfile is null ||
+            !VerifiedChromeProfile(hwnd, request.ExpectedProfile))
+            return WindowActionCode.CDP_CONTEXT_MISMATCH;
+        var info = await cdp.Call("Target.getTargetInfo", new { targetId });
+        if (!MatchesDispatchTarget(info, targetId, snapshotUrl,
+            request.ExpectedOrigin, request.ExpectedUrl))
+            return WindowActionCode.CDP_CONTEXT_MISMATCH;
+        var owner = await cdp.Call("Browser.getWindowForTarget", new { targetId });
+        if (!owner.TryGetProperty("windowId", out var windowId) ||
+            windowId.ValueKind != JsonValueKind.Number ||
+            !windowId.TryGetInt32(out int actualWindowId) ||
+            actualWindowId != browserWindowId)
+            return WindowActionCode.CDP_CONTEXT_MISMATCH;
+        return await Loader(cdp, sessionId) == loaderId
+            ? null : WindowActionCode.STALE_ELEMENT;
+    }
+
     private static async Task<WindowActionResult> InvokeTabAsync(Uri endpoint, IntPtr hwnd,
         WindowActionRequest request, TabElementRef target, Stopwatch clock)
     {
@@ -1126,6 +1175,9 @@ internal static partial class WindowChromeCdp
                 }, sessionId);
                 if (!hit.GetProperty("result").TryGetProperty("value", out var ok) ||
                     ok.ValueKind != JsonValueKind.True) return Rejected(WindowActionCode.TARGET_OCCLUDED);
+                var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
+                    target.TargetId, selected.Url, selected.BrowserWindowId, target.LoaderId);
+                if (checkpoint is not null) return Rejected(checkpoint.Value);
                 dispatched = true;
                 string button=request.Action==WindowActionKind.RIGHT_CLICK?"right":"left";
                 int repeats=request.Action==WindowActionKind.DOUBLE_CLICK?2:1;
@@ -1143,10 +1195,16 @@ internal static partial class WindowChromeCdp
                 if ((request.Action is WindowActionKind.TYPE_TEXT or WindowActionKind.SET_VALUE) &&
                     !await EditableDomNode(cdp, sessionId, target.BackendId))
                     return Rejected(WindowActionCode.UNSUPPORTED_ACTION);
+                var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
+                    target.TargetId, selected.Url, selected.BrowserWindowId, target.LoaderId);
+                if (checkpoint is not null) return Rejected(checkpoint.Value);
+                // DOM.focus itself can fire web events. Once requested, any
+                // transport failure has an unknown effect, even if no key or
+                // text command has been issued yet; never retry it blindly.
+                dispatched = true;
                 await cdp.Call("DOM.focus", new { backendNodeId = target.BackendId }, sessionId);
                 if (request.Action is WindowActionKind.TYPE_TEXT or WindowActionKind.SET_VALUE)
                 {
-                    dispatched = true;
                     await ReplaceFocusedText(cdp, sessionId, request.Value!);
                 }
                 else
@@ -1158,7 +1216,6 @@ internal static partial class WindowChromeCdp
                         WindowKey.ESCAPE => ("Escape", "Escape", 27, ""),
                         _ => throw new InvalidOperationException("INVALID_KEY")
                     };
-                    dispatched = true;
                     await cdp.Call("Input.dispatchKeyEvent", new { type = "keyDown", key, code,
                         windowsVirtualKeyCode = vk, text = value }, sessionId);
                     await cdp.Call("Input.dispatchKeyEvent", new { type = "keyUp", key, code,

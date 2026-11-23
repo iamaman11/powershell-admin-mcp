@@ -42,7 +42,16 @@ frontend, not a separate permanent browser manager. No extra HTTP API.
    are logged. Zero matching window IDs yield `CDP_TARGET_NOT_FOUND`; unresolved
    multiple window IDs yield `CDP_TARGET_AMBIGUOUS`. Neither condition dispatches a
    UI effect, invents a foreground/profile match, or revokes native Chrome
-   consent. A successful dispatch does not prove the postcondition.
+   consent. Just before `Input.dispatch*` or the potentially effectful
+   `DOM.focus`, a second CDP checkpoint checks native HWND/PID/session,
+   profile, target ID/URL, browser window ID and main-frame loader ID. A
+   changed snapshot fails closed without input; a failure after `DOM.focus`
+   is an unknown effect and cannot be replayed. This narrows the race window,
+   but does not claim that navigation and remote dispatch are atomic. For
+   native UIA, `0x80040200` after a fresh enabled snapshot is reported as
+   `UIA_ELEMENTNOTENABLED_UNKNOWN_EFFECT`, including the HRESULT and method;
+   it is not mistaken for a verified disabled control or a retryable failure.
+   A successful dispatch does not prove the postcondition.
 3. `EFFECT_UNKNOWN` is not retryable. A read-only probe or a command demonstrably
    rejected **before dispatch** can be retried within a bounded budget.
 4. An update is an exact CI artifact tied to a commit. Trial installation keeps
