@@ -1,5 +1,8 @@
 using System.Buffers.Binary;
+using System.ComponentModel;
+using System.Diagnostics;
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 
 // The existing interactive TunnelHost owns this USER-session endpoint. Independent
@@ -11,7 +14,25 @@ internal static class ChromeBrokerPipe
     private const int MaxClients = 8;
     private const int MaxRequestBytes = 32_768;
     private const int MaxReplyBytes = 262_144;
+    private const uint TokenQuery = 0x0008;
+    private const int TokenElevationClass = 20;
     private static int _owner;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetNamedPipeClientProcessId(
+        Microsoft.Win32.SafeHandles.SafePipeHandle pipe, out uint processId);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool OpenProcessToken(IntPtr process, uint access,
+        out Microsoft.Win32.SafeHandles.SafeAccessTokenHandle token);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetTokenInformation(
+        Microsoft.Win32.SafeHandles.SafeAccessTokenHandle token, int informationClass,
+        out int elevation, int length, out int actualLength);
 
     internal static bool IsOwner => Volatile.Read(ref _owner) == 1;
 
@@ -75,6 +96,9 @@ internal static class ChromeBrokerPipe
             timeout.CancelAfter(TimeSpan.FromSeconds(60));
             try
             {
+                // Same SID alone is insufficient: a non-elevated application
+                // of the same user must not borrow the admin frontend's rights.
+                if (!AuthorizedClient(pipe)) return;
                 byte[] input = await ReadFrameAsync(pipe, MaxRequestBytes, timeout.Token);
                 var request = JsonSerializer.Deserialize<ChromeBrokerRequest>(input, PipeWire.Json);
                 if (request is null || !request.Valid) return;
@@ -88,6 +112,27 @@ internal static class ChromeBrokerPipe
                 OperationCanceledException or InvalidOperationException or ArgumentException)
             { /* Client abort or invalid frame; no dispatch replay. */ }
         }
+    }
+
+    private static bool AuthorizedClient(NamedPipeServerStream pipe)
+    {
+        if (!GetNamedPipeClientProcessId(pipe.SafePipeHandle, out uint pid) || pid == 0 ||
+            pid > int.MaxValue) return false;
+        try
+        {
+            using var self = Process.GetCurrentProcess();
+            using var client = Process.GetProcessById((int)pid);
+            if (client.SessionId != self.SessionId ||
+                !string.Equals(client.MainModule?.FileName, self.MainModule?.FileName,
+                    StringComparison.OrdinalIgnoreCase)) return false;
+            if (!OpenProcessToken(client.Handle, TokenQuery, out var token)) return false;
+            using (token)
+                return GetTokenInformation(token, TokenElevationClass, out int elevated,
+                    sizeof(int), out int size) && size == sizeof(int) && elevated != 0;
+        }
+        catch (Exception e) when (e is Win32Exception or ArgumentException or
+            InvalidOperationException or UnauthorizedAccessException or
+            System.Security.SecurityException) { return false; }
     }
 
     internal static async Task<ChromeBrokerReply?> ExchangeAsync(ChromeBrokerRequest request,

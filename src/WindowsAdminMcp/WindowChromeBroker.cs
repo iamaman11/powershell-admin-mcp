@@ -187,7 +187,7 @@ internal static class WindowChromeBroker
                     _lastConnectedBinding = binding;
                 }
                 _firstExchange = false;
-                return reply with { TraceId = request.TraceId };
+                return reply! with { TraceId = request.TraceId };
             }
             catch (Exception e) when (e is IOException or OperationCanceledException or
                 InvalidOperationException or JsonException)
@@ -272,7 +272,7 @@ internal static class WindowChromeBroker
                             : new(Action: InvokeBoundAction(request.Action!));
                     }
                     reply = reply with { TraceId = request?.TraceId,
-                        Inspect = reply.Inspect is { } inspect ? inspect with
+                        Inspect = reply.Inspect is { } inspectedReply ? inspectedReply with
                             { SessionGeneration = WindowChromeCdp.CurrentGeneration } : null,
                         Action = reply.Action is { } action ? action with
                             { SessionGeneration = WindowChromeCdp.CurrentGeneration } : null };

@@ -985,6 +985,13 @@ Check(WindowChromeCdp.ValidTabElementRef(freshTabRef) && WindowAction.Valid(chro
     !WindowChromeBroker.ReplyMatches(new(Action: chromeAction),
         new(Inspect: new(WindowInspectCode.COMPLETED, []))),
     "chrome.browser_bound_broker_reuses_connection_across_profiles");
+string trace = Guid.NewGuid().ToString("N");
+Check(WindowChromeBroker.ReplyMatches(new(Action: chromeAction, TraceId: trace),
+        new(Action: new(WindowActionCode.COMPLETED), TraceId: trace)) &&
+    !WindowChromeBroker.ReplyMatches(new(Action: chromeAction, TraceId: trace),
+        new(Action: new(WindowActionCode.COMPLETED), TraceId: Guid.NewGuid().ToString("N"))) &&
+    new WindowActionResult(WindowActionCode.LOCATOR_TIMEOUT).SafeToRetry,
+    "chrome.trace_identity_and_locator_only_timeout_are_typed");
 using (var brokerStop = new CancellationTokenSource())
 {
     Task owner = ChromeBrokerPipe.RunOwnerAsync(brokerStop.Token);
