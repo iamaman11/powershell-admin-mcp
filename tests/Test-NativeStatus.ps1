@@ -115,7 +115,8 @@ try{
             $actionTool[0].outputSchema.properties.Contains('execution_method') -and
             $actionTool[0].outputSchema.properties.Contains('failure_stage') -and
             $actionTool[0].outputSchema.properties.Contains('hresult')) 'r5.typed_uia_effect_and_diagnostics_fields'
-        Assert ($statusTool.Count -eq 1 -and $statusTool[0].inputSchema.properties.Contains('include_diagnostics') -and
+        Assert ($statusTool.Count -eq 1 -and $statusTool[0].inputSchema.properties.Contains('include_trace') -and
+            $statusTool[0].inputSchema.properties.Contains('include_diagnostics') -and
             $statusTool[0].outputSchema.properties.Contains('diagnostics')) 'r5.optional_typed_doctor_without_new_tool'
         $schemaBytes=[Text.Encoding]::UTF8.GetByteCount(($list|ConvertTo-Json -Depth 30 -Compress))
         Write-Host "MCP_TOOLS_LIST_BYTES=$schemaBytes"
@@ -128,6 +129,17 @@ try{
         Assert ($v.frontend.pid -eq $p.Id -and $v.frontend.sid -eq $caller.User.Value -and
             $v.frontend.session_id -eq $p.SessionId -and $v.command_context -in @('SYSTEM','UNCONFIRMED') -and
             $v.versions.mcp_version -eq '0.8.1-dev' -and $v.versions.store_schema -eq 4 -and $v.timing.ipc_ms -ge 0) 'hardening.separate_frontend_and_runner_identity'
+        Send $p 42 'tools/call' @{name='powershell_status';arguments=@{include_trace=$true};_meta=$meta}
+        $traced=(Receive $p 42).structuredContent
+        $t=$traced.timing.transport
+        Assert ($traced.status -eq 'OK' -and $t.diagnostics_version -eq 1 -and
+            $t.trace_id -ceq $traced.correlation_id -and $t.timing_source -ceq 'MONOTONIC_PROCESS_LOCAL' -and
+            $t.request_bytes -gt 0 -and $t.response_bytes -gt 0 -and
+            $t.ipc_connect_ms -ge 0 -and $t.ipc_write_ms -ge 0 -and $t.ipc_read_ms -ge 0 -and
+            $t.frontend_encode_ms -ge 0 -and $t.frontend_decode_ms -ge 0 -and
+            $t.service_read_ms -ge 0 -and $t.service_decode_ms -ge 0 -and
+            $t.service_auth_ms -ge 0 -and $t.service_dispatch_ms -ge 0 -and
+            $t.frontend_unattributed_ms -ge 0) 'issue69.trace_typed_process_local_stages'
     }
     if($SmokeOnly){
         Write-Host 'R1_TYPED_MCP_SMOKE=PASS (three clients; SCM and schema; cleanup follows)'

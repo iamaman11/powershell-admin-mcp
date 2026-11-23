@@ -71,7 +71,9 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                 deadline.CancelAfter(TimeSpan.FromSeconds(3));
                 var clock=Stopwatch.StartNew();
                 string input = await PipeWire.ReadFrameAsync(pipe, deadline.Token);
+                double readMs=clock.Elapsed.TotalMilliseconds;
                 var request = JsonSerializer.Deserialize<AdminRequest>(input, PipeWire.Json);
+                double decodedMs=clock.Elapsed.TotalMilliseconds;
                 if(request?.TraceId is {} trace && Guid.TryParseExact(trace,"N",out _))correlation=trace;
                 bool allowed = false;
                 string? callerSid=null, logonSid=null;
@@ -96,6 +98,7 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                         }
                     }
                 });
+                double authorizedMs=clock.Elapsed.TotalMilliseconds;
                 UserSession? user=null;
                 if(allowed && callerSid is not null && callerSid!="S-1-5-18" && logonSid is not null &&
                     GetNamedPipeClientSessionId(pipe.SafePipeHandle,out uint clientSession) && clientSession is >0 and <=int.MaxValue)
@@ -280,7 +283,13 @@ internal sealed class AdminService(ILogger<AdminService> logger, JobCoordinator 
                     }
                     else response = new(StatusCode.IPC_PROTOCOL_ERROR, correlation);
                 }
-                response=response with {ServiceElapsedMs=clock.ElapsedMilliseconds};
+                double dispatchedMs=clock.Elapsed.TotalMilliseconds;
+                response=response with {ServiceElapsedMs=clock.ElapsedMilliseconds,
+                    ServiceTrace=request?.TraceTiming==true ? new ServiceTrace(
+                        Math.Round(readMs,3),
+                        Math.Round(Math.Max(0,decodedMs-readMs),3),
+                        Math.Round(Math.Max(0,authorizedMs-decodedMs),3),
+                        Math.Round(Math.Max(0,dispatchedMs-authorizedMs),3)) : null};
                 await PipeWire.WriteFrameAsync(pipe, JsonSerializer.Serialize(response, PipeWire.Json), deadline.Token);
                 if(clock.ElapsedMilliseconds>250)
                     logger.LogWarning("Slow IPC {Correlation} status {Status} elapsed_ms {Elapsed}",correlation,response.Code,clock.ElapsedMilliseconds);

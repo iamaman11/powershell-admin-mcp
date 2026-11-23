@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 using System.Security.Principal;
@@ -8,6 +9,7 @@ using System.Text.Json.Serialization;
 
 internal static class PipeWire
 {
+    internal sealed record PipePhases(double ConnectMs,double WriteMs,double ReadMs);
     internal static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
@@ -37,8 +39,9 @@ internal static class PipeWire
 
 
     internal static async Task<string> RoundTripAsync(string name, string payload, uint expectedServerPid,
-        CancellationToken token, int timeoutSeconds = 5)
+        CancellationToken token, int timeoutSeconds = 5,Action<PipePhases>? observe=null)
     {
+        long started=observe is null ? 0 : Stopwatch.GetTimestamp();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
         using var pipe = new NamedPipeClientStream(".", name, PipeDirection.InOut,
@@ -46,8 +49,19 @@ internal static class PipeWire
         await pipe.ConnectAsync(deadline.Token);
         if (!GetNamedPipeServerProcessId(pipe.SafePipeHandle, out uint actualPid) || actualPid != expectedServerPid)
             throw new UnauthorizedAccessException("Named pipe server process does not match expected SCM process");
+        long connected=observe is null ? 0 : Stopwatch.GetTimestamp();
         await WriteFrameAsync(pipe, payload, deadline.Token);
-        return await ReadFrameAsync(pipe, deadline.Token);
+        long written=observe is null ? 0 : Stopwatch.GetTimestamp();
+        string reply=await ReadFrameAsync(pipe, deadline.Token);
+        if(observe is not null)
+        {
+            long received=Stopwatch.GetTimestamp();
+            observe(new PipePhases(
+                Math.Round(Stopwatch.GetElapsedTime(started,connected).TotalMilliseconds,3),
+                Math.Round(Stopwatch.GetElapsedTime(connected,written).TotalMilliseconds,3),
+                Math.Round(Stopwatch.GetElapsedTime(written,received).TotalMilliseconds,3)));
+        }
+        return reply;
     }
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

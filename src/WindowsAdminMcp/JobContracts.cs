@@ -80,7 +80,12 @@ internal sealed record AdminResponse(StatusCode Code, string Correlation, AdminS
     [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] NativeFileReply? File = null,
     [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] FileWriteReply? FileWrite = null,
     [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] FileReceiptReply? FileReceipt = null,
-    [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] FileManageReply? FileManage = null);
+    [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] FileManageReply? FileManage = null,
+    [property:JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] ServiceTrace? ServiceTrace = null);
+
+// These stages are measured only inside the SCM owner, never inferred from
+// frontend wall time. Internal IPC-only DTO; no command or result payloads.
+internal sealed record ServiceTrace(double ReadMs, double DecodeMs, double AuthMs, double DispatchMs);
 
 [JsonConverter(typeof(JsonStringEnumConverter<QueueWaitReason>))]
 public enum QueueWaitReason { USER_UNAVAILABLE, RECOVERY_HOLD, RESOURCE_PRESSURE, RESOURCE_BUSY, READY_OR_EARLIER_JOB }
