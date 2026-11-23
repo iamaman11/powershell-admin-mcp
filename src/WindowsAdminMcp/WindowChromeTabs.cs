@@ -450,21 +450,21 @@ internal static partial class WindowChromeCdp
             !string.IsNullOrWhiteSpace(contextId);
     }
 
-    // The CDP TargetInfo.browserContextId is optional for ordinary profile tabs.
-    // Preserve its absence as null, never silently conflate it with a nonempty
-    // context and never infer a native HWND from a shared Chrome process/URL.
-    // Matching title + native/CDP bounds must still select exactly one pair.
-    internal static (int WindowId, string? ContextId)? UniqueWindowContext(
+    // Browser.getWindowForTarget yields the Chrome window identity. Targets in
+    // one window may expose different optional browserContextId values; the
+    // context is not the HWND identity and cannot make one window ambiguous.
+    // Reject duplicate *window IDs* after native title + bounds validation.
+    internal static int? UniqueWindowId(
         IEnumerable<(int WindowId, string? ContextId)> candidates) =>
-        UniqueWindowContext(candidates, out _);
+        UniqueWindowId(candidates, out _);
 
-    internal static (int WindowId, string? ContextId)? UniqueWindowContext(
+    internal static int? UniqueWindowId(
         IEnumerable<(int WindowId, string? ContextId)> candidates, out int distinctCount)
     {
         var unique = candidates.Where(c => c.WindowId > 0 &&
                 (c.ContextId is null || c.ContextId is { Length: >= 1 and <= 512 } &&
                     !string.IsNullOrWhiteSpace(c.ContextId)))
-            .Distinct().Take(2).ToArray();
+            .Select(c => c.WindowId).Distinct().Take(2).ToArray();
         distinctCount = unique.Length;
         return unique.Length == 1 ? unique[0] : null;
     }
@@ -520,19 +520,19 @@ internal static partial class WindowChromeCdp
             if (boundsMatch) titleMatches.Add((browserWindowId, page.ContextId));
         }
 
-        // Title + bounds + Chrome context must agree. Do not guess from focus,
-        // URL alone, or an overlapping window belonging to another profile.
-        var selected = UniqueWindowContext(titleMatches, out int distinctCount);
+        // A native, profile-verified HWND must match exactly one CDP window.
+        // Distinct TargetInfo contexts are allowed *within that same window*;
+        // multiple CDP window IDs (even at identical bounds) are not guessed.
+        var selected = UniqueWindowId(titleMatches, out int distinctCount);
         if (selected is null)
             throw new CdpWindowMappingException(distinctCount == 0 ?
                 CdpWindowMappingState.NOT_FOUND : CdpWindowMappingState.AMBIGUOUS);
 
         var found = new List<TabTarget>();
-        foreach (var page in pages.Where(p => p.ContextId == selected.Value.ContextId &&
-                     TryHttpUri(p.Url, out _)))
+        foreach (var page in pages.Where(p => TryHttpUri(p.Url, out _)))
         {
-            if (await WindowId(page.Id) == selected.Value.WindowId)
-                found.Add(new(page.Id, page.Title, page.Url, selected.Value.WindowId));
+            if (await WindowId(page.Id) == selected.Value)
+                found.Add(new(page.Id, page.Title, page.Url, selected.Value));
         }
         return found;
     }
