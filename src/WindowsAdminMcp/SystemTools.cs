@@ -235,7 +235,7 @@ internal static class SystemSnapshot
             SystemQueryCode.ACCESS_DENIED:SystemQueryCode.QUERY_FAILED,e.HResult);}
         catch(COMException e) {return Result(e.HResult==unchecked((int)0x80070005)?
             SystemQueryCode.ACCESS_DENIED:SystemQueryCode.QUERY_FAILED,e.HResult);}
-        catch(TimeoutException) {return Result(SystemQueryCode.TIMEOUT);}
+        catch(System.TimeoutException) {return Result(SystemQueryCode.TIMEOUT);}
         catch(UnauthorizedAccessException) {return Result(SystemQueryCode.ACCESS_DENIED);}
         catch(SecurityException) {return Result(SystemQueryCode.ACCESS_DENIED);}
         catch(Exception e) when(e is InvalidOperationException or NetworkInformationException or IOException or ArgumentException)
