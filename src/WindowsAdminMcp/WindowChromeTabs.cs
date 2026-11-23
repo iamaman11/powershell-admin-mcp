@@ -40,6 +40,21 @@ internal static partial class WindowChromeCdp
     internal static ChromeConnectionState MissingConnectionState(bool hadConnection) =>
         hadConnection ? ChromeConnectionState.CONNECTION_LOST : ChromeConnectionState.NOT_REQUESTED;
 
+    internal static ChromeConnectionNextAction ConnectionNextAction(ChromeConnectionState state,
+        ChromeConnectionFailureReason? reason) => state switch
+        {
+            ChromeConnectionState.CONNECTED or ChromeConnectionState.DISCONNECTED =>
+                ChromeConnectionNextAction.NONE,
+            ChromeConnectionState.CONSENT_PENDING => ChromeConnectionNextAction.ALLOW_CHROME_PROMPT,
+            ChromeConnectionState.CONSENT_WINDOW_UNAVAILABLE =>
+                ChromeConnectionNextAction.SHOW_CHROME_FOR_CONSENT,
+            _ when reason is ChromeConnectionFailureReason.FOREGROUND_DENIED or
+                ChromeConnectionFailureReason.WINDOW_MINIMIZED or
+                ChromeConnectionFailureReason.WINDOW_HIDDEN =>
+                ChromeConnectionNextAction.SHOW_CHROME_FOR_CONSENT,
+            _ => ChromeConnectionNextAction.RETRY_CONNECTION
+        };
+
     internal static bool CdpTransportFailure(Exception e) => e is
         WebSocketException or IOException or OperationCanceledException or JsonException ||
         e is InvalidOperationException { Message: "CDP_SOCKET_CLOSED" };
@@ -103,7 +118,7 @@ internal static partial class WindowChromeCdp
     // Chrome displays the per-connection dialog in its last-active window.
     // Select the verified native window immediately before the handshake;
     // once authorized, all tab operations remain background-only.
-    private static bool PrepareConsentWindow(IntPtr hwnd,
+    private static bool PrepareConsentWindow(IntPtr hwnd, bool allowActivation,
         out ChromeConnectionFailureReason failure)
     {
         failure = ChromeConnectionFailureReason.FOREGROUND_DENIED;
@@ -114,6 +129,11 @@ internal static partial class WindowChromeCdp
         }
         if (IsIconic(hwnd))
         {
+            if (!allowActivation)
+            {
+                failure = ChromeConnectionFailureReason.WINDOW_MINIMIZED;
+                return false;
+            }
             _ = ShowWindowAsync(hwnd, 9); // SW_RESTORE on Chrome's own UI thread
             if (!SpinWait.SpinUntil(() => !IsIconic(hwnd), 1500))
             {
@@ -123,6 +143,7 @@ internal static partial class WindowChromeCdp
         }
         if (GetForegroundWindow() != hwnd)
         {
+            if (!allowActivation) return false;
             _ = SetForegroundWindow(hwnd);
             if (!SpinWait.SpinUntil(() => GetForegroundWindow() == hwnd, 750))
             {
@@ -157,7 +178,7 @@ internal static partial class WindowChromeCdp
     }
 
     private static ChromeConnectionState ConnectionState(Uri endpoint, bool request,
-        IntPtr consentWindow, bool retry = false)
+        IntPtr consentWindow, bool retry = false, bool activateWindowForConsent = false)
     {
         if (!WindowChromeBroker.IsDedicatedWorker)
             return ChromeConnectionState.CONNECTION_FAILED;
@@ -197,7 +218,7 @@ internal static partial class WindowChromeCdp
             if (!retry) return failure;
         }
         if (!request) return MissingConnectionState(_hadConnection);
-        if (!PrepareConsentWindow(consentWindow, out var activationFailure))
+        if (!PrepareConsentWindow(consentWindow, activateWindowForConsent, out var activationFailure))
         {
             _lastFailure = activationFailure;
             return ChromeConnectionState.CONSENT_WINDOW_UNAVAILABLE;
@@ -237,7 +258,7 @@ internal static partial class WindowChromeCdp
                 if (_hadConnection && _lastLossReason is null)
                     _lastLossReason = ChromeConnectionFailureReason.SOCKET_CLOSED;
                 return new(ChromeConnectionCode.OK, MissingConnectionState(_hadConnection),
-                    ChromeConnectionNextAction.RETRY_CONNECTION, profile,
+                    ConnectionNextAction(MissingConnectionState(_hadConnection), _lastFailure), profile,
                     FailureReason: _lastFailure ?? (_hadConnection
                         ? ChromeConnectionFailureReason.SOCKET_CLOSED : null),
                     LastLossReason: _lastLossReason);
@@ -249,13 +270,9 @@ internal static partial class WindowChromeCdp
         if (WindowCatalog.ResolveId(request.WindowId, self.SessionId, out var hwnd) != WindowResolveCode.OK)
             return new(ChromeConnectionCode.STALE_WINDOW, ChromeConnectionState.NOT_REQUESTED);
         var state = ConnectionState(endpoint!, request.Action == ChromeConnectionAction.REQUEST,
-            hwnd, retry: request.Action == ChromeConnectionAction.REQUEST);
-        var next = state switch
-        {
-            ChromeConnectionState.CONSENT_PENDING => ChromeConnectionNextAction.ALLOW_CHROME_PROMPT,
-            ChromeConnectionState.CONNECTED => ChromeConnectionNextAction.NONE,
-            _ => ChromeConnectionNextAction.RETRY_CONNECTION
-        };
+            hwnd, retry: request.Action == ChromeConnectionAction.REQUEST,
+            activateWindowForConsent: request.ActivateWindowForConsent);
+        var next = ConnectionNextAction(state, _lastFailure);
         return new(ChromeConnectionCode.OK, state, next, profile,
             FailureReason: state == ChromeConnectionState.CONNECTED ? null : _lastFailure,
             LastLossReason: _lastLossReason,

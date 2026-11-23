@@ -120,16 +120,24 @@ always means a new action. File receipts share the same 100,000-row and
    can resolve one exact locator and act in a single request.
 3. Choose `INVOKE`, `CLICK`, `DOUBLE_CLICK`, `RIGHT_CLICK`, `SCROLL`, `HOVER`,
    `DRAG`, `KEY_PRESS` or an available semantic pattern. Provide an expected
-   postcondition for verification when possible. The physical pointer is only
-   sent when the actual window and hit target are verified.
+   postcondition for verification when possible. `input_mode=BACKGROUND_ONLY`
+   is the default: CDP and native UIA patterns do not inject OS mouse/keyboard
+   events. A physical-input-only action returns `FOREGROUND_INPUT_DISALLOWED`
+   with `effect_state=NO_EFFECT`. Explicit `input_mode=ALLOW_FOREGROUND_INPUT`
+   permits the existing verified pointer/keyboard path, including its Windows
+   foreground restrictions.
 4. `windows.manage_window(action=CLOSE)` sends graceful `WM_CLOSE`. A successful
    message enqueue is **not** success: `COMPLETED` requires the exact HWND to
    disappear. Applications may show a save prompt; then the effect is unknown.
 
 For Chrome, first use `windows.chrome_connection` with the exact profile and
-window, approve the browser's native dialog, then inspect `scope=TABS` and
-`scope=TAB`. Native CDP works with a covered Chrome window without forcing it
-to the foreground. It does not bypass browser consent.
+window. `REQUEST` does not raise Chrome by default: an already foreground
+window can display the native consent dialog; otherwise it returns
+`CONSENT_WINDOW_UNAVAILABLE` with `SHOW_CHROME_FOR_CONSENT`. Optional
+`activate_window_for_consent=true` explicitly allows a foreground activation
+attempt *for the permission prompt only*. After user consent, inspect
+`scope=TABS` and `scope=TAB`; ordinary CDP actions remain background-only.
+The application never silently approves Chrome permissions.
 
 ## Updates and errors
 

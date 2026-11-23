@@ -24,6 +24,13 @@ internal static class WindowPhysicalClick
         background is null || background.Status == WindowActionCode.CDP_UNAVAILABLE &&
         !background.EffectUnknown && background.FailureStage == WindowFailureStage.CDP_CONNECT;
 
+    internal static bool ForegroundInputAllowed(WindowActionRequest request) =>
+        request.InputMode == WindowInputMode.ALLOW_FOREGROUND_INPUT;
+
+    private static WindowActionResult ForegroundInputDisallowed(Stopwatch clock) =>
+        new(WindowActionCode.FOREGROUND_INPUT_DISALLOWED, Detail: "BACKGROUND_ONLY",
+            ElapsedMs: clock.ElapsedMilliseconds);
+
     private static bool ActivateVerifiedWindow(IntPtr hwnd, AutomationElement target,
         bool focusElement = true)
     {
@@ -90,6 +97,8 @@ internal static class WindowPhysicalClick
             // DevTools connection without stealing desktop focus or mouse position.
             var background = allowCdp ? WindowChromeCdp.TryDispatch(hwnd, target, request, clock) : null;
             if (!CanUseNativeFallback(background)) return background!;
+
+            if (!ForegroundInputAllowed(request)) return ForegroundInputDisallowed(clock);
 
             if (current.IsOffscreen || IsIconic(hwnd) || !IsWindowVisible(hwnd))
                 return new(WindowActionCode.WINDOW_NOT_VISIBLE, ElapsedMs: clock.ElapsedMilliseconds,
@@ -167,6 +176,7 @@ internal static class WindowPhysicalClick
     internal static WindowActionResult Scroll(IntPtr hwnd,AutomationElement target,
         WindowActionRequest request,Stopwatch clock)
     {
+        if (!ForegroundInputAllowed(request)) return ForegroundInputDisallowed(clock);
         var before=GetForegroundWindow();
         if(!IsWindowVisible(hwnd) || IsIconic(hwnd))return new(WindowActionCode.WINDOW_NOT_VISIBLE);
         if(!ActivateVerifiedWindow(hwnd,target,focusElement:false))
@@ -194,6 +204,7 @@ internal static class WindowPhysicalClick
     internal static WindowActionResult Pointer(IntPtr hwnd,AutomationElement target,
         WindowActionRequest request,Stopwatch clock)
     {
+        if (!ForegroundInputAllowed(request)) return ForegroundInputDisallowed(clock);
         var before=GetForegroundWindow();
         if(!IsWindowVisible(hwnd) || IsIconic(hwnd))return new(WindowActionCode.WINDOW_NOT_VISIBLE);
         if(!ActivateVerifiedWindow(hwnd,target,focusElement:false))
@@ -260,6 +271,8 @@ internal static class WindowPhysicalClick
 
             var background = WindowChromeCdp.TryDispatch(hwnd, target, request, clock);
             if (!CanUseNativeFallback(background)) return background!;
+
+            if (!ForegroundInputAllowed(request)) return ForegroundInputDisallowed(clock);
 
             if (!target.Current.IsKeyboardFocusable || target.Current.IsOffscreen ||
                 IsIconic(hwnd) || !IsWindowVisible(hwnd))
@@ -359,6 +372,8 @@ internal static class WindowPhysicalClick
                 var background = WindowChromeCdp.TryDispatch(hwnd, target, request, clock);
                 if (!CanUseNativeFallback(background)) return background!;
             }
+
+            if (!ForegroundInputAllowed(request)) return ForegroundInputDisallowed(clock);
 
             if (!target.Current.IsKeyboardFocusable || target.Current.IsOffscreen ||
                 IsIconic(hwnd) || !IsWindowVisible(hwnd))

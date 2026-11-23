@@ -31,6 +31,11 @@ public enum WindowEffectState { NO_EFFECT, EFFECT_VERIFIED, EFFECT_UNKNOWN }
 [JsonConverter(typeof(JsonStringEnumConverter<WindowExecutionMethod>))]
 public enum WindowExecutionMethod { UIA_PATTERN, WIN32_SENDINPUT, CHROME_CDP }
 
+// Physical desktop input is an explicit opt-in. CDP targets and native UIA
+// patterns may execute without moving the user's cursor or stealing focus.
+[JsonConverter(typeof(JsonStringEnumConverter<WindowInputMode>))]
+public enum WindowInputMode { BACKGROUND_ONLY, ALLOW_FOREGROUND_INPUT }
+
 [JsonConverter(typeof(JsonStringEnumConverter<WindowProviderOutcome>))]
 public enum WindowProviderOutcome { NOT_DISPATCHED, ACKNOWLEDGED, REJECTED, UNKNOWN }
 
@@ -46,6 +51,7 @@ public enum WindowActionCode
     UIA_UNAVAILABLE, AUDIT_UNAVAILABLE, AUDIT_RESULT_FAILED,
     TIMEOUT_UNKNOWN_EFFECT, ACTION_FAILED_UNKNOWN_EFFECT, WORKER_FAILED_UNKNOWN_EFFECT,
     EXPECTED_STATE_ALREADY_TRUE, WINDOW_NOT_VISIBLE, FOREGROUND_UNAVAILABLE,
+    FOREGROUND_INPUT_DISALLOWED,
     CLICK_POINT_UNAVAILABLE, TARGET_OCCLUDED, INPUT_FAILED_UNKNOWN_EFFECT,
     FOCUS_UNAVAILABLE, CDP_UNAVAILABLE, CDP_TARGET_AMBIGUOUS, CDP_CONTEXT_MISMATCH,
     CDP_TARGET_NOT_VISIBLE, CDP_FAILED_UNKNOWN_EFFECT, CDP_CONSENT_PENDING,
@@ -83,7 +89,8 @@ internal sealed record WindowActionRequest(
     [property: JsonPropertyName("locator_automation_id")] string? LocatorAutomationId = null,
     [property: JsonPropertyName("locator_name")] string? LocatorName = null,
     [property: JsonPropertyName("locator_role")] WindowRoleFilter? LocatorRole = null,
-    [property: JsonPropertyName("resolve_only")] bool ResolveOnly = false);
+    [property: JsonPropertyName("resolve_only")] bool ResolveOnly = false,
+    [property: JsonPropertyName("input_mode")] WindowInputMode InputMode = WindowInputMode.BACKGROUND_ONLY);
 
 public sealed record WindowActionResult(
     [property: JsonPropertyName("status")] WindowActionCode Status,
@@ -181,6 +188,7 @@ internal static class WindowAction
         (request.ElementPath is null || uiaRef &&
          WindowInspector.TryParsePath(request.ElementPath, out _)) &&
         Enum.IsDefined(request.Action) &&
+        Enum.IsDefined(request.InputMode) &&
         (request.Action==WindowActionKind.SCROLL ? request.ScrollDirection is not null &&
             Enum.IsDefined(request.ScrollDirection.Value) && request.ScrollUnits is >=1 and <=10 :
             request.ScrollDirection is null && request.ScrollUnits==1) &&
@@ -358,6 +366,13 @@ internal static class WindowAction
                     if (semanticClick == WindowActionKind.INVOKE && PreferPhysicalWebClick(semanticClick,
                         WindowChromeCdp.IsInsideDocument(element)))
                     {
+                        if (request.InputMode == WindowInputMode.BACKGROUND_ONLY)
+                        {
+                            var background = WindowChromeCdp.TryDispatch(hwnd, element, request, clock);
+                            if (!WindowPhysicalClick.CanUseNativeFallback(background)) return background!;
+                            return WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(),
+                                request with { Action = WindowActionKind.INVOKE }, clock);
+                        }
                         var physical = WindowPhysicalClick.Click(hwnd, element, request, clock);
                         if (!CanFallbackToSemanticAfterPhysical(physical)) return physical;
                         return WindowActionNoFocus.Invoke(hwnd, path, element.GetRuntimeId(),
@@ -381,7 +396,8 @@ internal static class WindowAction
                     if (!WindowPhysicalClick.CanUseNativeFallback(browser)) return browser!;
                     // A verified Chrome profile uses real keyboard events so
                     // React receives input/change, unlike provider-only ValuePattern.
-                    if (request.ExpectedProfile is not null)
+                    if (request.ExpectedProfile is not null &&
+                        request.InputMode == WindowInputMode.ALLOW_FOREGROUND_INPUT)
                     {
                         var typed = WindowPhysicalClick.TypeText(hwnd, element, request, clock,
                             allowCdp: false);
@@ -888,7 +904,8 @@ internal static class WindowAction
             {
                 component = "WindowsAdminMCP.window_action", audit_id = id, phase,
                 window_hash = windowHash, element_id = req.ElementId,
-                action = req.Action.ToString(), result = result?.Status.ToString(),
+                action = req.Action.ToString(), input_mode = req.InputMode.ToString(),
+                result = result?.Status.ToString(),
                 trace_id = result?.TraceId ?? id,
                 broker_owner_pid = result?.BrokerOwnerPid,
                 session_generation = result?.SessionGeneration,

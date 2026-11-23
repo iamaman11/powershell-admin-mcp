@@ -142,7 +142,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.invoke_element", UseStructuredContent = true),
-     Description("UIA/Chrome action; fresh element_id.")]
+     Description("UIA/Chrome action; fresh element_id. BACKGROUND_ONLY by default: no OS mouse/keyboard injection or foreground activation. Physical input requires explicit ALLOW_FOREGROUND_INPUT.")]
     public static async Task<WindowActionResult> InvokeElement(string window_id, string element_id,
         WindowActionKind action, string? value = null, bool confirm = true,
         string? element_path = null, string? expected_name = null,
@@ -157,6 +157,7 @@ public sealed class WindowTools
         int? target_x = null, int? target_y = null,
         string? locator_automation_id = null, string? locator_name = null,
         WindowRoleFilter? locator_role = null,
+        WindowInputMode input_mode = WindowInputMode.BACKGROUND_ONLY,
         CancellationToken cancellationToken = default)
     {
         var request = new WindowActionRequest(window_id, element_id, action, value,
@@ -164,7 +165,8 @@ public sealed class WindowTools
             expected_value, expected_profile, expected_origin, expected_url, observation_timeout_ms,
             expected_enabled_name, expected_enabled, virtual_key, ctrl, alt, shift, win,
             scroll_direction, scroll_units, target_x, target_y,
-            locator_automation_id, locator_name, locator_role);
+            locator_automation_id, locator_name, locator_role,
+            InputMode: input_mode);
         if (!WindowAction.Valid(request)) return new(WindowAction.InvalidCode(request));
         if (!confirm) return new(WindowActionCode.CONFIRMATION_REQUIRED);
 
@@ -188,7 +190,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name="windows.invoke_locator",UseStructuredContent=true),
-     Description("Locate exactly one live UIA element by automation_id/name/role and act once, in a bounded disposable worker. Reject missing or ambiguous matches.")]
+     Description("Locate one live UIA element in a disposable worker, then act once via the shared broker. BACKGROUND_ONLY by default; OS mouse/keyboard input requires explicit ALLOW_FOREGROUND_INPUT.")]
     public static Task<WindowActionResult> InvokeLocator(string window_id,WindowActionKind action,
         string? automation_id=null,string? name=null,WindowRoleFilter? role=null,
         string? value=null,bool confirm=true,
@@ -199,6 +201,7 @@ public sealed class WindowTools
         bool ctrl=false,bool alt=false,bool shift=false,bool win=false,
         WindowScrollDirection? scroll_direction=null,int scroll_units=1,
         int? target_x=null,int? target_y=null,
+        WindowInputMode input_mode=WindowInputMode.BACKGROUND_ONLY,
         CancellationToken cancellationToken=default)=>
         InvokeElement(window_id,"locator",action,value,confirm,
             expected_name:expected_name,expected_change:expected_change,key:key,
@@ -208,6 +211,7 @@ public sealed class WindowTools
             scroll_direction:scroll_direction,scroll_units:scroll_units,
             target_x:target_x,target_y:target_y,
             locator_automation_id:automation_id,locator_name:name,locator_role:role,
+            input_mode:input_mode,
             cancellationToken:cancellationToken);
 }
 
