@@ -398,6 +398,112 @@ if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("GITHUB_A
     }
     finally{Directory.Delete(root,recursive:true);}
 }
+// Native file management: all effects are synthetic, with real SQLite owner,
+// exact actor binding and the same replay gate used in the production SCM.
+{
+    string root=Path.Combine(Path.GetTempPath(),"wmcp-file-manage-"+Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    string db=Path.Combine(root,"jobs.db"),actor="S-1-5-21-999-111-222-1001";
+    try
+    {
+        FileManageRequest Request(FileManageAction action,string path,string? dest=null,
+            bool recursive=false,string? version=null,string? hash=null)=>
+            new(action,path,Guid.NewGuid().ToString("N"),CommandContext.USER,dest,
+                recursive,version,hash);
+        async Task<FileManageReply> Execute(JobCoordinator owner,FileManageRequest request)=>
+            await FileManageWorkflow.RunAsync(request,
+                (receipt,_)=>Task.FromResult<FileReceiptReply?>(owner.FileReceipt(receipt,actor)),
+                ct=>Task.FromResult(NativeFileManager.Execute(request,ct)),CancellationToken.None);
+
+        var folder=Request(FileManageAction.MKDIR,Path.Combine(root,"nested","folder"));
+        Check(NativeFileManager.Valid(folder) &&
+            !NativeFileManager.Valid(folder with {Path="relative"}) &&
+            !NativeFileManager.Valid(folder with {OperationId="invalid"}) &&
+            !NativeFileManager.Valid(folder with {Action=(FileManageAction)99}) &&
+            !NativeFileManager.Valid(folder with {Action=FileManageAction.MOVE}) &&
+            !NativeFileManager.Valid(folder with {Recursive=true}),
+            "filemanage.reject_invalid_actions_paths_ids_and_flags");
+        using(var owner=new JobCoordinator(Microsoft.Extensions.Logging.Abstractions.NullLogger<JobCoordinator>.Instance))
+        {
+            owner.Initialize(db);
+            var made=await Execute(owner,folder);
+            Check(made is {Status:FileManageCode.COMPLETED,
+                EffectState:WindowEffectState.EFFECT_VERIFIED,SafeToRetry:false} &&
+                Directory.Exists(folder.Path) &&
+                (await Execute(owner,folder)).Status==FileManageCode.COMPLETED &&
+                (await Execute(owner,folder with {ReadOnly=true})).Status==FileManageCode.COMPLETED,
+                "filemanage.mkdir_nested_verified_and_exactly_once");
+            Check((await Execute(owner,folder with {Action=FileManageAction.DELETE,
+                ReadOnly=true})).Status==FileManageCode.CONFLICT,
+                "filemanage.same_guid_different_action_conflicts_even_on_status");
+
+            string source=Path.Combine(folder.Path,"source.bin");
+            byte[] bytes=System.Text.Encoding.UTF8.GetBytes("copy + move 🌍");
+            File.WriteAllBytes(source,bytes);
+            var stat=await NativeFileReader.ExecuteAsync(new(NativeFileAction.STAT,source,
+                CommandContext.USER,IncludeSha256:true));
+            var copy=Request(FileManageAction.COPY,source,Path.Combine(folder.Path,"copy.bin"),
+                version:stat.Info!.Version,hash:stat.Info.Sha256);
+            Check((await Execute(owner,copy)).Status==FileManageCode.COMPLETED &&
+                File.ReadAllBytes(copy.Destination!).SequenceEqual(bytes) &&
+                File.ReadAllBytes(source).SequenceEqual(bytes) &&
+                (await Execute(owner,copy)).Status==FileManageCode.COMPLETED &&
+                (await Execute(owner,copy with {Destination=source})).Status==FileManageCode.INVALID_ARGUMENT,
+                "filemanage.copy_atomic_cas_and_no_duplicate_effect");
+            var stale=Request(FileManageAction.DELETE,source,version:"stale",hash:stat.Info.Sha256);
+            Check((await Execute(owner,stale)).Status==FileManageCode.SOURCE_CHANGED &&
+                File.Exists(source),"filemanage.stale_version_prevents_delete");
+            var move=Request(FileManageAction.MOVE,copy.Destination!,Path.Combine(folder.Path,"moved.bin"));
+            Check((await Execute(owner,move)).Status==FileManageCode.COMPLETED &&
+                File.Exists(move.Destination) && !File.Exists(move.Path) &&
+                (await Execute(owner,move)).Status==FileManageCode.COMPLETED,
+                "filemanage.native_atomic_move_and_receipt_replay");
+            var conflict=Request(FileManageAction.COPY,source,move.Destination);
+            Check((await Execute(owner,conflict)).Status==FileManageCode.DESTINATION_EXISTS &&
+                File.ReadAllBytes(move.Destination!).SequenceEqual(bytes),
+                "filemanage.never_overwrites_existing_destination");
+            var delete=Request(FileManageAction.DELETE,move.Destination!);
+            Check((await Execute(owner,delete)).Status==FileManageCode.COMPLETED &&
+                !File.Exists(delete.Path) &&
+                (await Execute(owner,delete with {ReadOnly=true})).Status==FileManageCode.COMPLETED,
+                "filemanage.delete_file_and_durable_readback");
+            string tree=Path.Combine(root,"tree");
+            Directory.CreateDirectory(Path.Combine(tree,"child"));
+            File.WriteAllBytes(Path.Combine(tree,"child","payload.bin"),bytes);
+            var treeCopy=Request(FileManageAction.COPY,tree,Path.Combine(root,"tree-copy"),true);
+            Check((await Execute(owner,treeCopy)).Status==FileManageCode.COMPLETED &&
+                File.ReadAllBytes(Path.Combine(treeCopy.Destination!,"child","payload.bin"))
+                    .SequenceEqual(bytes),"filemanage.recursive_directory_copy_atomic_visibility");
+            var notEmpty=Request(FileManageAction.DELETE,treeCopy.Destination!);
+            Check((await Execute(owner,notEmpty)).Status==FileManageCode.NOT_EMPTY &&
+                Directory.Exists(treeCopy.Destination!),"filemanage.directory_delete_requires_recursive");
+            var treeDelete=Request(FileManageAction.DELETE,treeCopy.Destination!,recursive:true);
+            Check((await Execute(owner,treeDelete)).Status==FileManageCode.COMPLETED &&
+                !Directory.Exists(treeCopy.Destination!),"filemanage.explicit_recursive_directory_delete");
+
+            var pending=Request(FileManageAction.MOVE,source,Path.Combine(root,"never-moved.bin"));
+            Check(owner.FileReceipt(FileManageWorkflow.Receipt(pending,FileWriteAction.BEGIN,
+                    FileReceiptPhase.PREPARE),actor).Code==FileReceiptCode.READY &&
+                owner.FileReceipt(FileManageWorkflow.Receipt(pending,FileWriteAction.COMMIT,
+                    FileReceiptPhase.PREPARE),actor).State==FileReceiptState.COMMITTING,
+                "filemanage.durable_intent_before_native_effect");
+            Check((await Execute(owner,pending)).Status==FileManageCode.EFFECT_UNKNOWN &&
+                File.Exists(source) && !File.Exists(pending.Destination),
+                "filemanage.no_blind_replay_after_lost_ack");
+        }
+        using(var owner=new JobCoordinator(Microsoft.Extensions.Logging.Abstractions.NullLogger<JobCoordinator>.Instance))
+        {
+            owner.Initialize(db);
+            var receiptCount=owner.Dispatch(new(AdminOperation.Job,JobAction.list),"manage")
+                .Store?.Storage?.FileReceipts;
+            Check(receiptCount is >=8 &&
+                !System.Text.Encoding.UTF8.GetString(File.ReadAllBytes(db))
+                    .Contains(Path.Combine(root,"tree"),StringComparison.Ordinal),
+                "filemanage.sqlite_reopen_bounded_receipts_without_cleartext_paths");
+        }
+    }
+    finally{Directory.Delete(root,true);}
+}
 Check(File.Exists(PowerShellRunner.Executable), "r2.machine_wide_pwsh");
 using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent())
 {

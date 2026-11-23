@@ -65,7 +65,7 @@ try{
         Send $p 1 'tools/list' @{_meta=$meta}
         $list=Receive $p 1
         $names=@($list.tools|ForEach-Object {$_.name})
-        $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element','windows.invoke_locator','windows.manage_window','windows.chrome_connection','powershell_update','windows.file_query','windows.file_read_chunk','windows.file_write')
+        $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element','windows.invoke_locator','windows.manage_window','windows.chrome_connection','powershell_update','windows.file_query','windows.file_read_chunk','windows.file_write','windows.file_manage')
         Assert (@($required|Where-Object {$_ -notin $names}).Count -eq 0 -and $names.Count -eq @($names|Select-Object -Unique).Count) 'r5.required_window_tools_without_duplicates'
         $inspectTool=@($list.tools|Where-Object name -eq 'windows.inspect_window')
         $actionTool=@($list.tools|Where-Object name -eq 'windows.invoke_element')
@@ -74,6 +74,7 @@ try{
         $fileQuery=@($list.tools|Where-Object name -eq 'windows.file_query')
         $fileRead=@($list.tools|Where-Object name -eq 'windows.file_read_chunk')
         $fileWrite=@($list.tools|Where-Object name -eq 'windows.file_write')
+        $fileManageTool=@($list.tools|Where-Object name -eq 'windows.file_manage')
         $locator=@($list.tools|Where-Object name -eq 'windows.invoke_locator')
         $manage=@($list.tools|Where-Object name -eq 'windows.manage_window')
         Assert ($fileWrite.Count -eq 1 -and $locator.Count -eq 1 -and $manage.Count -eq 1 -and
@@ -84,6 +85,9 @@ try{
             $manage[0].outputSchema.properties.Contains('effect_state') -and
             $manage[0].outputSchema.properties.Contains('safe_to_retry') -and
             $actionTool[0].outputSchema.properties.Contains('safe_to_retry')) 'issue56.typed_filewrite_locator_and_window_manager'
+        Assert ($fileManageTool.Count -eq 1 -and
+            @(@('action','path','operation_id','destination','recursive','expected_version','expected_sha256','read_only','execution_context')|Where-Object {-not $fileManageTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
+            @(@('status','operation_id','action','execution_context','effect_state','stage','safe_to_retry')|Where-Object {-not $fileManageTool[0].outputSchema.properties.Contains($_)}).Count -eq 0) 'issue56.typed_native_file_manage_catalog'
         Assert ($fileQuery.Count -eq 1 -and $fileRead.Count -eq 1 -and
             @(@('action','path','page_size','cursor','include_sha256','execution_context')|Where-Object {-not $fileQuery[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
             @(@('path','offset','length','expected_version','execution_context')|Where-Object {-not $fileRead[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
@@ -135,6 +139,9 @@ try{
     Send $a 201 'tools/call' @{name='windows.file_write';arguments=@{action='BEGIN';path='relative';operation_id='invalid'};_meta=$meta}
     $invalidWrite=(Receive $a 201).structuredContent
     Assert ($invalidWrite.status -eq 'INVALID_ARGUMENT') 'issue56.filewrite_rejects_invalid_before_io'
+    Send $a 204 'tools/call' @{name='windows.file_manage';arguments=@{action='DELETE';path='relative';operation_id='invalid'};_meta=$meta}
+    $invalidFileManage=(Receive $a 204).structuredContent
+    Assert ($invalidFileManage.status -eq 'INVALID_ARGUMENT') 'issue56.filemanage_rejects_invalid_before_io'
     Send $a 202 'tools/call' @{name='windows.manage_window';arguments=@{window_id='bad';action='MOVE';x=1;y=2};_meta=$meta}
     $invalidManage=(Receive $a 202).structuredContent
     Assert ($invalidManage.status -eq 'INVALID_ARGUMENT') 'issue56.window_manage_rejects_stale_id'
@@ -265,6 +272,43 @@ try{
             operation_id=$userWriteId;execution_context='USER'}
         Assert ($userStart.status -eq 'STAGED' -and $userCommit.status -eq 'COMMITTED' -and
             [IO.File]::Exists($userPath) -and ([IO.FileInfo]::new($userPath)).Length -eq 0) 'fileledger.user_elevated_atomic_zero_byte_cross_frontend'
+
+        $managedDir=Join-Path $fileFixture 'native-managed'
+        $mkdirId=[Guid]::NewGuid().ToString('N')
+        $mkdir=ToolCall $a 713 'windows.file_manage' @{action='MKDIR';path=$managedDir;
+            operation_id=$mkdirId;execution_context='SYSTEM'}
+        Assert ($mkdir.status -eq 'COMPLETED' -and $mkdir.effect_state -eq 'EFFECT_VERIFIED' -and
+            (Test-Path -LiteralPath $managedDir -PathType Container)) 'filemanage.system_mkdir_verified'
+        Stop-Service $name
+        Start-Service $name
+        $null=Wait-Status $b 'OK'
+        $mkdirStatus=ToolCall $b 714 'windows.file_manage' @{action='MKDIR';path=$managedDir;
+            operation_id=$mkdirId;read_only=$true;execution_context='SYSTEM'}
+        Assert ($mkdirStatus.status -eq 'COMPLETED' -and -not $mkdirStatus.safe_to_retry) 'filemanage.system_restart_durable_receipt_query'
+        $managedCopy=Join-Path $managedDir 'copy.bin'
+        $copyId=[Guid]::NewGuid().ToString('N')
+        $copy=ToolCall $b 715 'windows.file_manage' @{action='COPY';path=$filePath;
+            destination=$managedCopy;operation_id=$copyId;execution_context='SYSTEM';
+            expected_version=$stat.info.version;expected_sha256=$stat.info.sha256}
+        Assert ($copy.status -eq 'COMPLETED' -and
+            [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($managedCopy))) -ceq $expectedHash) 'filemanage.system_atomic_copy_exact_cas'
+        $copyAgain=ToolCall $c 716 'windows.file_manage' @{action='COPY';path=$filePath;
+            destination=$managedCopy;operation_id=$copyId;execution_context='SYSTEM';
+            expected_version=$stat.info.version;expected_sha256=$stat.info.sha256}
+        Assert ($copyAgain.status -eq 'COMPLETED' -and -not $copyAgain.safe_to_retry) 'filemanage.cross_frontend_duplicate_not_executed'
+        $managedMoved=Join-Path $managedDir 'moved.bin'
+        $move=ToolCall $c 717 'windows.file_manage' @{action='MOVE';path=$managedCopy;
+            destination=$managedMoved;operation_id=[Guid]::NewGuid().ToString('N');execution_context='SYSTEM'}
+        Assert ($move.status -eq 'COMPLETED' -and (Test-Path -LiteralPath $managedMoved -PathType Leaf) -and
+            -not (Test-Path -LiteralPath $managedCopy)) 'filemanage.system_atomic_move'
+        $delete=ToolCall $a 718 'windows.file_manage' @{action='DELETE';path=$managedMoved;
+            operation_id=[Guid]::NewGuid().ToString('N');execution_context='USER'}
+        Assert ($delete.status -eq 'COMPLETED' -and $delete.execution_context -eq 'USER' -and
+            -not (Test-Path -LiteralPath $managedMoved)) 'filemanage.real_elevated_user_delete'
+        $removeDirectory=ToolCall $a 719 'windows.file_manage' @{action='DELETE';path=$managedDir;
+            operation_id=[Guid]::NewGuid().ToString('N');execution_context='SYSTEM'}
+        Assert ($removeDirectory.status -eq 'COMPLETED' -and
+            -not (Test-Path -LiteralPath $managedDir)) 'filemanage.system_delete_empty_directory'
     } finally {Remove-Item -LiteralPath $fileFixture -Recurse -Force}
     function Job($p,$id,$arguments){return (ToolCall $p $id 'powershell_job' $arguments)}
     function Wait-JobState($p,$jobId,$state){

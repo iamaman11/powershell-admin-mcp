@@ -16,6 +16,7 @@ are needed for the native operations below.
 | Check a file or list a directory | `windows.file_query` |
 | Read binary, text, or a large file exactly | `windows.file_read_chunk` |
 | Create or replace a file atomically | `windows.file_write` |
+| Create, copy, move or delete files and folders | `windows.file_manage` |
 | Find a window | `windows.list_windows` |
 | Inspect window controls or Chrome tabs | `windows.inspect_window` |
 | Capture a single covered window | `windows.capture_window` |
@@ -24,7 +25,7 @@ are needed for the native operations below.
 | Activate, move, resize, minimize, or close an exact window | `windows.manage_window` |
 | Find and connect a Chrome profile through its own consent dialog | `windows.chrome_connection` |
 
-These 15 tools share native Windows identities and typed results. There is no
+These 16 tools share native Windows identities and typed results. There is no
 arbitrary path, UI-role or administrator-cmdlet allowlist. Windows ACLs, desktop
 sessions, Chrome's permission dialog, and exact resource identity still apply.
 
@@ -52,6 +53,45 @@ are bounded to 16 KiB; use `BEGIN`, `APPEND`, `COMMIT` for larger files.
 Replacing an existing file requires `REPLACE_IF_MATCH` and the version and
 SHA-256 obtained by `windows.file_query(STAT, include_sha256=true)`. If the
 original changed, replacement fails with `CONFLICT` and no overwrite.
+
+## Files and folders: native management
+
+Use `windows.file_manage(action=MKDIR|COPY|MOVE|DELETE)` with a fully qualified
+`path`, a fresh stable 32-character GUID (`operation_id`), and `destination`
+for COPY/MOVE. Choose `execution_context=USER` or `SYSTEM` explicitly. The
+operation is executed natively under that Windows identity, with OS ACLs; the
+service is the only SQLite receipt owner. COPY stages on the destination
+volume, then atomically renames into place. MOVE is an atomic rename on one
+volume: `CROSS_VOLUME` means use COPY and then an *explicit separate* DELETE.
+Existing destinations are never overwritten. The destination parent must
+exist (create it first with MKDIR).
+
+Directory COPY and DELETE require `recursive=true` (nonempty DELETE without
+it reports `NOT_EMPTY`). For a file's optimistic change guard, obtain both
+`expected_version` and `expected_sha256` with `windows.file_query(STAT,
+include_sha256=true)` and supply them together. Junctions/symlinks are not
+traversed by the manager; no arbitrary path or administrative capability
+allowlist is imposed.
+
+```json
+{
+  "action": "MOVE",
+  "path": "C:\\Temp\\report.txt",
+  "destination": "C:\\Archive\\report.txt",
+  "operation_id": "2cb13a6d2b7a4abda83ca2acd686228c",
+  "execution_context": "SYSTEM"
+}
+```
+
+When an acknowledgement is lost, repeat the **same complete request** with
+`read_only=true` to check the durable receipt without performing the operation.
+`COMPLETED` proves the native effect was observed and persisted. `READY` means
+the operation had no recorded commit effect yet. `EFFECT_UNKNOWN` means the
+service may have dispatched it but did not persist a conclusive outcome; it
+must not be retried automatically, even after restart. Inspect source and
+destination and use a separate explicit recovery decision. A **new** GUID
+always means a new action. File receipts share the same 100,000-row and
+512-MiB global SQLite metadata budget as jobs and atomic writes.
 
 ## Windows UI and Chrome
 

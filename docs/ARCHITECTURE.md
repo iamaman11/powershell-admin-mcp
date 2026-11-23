@@ -78,6 +78,16 @@ frontend, not a separate permanent browser manager. No extra HTTP API.
   receipt are flushed before atomic rename. On a lost answer, `STATUS` performs
   native readback and reconciles SQLite. Unknown effects block an unverified
   second COMMIT. Physical service-kill/power-loss tests remain unaccepted.
+- **Native file and directory lifecycle (P0-A):** MCP `windows.file_manage`
+  exposes native MKDIR, COPY, same-volume MOVE and DELETE for USER/SYSTEM.
+  Its immutable action/source/destination/CAS/recursive spec is SHA-256-bound
+  to a GUID in that same bounded `file_receipts` SQLite table. The service
+  persists a COMMITTING intent before any filesystem mutation and an observed
+  outcome afterward; lost replies yield a read-only status query and never
+  trigger a blind destructive replay. COPY stages on the destination volume,
+  followed by one visible rename; directory traversal rejects reparse points.
+  No schema migration, new service, subprocess or administrative path policy.
+  Unobserved crash windows remain `EFFECT_UNKNOWN` pending manual verification.
 - **Window operations (P0-B):** MCP `windows.manage_window` resolves a fresh
   HWND/process/session, calls Win32 once and compares geometry/foreground
   readback. UIA actions accept bounded `SCROLL`, `HOVER`, `DRAG` and native

@@ -28,6 +28,46 @@ public sealed class FileTools
         Dispatch(new(NativeFileAction.READ_CHUNK, path, execution_context,
             Offset:offset, Length:length, ExpectedVersion:expected_version), cancellationToken);
 
+    [McpServerTool(Name="windows.file_manage",UseStructuredContent=true),
+     Description("Native MKDIR/COPY/MOVE/DELETE, USER or SYSTEM, with durable GUID N operation_id. " +
+         "Directory COPY/DELETE requires recursive=true; MOVE is same-volume atomic. " +
+         "read_only=true queries the receipt without modifying files; never retry EFFECT_UNKNOWN blindly. " +
+         "Optional expected_version and expected_sha256 together protect a source file from changes.")]
+    public static async Task<FileManageReply> Manage(FileManageAction action,string path,string operation_id,
+        string? destination=null,bool recursive=false,string? expected_version=null,
+        string? expected_sha256=null,bool read_only=false,
+        CommandContext execution_context=CommandContext.USER,CancellationToken cancellationToken=default)
+    {
+        var request=new FileManageRequest(action,path,operation_id,execution_context,destination,
+            recursive,expected_version,expected_sha256,read_only);
+        if(!NativeFileManager.Valid(request))
+            return new(FileManageCode.INVALID_ARGUMENT,operation_id,action,execution_context,
+                Stage:"VALIDATE",ObservedAt:DateTimeOffset.UtcNow);
+        if(execution_context==CommandContext.SYSTEM)
+        {
+            var response=await AdminTools.Call(new(AdminOperation.FileManage,FileManage:request),
+                cancellationToken);
+            return response.FileManage??new(FileManageCode.EFFECT_UNKNOWN,operation_id,action,
+                execution_context,WindowEffectState.EFFECT_UNKNOWN,"TRANSPORT",DateTimeOffset.UtcNow);
+        }
+        var status=await AdminTools.Status(cancellationToken:cancellationToken);
+        if(status.Status!=StatusCode.OK)
+            return new(FileManageCode.SERVICE_UNAVAILABLE,operation_id,action,execution_context,
+                Stage:"TRANSPORT",ObservedAt:DateTimeOffset.UtcNow);
+        using var self=Process.GetCurrentProcess();
+        using var identity=WindowsIdentity.GetCurrent();
+        if(identity.IsSystem || status.Frontend?.Elevated!=true ||
+            status.Frontend.SessionId!=self.SessionId || status.Frontend.Sid!=identity.User?.Value ||
+            !new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
+            return new(FileManageCode.USER_CONTEXT_UNAVAILABLE,operation_id,action,execution_context,
+                Stage:"VALIDATE",ObservedAt:DateTimeOffset.UtcNow);
+        using var deadline=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(30));
+        return await FileManageWorkflow.RunAsync(request,async (receipt,ct)=>
+            (await AdminTools.Call(new(AdminOperation.FileReceipt,FileReceipt:receipt),ct)).FileReceipt,
+            ct=>Task.Run(()=>NativeFileManager.Execute(request,ct),ct),deadline.Token);
+    }
+
     [McpServerTool(Name="windows.file_write",UseStructuredContent=true),
      Description("WRITE_ATOMIC writes up to 16 KiB of base64 in one call; larger files use BEGIN/APPEND/COMMIT. Supply stable operation_id (GUID N format). STATUS recovers lost replies. CAS replacement requires expected_version and original_sha256.")]
     public static async Task<FileWriteReply> Write(FileWriteAction action,string path,string operation_id,
