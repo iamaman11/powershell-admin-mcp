@@ -178,7 +178,7 @@ if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("GITHUB_A
         string inlineEmpty=Path.Combine(root,"inline-empty.bin");
         Check(NativeFileWriter.TryInlineSteps(inlineRequest with {Path=inlineEmpty,
             OperationId=Guid.NewGuid().ToString("N"),DataBase64=""},out var emptySteps,out _) &&
-            emptySteps.Length==2 && emptySteps.Select(Write).Last().Status==FileWriteCode.COMMITTED &&
+            emptySteps.Length==2 && emptySteps.Select(Write).ToArray()[^1].Status==FileWriteCode.COMMITTED &&
             File.Exists(inlineEmpty) && new FileInfo(inlineEmpty).Length==0,
             "filewrite.inline_empty_file_is_atomic");
         var begin=Write(Begin(path,id,payload));
