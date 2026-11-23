@@ -1084,7 +1084,18 @@ Check(!connectRequest.ActivateWindowForConsent &&
         .ActivateWindowForConsent == true &&
     System.Text.Json.JsonSerializer.Deserialize<ChromeConnectionNextAction>(
         "\"SHOW_CHROME_FOR_CONSENT\"", PipeWire.Json) ==
-        ChromeConnectionNextAction.SHOW_CHROME_FOR_CONSENT,
+        ChromeConnectionNextAction.SHOW_CHROME_FOR_CONSENT &&
+    WindowChromeCdp.ConnectionNextAction(ChromeConnectionState.CONSENT_WINDOW_UNAVAILABLE,
+        ChromeConnectionFailureReason.FOREGROUND_DENIED) ==
+        ChromeConnectionNextAction.SHOW_CHROME_FOR_CONSENT &&
+    WindowChromeCdp.ConnectionNextAction(ChromeConnectionState.NOT_REQUESTED,
+        ChromeConnectionFailureReason.FOREGROUND_DENIED) ==
+        ChromeConnectionNextAction.SHOW_CHROME_FOR_CONSENT &&
+    WindowChromeCdp.ConnectionNextAction(ChromeConnectionState.CONNECTION_FAILED,
+        ChromeConnectionFailureReason.HANDSHAKE_FAILED) ==
+        ChromeConnectionNextAction.RETRY_CONNECTION &&
+    WindowChromeCdp.ConnectionNextAction(ChromeConnectionState.CONNECTED, null) ==
+        ChromeConnectionNextAction.NONE,
     "chrome.native_consent_does_not_activate_desktop_without_explicit_opt_in");
 var connectReply = new ChromeConnectionResult(ChromeConnectionCode.OK,
     ChromeConnectionState.CONSENT_PENDING, ChromeConnectionNextAction.ALLOW_CHROME_PROMPT);
