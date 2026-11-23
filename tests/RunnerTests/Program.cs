@@ -496,11 +496,11 @@ if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("GITHUB_A
             owner.Initialize(db);
             var receiptCount=owner.Dispatch(new(AdminOperation.Job,JobAction.list),"manage")
                 .Store?.Storage?.FileReceipts;
-            Check(receiptCount is >=8 &&
-                !System.Text.Encoding.UTF8.GetString(File.ReadAllBytes(db))
-                    .Contains(Path.Combine(root,"tree"),StringComparison.Ordinal),
-                "filemanage.sqlite_reopen_bounded_receipts_without_cleartext_paths");
+            Check(receiptCount is >=8,"filemanage.sqlite_reopen_bounded_receipt_count");
         }
+        Check(!System.Text.Encoding.UTF8.GetString(File.ReadAllBytes(db))
+                .Contains(Path.Combine(root,"tree"),StringComparison.Ordinal),
+            "filemanage.sqlite_no_cleartext_paths_after_close");
     }
     finally{Directory.Delete(root,true);}
 }
