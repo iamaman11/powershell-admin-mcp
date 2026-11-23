@@ -331,6 +331,21 @@ internal static partial class WindowChromeCdp
         internal void SetDeadline(CancellationToken deadline) => _deadline = deadline;
         internal async Task<JsonElement> Call(string method, object parameters, string? sessionId = null)
         {
+            try
+            {
+                return await CallCore(method, parameters, sessionId);
+            }
+            catch (OperationCanceledException e)
+            {
+                // The command name is an in-process literal, never page data.
+                // Preserve it through the typed error path for causal diagnosis.
+                e.Data["cdp_method"] = method;
+                throw;
+            }
+        }
+
+        private async Task<JsonElement> CallCore(string method, object parameters, string? sessionId)
+        {
             int id = ++_nextId;
             byte[] payload = JsonSerializer.SerializeToUtf8Bytes(new
                 { id, method, @params = parameters, sessionId },
