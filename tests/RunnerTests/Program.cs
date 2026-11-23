@@ -25,6 +25,27 @@ static void Check(bool ok, string label)
     if (!ok) throw new InvalidOperationException("FAIL " + label);
     Console.WriteLine("PASS " + label);
 }
+{
+    string id = Guid.NewGuid().ToString("N");
+    var metadata = new TransportTrace(1,id,TransportTimingSource.MONOTONIC_PROCESS_LOCAL,
+        128,256,0.12,0.35,0.24,1.2,0.06,0.1,0.05,0.04,0.15,0.02);
+    var timing = new ToolTiming(Transport:metadata);
+    string json = System.Text.Json.JsonSerializer.Serialize(timing,PipeWire.Json);
+    var restored = System.Text.Json.JsonSerializer.Deserialize<ToolTiming>(json,PipeWire.Json);
+    Check(restored?.Transport == metadata && json.Contains("\"diagnostics_version\":1",
+            StringComparison.Ordinal) && json.Contains("\"trace_id\":",StringComparison.Ordinal) &&
+        !json.Contains("command",StringComparison.OrdinalIgnoreCase) &&
+        !json.Contains("stdout",StringComparison.OrdinalIgnoreCase),
+        "trace.monotonic_typed_metadata_wire_without_payload");
+    var defaultWire = System.Text.Json.JsonSerializer.Serialize(new AdminRequest(AdminOperation.Status),PipeWire.Json);
+    var tracedWire = System.Text.Json.JsonSerializer.Serialize(new AdminRequest(AdminOperation.Status,
+        TraceTiming:true),PipeWire.Json);
+    Check(!defaultWire.Contains("trace_timing",StringComparison.Ordinal) &&
+        tracedWire.Contains("\"trace_timing\":true",StringComparison.Ordinal) &&
+        System.Text.Json.JsonSerializer.Deserialize<AdminRequest>(defaultWire,PipeWire.Json)?.TraceTiming==false &&
+        System.Text.Json.JsonSerializer.Deserialize<AdminRequest>(tracedWire,PipeWire.Json)?.TraceTiming==true,
+        "trace.optional_diagnostics_preserves_old_wire_by_default");
+}
 static async Task<ExecutionResult> Run(string command, int timeout = 10, string? cwd = null, CancellationToken ct = default)
 {
     var result = await PowerShellRunner.RunAsync(command, timeout, cwd, ct);
