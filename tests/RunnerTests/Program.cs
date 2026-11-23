@@ -26,6 +26,38 @@ static void Check(bool ok, string label)
     Console.WriteLine("PASS " + label);
 }
 {
+    Check(SystemSnapshot.Valid(SystemQueryKind.PROCESSES,Environment.ProcessId,null,50,0) &&
+        SystemSnapshot.Valid(SystemQueryKind.SERVICES,null,"WindowsAdminMCP",20,0) &&
+        SystemSnapshot.Valid(SystemQueryKind.NETWORK_INTERFACES,null,null,10,0) &&
+        !SystemSnapshot.Valid(SystemQueryKind.PROCESSES,-1,null,50,0) &&
+        !SystemSnapshot.Valid(SystemQueryKind.SERVICES,null," ",50,0) &&
+        !SystemSnapshot.Valid(SystemQueryKind.NETWORK_INTERFACES,12,null,50,0) &&
+        !SystemSnapshot.Valid(SystemQueryKind.PROCESSES,null,null,51,0) &&
+        !SystemSnapshot.Valid(SystemQueryKind.PROCESSES,null,null,50,-1),
+        "issue72.system_query_discriminated_bounds");
+    var own=SystemSnapshot.Observe(SystemQueryKind.PROCESSES,Environment.ProcessId,null,50,0,
+        CancellationToken.None);
+    var services=SystemSnapshot.Observe(SystemQueryKind.SERVICES,null,null,5,0,
+        CancellationToken.None);
+    var network=SystemSnapshot.Observe(SystemQueryKind.NETWORK_INTERFACES,null,null,5,0,
+        CancellationToken.None);
+    var missing=SystemSnapshot.Observe(SystemQueryKind.SERVICES,null,
+        "WindowsAdminMCP-Never-Installed-Query-Fixture",50,0,CancellationToken.None);
+    var self=own.Processes?.SingleOrDefault();
+    Check(own.Status==SystemQueryCode.COMPLETED && self is { Pid: >0, Name: not "" } &&
+        self.Pid==Environment.ProcessId &&
+        services.Status==SystemQueryCode.COMPLETED && services.Services?.Length is >0 and <=5 &&
+        network.Status==SystemQueryCode.COMPLETED && network.NetworkInterfaces?.Length is >0 and <=5 &&
+        missing.Status==SystemQueryCode.NOT_FOUND && missing.Services is null,
+        "issue72.native_process_service_network_query_read_only");
+    string wire=System.Text.Json.JsonSerializer.Serialize(own,PipeWire.Json);
+    Check(wire.Contains("\"kind\":\"PROCESSES\"",StringComparison.Ordinal) &&
+        wire.Contains("\"pid\":",StringComparison.Ordinal) &&
+        !wire.Contains("\"services\":",StringComparison.Ordinal) &&
+        !wire.Contains("command",StringComparison.OrdinalIgnoreCase),
+        "issue72.system_query_typed_variant_wire_without_command_payload");
+}
+{
     string fixture = """
         # HELP commands_enqueued_total total
         commands_enqueued_total{tunnel_id="sensitive-tunnel-identity"} 18
