@@ -65,7 +65,7 @@ try{
         Send $p 1 'tools/list' @{_meta=$meta}
         $list=Receive $p 1
         $names=@($list.tools|ForEach-Object {$_.name})
-        $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element','windows.invoke_locator','windows.manage_window','windows.chrome_connection','powershell_update','windows.file_query','windows.file_read_chunk','windows.file_write','windows.file_manage')
+        $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element','windows.invoke_locator','windows.manage_window','windows.chrome_connection','powershell_update','windows.file_query','windows.file_read_chunk','windows.file_write','windows.file_manage','windows.system_query')
         Assert (@($required|Where-Object {$_ -notin $names}).Count -eq 0 -and $names.Count -eq @($names|Select-Object -Unique).Count) 'r5.required_window_tools_without_duplicates'
         $inspectTool=@($list.tools|Where-Object name -eq 'windows.inspect_window')
         $actionTool=@($list.tools|Where-Object name -eq 'windows.invoke_element')
@@ -77,6 +77,10 @@ try{
         $fileManageTool=@($list.tools|Where-Object name -eq 'windows.file_manage')
         $locator=@($list.tools|Where-Object name -eq 'windows.invoke_locator')
         $manage=@($list.tools|Where-Object name -eq 'windows.manage_window')
+        $systemQuery=@($list.tools|Where-Object name -eq 'windows.system_query')
+        Assert ($systemQuery.Count -eq 1 -and
+            @(@('kind','pid','service_name','page_size','offset')|Where-Object {-not $systemQuery[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
+            @(@('status','kind','processes','services','network_interfaces','next_offset','native_error')|Where-Object {-not $systemQuery[0].outputSchema.properties.Contains($_)}).Count -eq 0) 'issue72.native_typed_system_query_catalog'
         Assert ($fileWrite.Count -eq 1 -and $locator.Count -eq 1 -and $manage.Count -eq 1 -and
             @(@('action','path','operation_id','expected_bytes','expected_sha256','offset','data_base64','chunk_sha256','execution_context')|Where-Object {-not $fileWrite[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
             @(@('status','operation_id','effect_state','received_bytes','safe_to_retry')|Where-Object {-not $fileWrite[0].outputSchema.properties.Contains($_)}).Count -eq 0 -and
@@ -132,6 +136,14 @@ try{
             $v.frontend.session_id -eq $p.SessionId -and $v.command_context -in @('SYSTEM','UNCONFIRMED') -and
             $v.versions.mcp_version -eq '0.8.1-dev' -and $v.versions.store_schema -eq 4 -and $v.timing.ipc_ms -ge 0) 'hardening.separate_frontend_and_runner_identity'
         Assert (-not $v.Contains('tunnel_metrics')) 'issue69.default_status_skips_vendor_metrics'
+        Send $p 44 'tools/call' @{name='windows.system_query';arguments=@{kind='PROCESSES';pid=$PID};_meta=$meta}
+        $nativeProcess=(Receive $p 44).structuredContent
+        Assert ($nativeProcess.status -eq 'COMPLETED' -and $nativeProcess.kind -eq 'PROCESSES' -and
+            @($nativeProcess.processes).Count -eq 1 -and $nativeProcess.processes[0].pid -eq $PID -and
+            $nativeProcess.processes[0].name -and -not $nativeProcess.Contains('services')) 'issue72.native_process_exact_pid_readonly'
+        Send $p 45 'tools/call' @{name='windows.system_query';arguments=@{kind='PROCESSES';pid=-1};_meta=$meta}
+        $invalidProcess=(Receive $p 45).structuredContent
+        Assert ($invalidProcess.status -eq 'INVALID_ARGUMENT' -and -not $invalidProcess.Contains('processes')) 'issue72.system_query_invalid_rejects_before_os'
         Send $p 43 'tools/call' @{name='powershell_status';arguments=@{include_tunnel_metrics=$true};_meta=$meta}
         $vendor=(Receive $p 43).structuredContent
         Write-Host "ISSUE69_TUNNEL_METRICS_STATUS=$($vendor.tunnel_metrics.status)"

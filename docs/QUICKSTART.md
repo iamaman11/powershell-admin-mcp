@@ -17,6 +17,7 @@ are needed for the native operations below.
 | Read binary, text, or a large file exactly | `windows.file_read_chunk` |
 | Create or replace a file atomically | `windows.file_write` |
 | Create, copy, move or delete files and folders | `windows.file_manage` |
+| Inspect processes, Windows services or network interfaces with native typed fields | `windows.system_query` |
 | Find a window | `windows.list_windows` |
 | Inspect window controls or Chrome tabs | `windows.inspect_window` |
 | Capture a single covered window | `windows.capture_window` |
@@ -25,9 +26,16 @@ are needed for the native operations below.
 | Activate, move, resize, minimize, or close an exact window | `windows.manage_window` |
 | Find and connect a Chrome profile through its own consent dialog | `windows.chrome_connection` |
 
-These 16 tools share native Windows identities and typed results. There is no
+These 17 tools share native Windows identities and typed results. There is no
 arbitrary path, UI-role or administrator-cmdlet allowlist. Windows ACLs, desktop
 sessions, Chrome's permission dialog, and exact resource identity still apply.
+
+`windows.system_query(kind=PROCESSES|SERVICES|NETWORK_INTERFACES)` is read-only and
+uses the MCP frontend's real Windows token. Process ID and service name select an
+exact subject; lists are paged (up to 50 entries per call). Details that the OS
+does not authorize are marked unavailable, never silently converted to zero.
+For privileged modifications or other diagnostics, `powershell_exec` continues
+to support USER and explicit SYSTEM execution.
 
 ## Small file: one call
 
