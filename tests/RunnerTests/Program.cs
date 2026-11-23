@@ -1,6 +1,31 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
+using System.IO.Pipes;
 using System.Net;
 using System.Net.Sockets;
+
+if (args is ["--chrome-pipe-invalid-frame"])
+{
+    // A separate elevated, same-executable frontend sends one oversized frame
+    // header. It keeps the pipe open until the owner rejects it, so the real
+    // authorized-server path (not an early disconnected-client path) is tested.
+    using var self = Process.GetCurrentProcess();
+    await using var pipe = new NamedPipeClientStream(".", ChromeBrokerPipe.Name(self.SessionId),
+        PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+    using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+    await pipe.ConnectAsync(8000, deadline.Token);
+    var header = new byte[4];
+    BinaryPrimitives.WriteInt32LittleEndian(header, int.MaxValue);
+    await pipe.WriteAsync(header, deadline.Token);
+    await pipe.FlushAsync(deadline.Token);
+    try
+    {
+        int read = await pipe.ReadAsync(new byte[1].AsMemory(), deadline.Token);
+        Environment.ExitCode = read == 0 ? 0 : 1;
+    }
+    catch (IOException) { Environment.ExitCode = 0; } // Server closed the rejected pipe.
+    return;
+}
 
 if (args is ["--chrome-pipe-probe", var probedWindow])
 {
@@ -1318,6 +1343,37 @@ using (var brokerStop = new CancellationTokenSource())
     }));
     Check(processProbes.All(ok => ok),
         "chrome.ten_distinct_frontend_processes_share_one_session_owner");
+    string clientExe = Environment.ProcessPath!;
+    var malformedStart = new ProcessStartInfo(clientExe)
+    {
+        UseShellExecute = false, CreateNoWindow = true
+    };
+    if (Path.GetFileNameWithoutExtension(clientExe).Equals("dotnet",
+        StringComparison.OrdinalIgnoreCase))
+        malformedStart.ArgumentList.Add(System.Reflection.Assembly.GetExecutingAssembly().Location);
+    malformedStart.ArgumentList.Add("--chrome-pipe-invalid-frame");
+    using (var malformedClient = Process.Start(malformedStart))
+    {
+        Check(malformedClient is not null, "chrome.malformed_frame_test_client_started");
+        await malformedClient!.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(20));
+        Check(malformedClient!.ExitCode == 0,
+            "chrome.oversized_frame_header_rejected_on_authorized_pipe");
+    }
+    var tooLarge = new ChromeBrokerRequest(Inspect: new(testWindowId, 16, 50,
+        null, null, 0, false, new string('x', 40_000), null, 0,
+        WindowInspectScope.TAB, ExpectedProfile: "CI_NO_CHROME"),
+        TraceId: Guid.NewGuid().ToString("N"));
+    Check(tooLarge.Valid &&
+        await ChromeBrokerPipe.ExchangeAsync(tooLarge, CancellationToken.None) is null,
+        "chrome.oversized_frontend_request_fails_closed_without_dispatch");
+    var afterMalformed = new ChromeBrokerRequest(Connection: new(testWindowId,
+        "CI_NO_CHROME", ChromeConnectionAction.STATUS),
+        TraceId: Guid.NewGuid().ToString("N"));
+    var survived = await ChromeBrokerPipe.ExchangeAsync(afterMalformed, CancellationToken.None);
+    Check(ChromeBrokerPipe.IsOwner && survived?.OwnerPid == Environment.ProcessId &&
+        survived.Connection?.State == ChromeConnectionState.NOT_REQUESTED &&
+        survived.TraceId == afterMalformed.TraceId,
+        "chrome.invalid_client_frame_does_not_terminate_shared_cdp_owner");
     await brokerStop.CancelAsync();
     await owner;
     Check(!ChromeBrokerPipe.IsOwner, "chrome.user_owner_shutdown_closes_pipe");
