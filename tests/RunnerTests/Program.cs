@@ -1791,7 +1791,10 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
     System.Windows.Forms.Form? ownedForm = null;
     try
     {
-        var created = await ready.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        // This is only the isolated CI fixture's cold WinForms startup budget,
+        // not an action/worker deadline. Hosted Windows can delay first Shown
+        // during unrelated UIA provider initialization.
+        var created = await ready.Task.WaitAsync(TimeSpan.FromSeconds(15));
         ownedForm = created.Form;
         using var current = Process.GetCurrentProcess();
         var realWindowId = WindowCatalog.FormatId(new WindowIdentity(created.Handle.ToInt64(),
