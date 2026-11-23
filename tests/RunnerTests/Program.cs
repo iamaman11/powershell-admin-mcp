@@ -922,6 +922,24 @@ Check(WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, W
     !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.INVOKE, "unexpected")) &&
     !WindowAction.Valid(new WindowActionRequest(testWindowId, freshElementId, WindowActionKind.SET_VALUE, new string('x', 4097))),
     "windows.action_bounded_arguments");
+var backgroundPolicyClick = new WindowActionRequest(testWindowId, freshElementId,
+    WindowActionKind.CLICK, null);
+var foregroundOptIn = backgroundPolicyClick with { InputMode = WindowInputMode.ALLOW_FOREGROUND_INPUT };
+string foregroundWire = System.Text.Json.JsonSerializer.Serialize(foregroundOptIn, PipeWire.Json);
+var backgroundBlocked = new WindowActionResult(WindowActionCode.FOREGROUND_INPUT_DISALLOWED,
+    Detail: "BACKGROUND_ONLY");
+Check(backgroundPolicyClick.InputMode == WindowInputMode.BACKGROUND_ONLY &&
+    !WindowPhysicalClick.ForegroundInputAllowed(backgroundPolicyClick) &&
+    WindowPhysicalClick.ForegroundInputAllowed(foregroundOptIn) &&
+    WindowAction.Valid(backgroundPolicyClick) && WindowAction.Valid(foregroundOptIn) &&
+    !WindowAction.Valid(backgroundPolicyClick with { InputMode = (WindowInputMode)999 }) &&
+    foregroundWire.Contains("\"input_mode\":\"ALLOW_FOREGROUND_INPUT\"", StringComparison.Ordinal) &&
+    System.Text.Json.JsonSerializer.Deserialize<WindowActionRequest>(foregroundWire, PipeWire.Json)?.InputMode ==
+        WindowInputMode.ALLOW_FOREGROUND_INPUT &&
+    backgroundBlocked.EffectState == WindowEffectState.NO_EFFECT &&
+    backgroundBlocked.ProviderOutcome == WindowProviderOutcome.NOT_DISPATCHED &&
+    !backgroundBlocked.EffectUnknown,
+    "windows.background_default_and_explicit_foreground_input_opt_in");
 Check(WindowAction.Valid(new WindowActionRequest(testWindowId,freshElementId,
         WindowActionKind.KEY_PRESS,null,VirtualKey:0x41,Ctrl:true,Shift:true)) &&
     !WindowAction.Valid(new WindowActionRequest(testWindowId,freshElementId,
@@ -1044,10 +1062,13 @@ using (var profileFixture = System.Text.Json.JsonDocument.Parse("""
         "chrome.email_selector_only_uses_unique_open_windows");
 }
 Check(ChromeConnectionTools.ValidArguments(ChromeConnectionAction.LIST, null, null) &&
+    !ChromeConnectionTools.ValidArguments(ChromeConnectionAction.LIST, null, null, true) &&
     !ChromeConnectionTools.ValidArguments(ChromeConnectionAction.LIST, testWindowId, "Valer") &&
     ChromeConnectionTools.ValidArguments(ChromeConnectionAction.REQUEST, testWindowId, "Valer") &&
+    ChromeConnectionTools.ValidArguments(ChromeConnectionAction.REQUEST, testWindowId, "Valer", true) &&
     ChromeConnectionTools.ValidArguments(ChromeConnectionAction.REQUEST, null, "pvisakp@gmail.com") &&
     ChromeConnectionTools.ValidArguments(ChromeConnectionAction.STATUS, null, "pvisakp@gmail.com") &&
+    !ChromeConnectionTools.ValidArguments(ChromeConnectionAction.STATUS, testWindowId, "Valer", true) &&
     ChromeConnectionTools.ValidArguments(ChromeConnectionAction.STATUS, testWindowId, "Valer") &&
     ChromeConnectionTools.ValidArguments(ChromeConnectionAction.DISCONNECT, testWindowId, "Valer") &&
     !ChromeConnectionTools.ValidArguments(ChromeConnectionAction.REQUEST, testWindowId, null) &&
@@ -1055,6 +1076,16 @@ Check(ChromeConnectionTools.ValidArguments(ChromeConnectionAction.LIST, null, nu
     !ChromeConnectionTools.ValidArguments((ChromeConnectionAction)99, testWindowId, "Valer"),
     "chrome.connection_action_schema_rejects_ambiguous_profile_selection");
 var connectRequest = new ChromeConnectionRequest(testWindowId, "Valer", ChromeConnectionAction.REQUEST);
+var foregroundConsentRequest = connectRequest with { ActivateWindowForConsent = true };
+string foregroundConsentWire = System.Text.Json.JsonSerializer.Serialize(foregroundConsentRequest, PipeWire.Json);
+Check(!connectRequest.ActivateWindowForConsent &&
+    foregroundConsentWire.Contains("\"activate_window_for_consent\":true", StringComparison.Ordinal) &&
+    System.Text.Json.JsonSerializer.Deserialize<ChromeConnectionRequest>(foregroundConsentWire, PipeWire.Json)?
+        .ActivateWindowForConsent == true &&
+    System.Text.Json.JsonSerializer.Deserialize<ChromeConnectionNextAction>(
+        "\"SHOW_CHROME_FOR_CONSENT\"", PipeWire.Json) ==
+        ChromeConnectionNextAction.SHOW_CHROME_FOR_CONSENT,
+    "chrome.native_consent_does_not_activate_desktop_without_explicit_opt_in");
 var connectReply = new ChromeConnectionResult(ChromeConnectionCode.OK,
     ChromeConnectionState.CONSENT_PENDING, ChromeConnectionNextAction.ALLOW_CHROME_PROMPT);
 Check(new ChromeBrokerRequest(Connection: connectRequest).Valid &&
@@ -1742,10 +1773,27 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             LocatorAutomationId:"CI_ABSENT_AUTOMATION_ID"))).WaitAsync(TimeSpan.FromSeconds(8));
         Check(absent.Status==WindowActionCode.LOCATOR_NOT_FOUND,
             "windows.locator_rejects_missing_target_without_dispatch");
+        var nativeRoot = System.Windows.Automation.AutomationElement.FromHandle(created.Handle);
+        var blockedPointer = await Task.Run(() => WindowPhysicalClick.Click(
+            IntPtr.Zero, nativeRoot, new WindowActionRequest(realWindowId,
+                delayed.Elements[0].ElementId, WindowActionKind.CLICK, null), Stopwatch.StartNew()))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        var blockedKey = await Task.Run(() => WindowPhysicalClick.PressKey(
+            IntPtr.Zero, nativeRoot, new WindowActionRequest(realWindowId,
+                delayed.Elements[0].ElementId, WindowActionKind.KEY_PRESS, null,
+                Key: WindowKey.SPACE), Stopwatch.StartNew())).WaitAsync(TimeSpan.FromSeconds(5));
+        Check(blockedPointer.Status == WindowActionCode.FOREGROUND_INPUT_DISALLOWED &&
+            blockedKey.Status == WindowActionCode.FOREGROUND_INPUT_DISALLOWED &&
+            blockedPointer.EffectState == WindowEffectState.NO_EFFECT &&
+            blockedKey.EffectState == WindowEffectState.NO_EFFECT &&
+            blockedPointer.ExecutionMethod is null && blockedKey.ExecutionMethod is null &&
+            Volatile.Read(ref keyboardClickCount) == 0,
+            "windows.background_policy_never_dispatches_native_mouse_or_keyboard");
         var rejectedKeyboard = await Task.Run(() => WindowPhysicalClick.PressKey(
             IntPtr.Zero, System.Windows.Automation.AutomationElement.FromHandle(created.Handle),
             new WindowActionRequest(realWindowId, delayed.Elements[0].ElementId,
-                WindowActionKind.KEY_PRESS, null, Key: WindowKey.SPACE), Stopwatch.StartNew()))
+                WindowActionKind.KEY_PRESS, null, Key: WindowKey.SPACE,
+                InputMode: WindowInputMode.ALLOW_FOREGROUND_INPUT), Stopwatch.StartNew()))
             .WaitAsync(TimeSpan.FromSeconds(5));
         Check(rejectedKeyboard.Status == WindowActionCode.FOCUS_UNAVAILABLE &&
             Volatile.Read(ref keyboardClickCount) == 0,
@@ -1753,7 +1801,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         var rejectedText = await Task.Run(() => WindowPhysicalClick.TypeText(
             IntPtr.Zero, System.Windows.Automation.AutomationElement.FromHandle(created.Handle),
             new WindowActionRequest(realWindowId, delayed.Elements[0].ElementId,
-                WindowActionKind.TYPE_TEXT, "test"), Stopwatch.StartNew()))
+                WindowActionKind.TYPE_TEXT, "test",
+                InputMode: WindowInputMode.ALLOW_FOREGROUND_INPUT), Stopwatch.StartNew()))
             .WaitAsync(TimeSpan.FromSeconds(5));
         Check(rejectedText.Status == WindowActionCode.FOCUS_UNAVAILABLE,
             "windows.type_text_requires_exact_focus_not_a_role_whitelist");
@@ -1977,7 +2026,7 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         var freshEdit = freshClickTree.Elements.Single(e => e.Role.Contains("Edit", StringComparison.Ordinal));
         var blocked = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, freshEdit.ElementId, WindowActionKind.CLICK, null,
-                freshEdit.Path)))
+                freshEdit.Path, InputMode: WindowInputMode.ALLOW_FOREGROUND_INPUT)))
             .WaitAsync(TimeSpan.FromSeconds(5));
         var overlayState = (string)created.Form.Invoke(new Func<string>(() =>
             $"visible={testCover!.Visible} topmost={testCover.TopMost} " +
@@ -2025,7 +2074,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         var keyboard = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, keyTarget.ElementId,
                 WindowActionKind.KEY_PRESS, null, keyTarget.Path,
-                "CI_UIA_KEY_ACCEPTED", WindowExpectedChange.APPEARS, WindowKey.SPACE)))
+                "CI_UIA_KEY_ACCEPTED", WindowExpectedChange.APPEARS, WindowKey.SPACE,
+                InputMode: WindowInputMode.ALLOW_FOREGROUND_INPUT)))
             .WaitAsync(TimeSpan.FromSeconds(5));
         if (keyboard.Status is WindowActionCode.FOREGROUND_UNAVAILABLE or WindowActionCode.FOCUS_UNAVAILABLE)
         {
@@ -2043,7 +2093,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         var nativeTypingTarget = inputTree.Elements.Single(e => e.Role.Contains("Edit", StringComparison.Ordinal));
         var editClick = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, nativeTypingTarget.ElementId,
-                WindowActionKind.CLICK, null, nativeTypingTarget.Path)))
+                WindowActionKind.CLICK, null, nativeTypingTarget.Path,
+                InputMode: WindowInputMode.ALLOW_FOREGROUND_INPUT)))
             .WaitAsync(TimeSpan.FromSeconds(5));
         if (editClick.Status is WindowActionCode.FOREGROUND_UNAVAILABLE or
             WindowActionCode.TARGET_OCCLUDED or WindowActionCode.CLICK_POINT_UNAVAILABLE)
@@ -2072,7 +2123,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                 WindowActionKind.TYPE_TEXT, typedValue,
                 ExpectedName: "CI_UIA_INPUT_NAME", ExpectedChange: WindowExpectedChange.APPEARS,
                 ExpectedKind: WindowExpectedKind.UIA_VALUE, ExpectedValue: typedValue,
-                ObservationTimeoutMs: 3000))).WaitAsync(TimeSpan.FromSeconds(7));
+                ObservationTimeoutMs: 3000,
+                InputMode: WindowInputMode.ALLOW_FOREGROUND_INPUT))).WaitAsync(TimeSpan.FromSeconds(7));
         if (typed.Status is WindowActionCode.FOREGROUND_UNAVAILABLE or WindowActionCode.FOCUS_UNAVAILABLE)
             Console.WriteLine($"NOT_TESTED windows.type_text_owned_edit focus={typed.Status}");
         else

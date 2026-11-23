@@ -36,7 +36,8 @@ public enum ChromeConnectionFailureReason
 [JsonConverter(typeof(JsonStringEnumConverter<ChromeConnectionNextAction>))]
 public enum ChromeConnectionNextAction
 {
-    NONE, SELECT_PROFILE, ENABLE_CHROME_DEBUGGING, ALLOW_CHROME_PROMPT, RETRY_CONNECTION
+    NONE, SELECT_PROFILE, ENABLE_CHROME_DEBUGGING, ALLOW_CHROME_PROMPT,
+    SHOW_CHROME_FOR_CONSENT, RETRY_CONNECTION
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<ChromeProfileEmailSource>))]
@@ -87,19 +88,23 @@ public sealed record ChromeConnectionResult(
 }
 
 internal sealed record ChromeConnectionRequest(string WindowId, string ExpectedProfile,
-    ChromeConnectionAction Action);
+    ChromeConnectionAction Action,
+    [property: JsonPropertyName("activate_window_for_consent")]
+        bool ActivateWindowForConsent = false);
 
 [McpServerToolType]
 public sealed class ChromeConnectionTools
 {
     [McpServerTool(Name = "windows.chrome_connection", UseStructuredContent = true),
      Description("Discover Chrome profiles and request or check native user-approved CDP connection. " +
+         "Never activates Chrome by default; activate_window_for_consent explicitly permits foreground activation for an approval prompt. " +
          "A unique open profile may be selected by email without window_id; ambiguous windows require window_id.")]
     public static async Task<ChromeConnectionResult> Connection(ChromeConnectionAction action,
         string? window_id = null, string? expected_profile = null,
+        bool activate_window_for_consent = false,
         CancellationToken cancellationToken = default)
     {
-        if (!ValidArguments(action, window_id, expected_profile))
+        if (!ValidArguments(action, window_id, expected_profile, activate_window_for_consent))
             return new(ChromeConnectionCode.INVALID_ARGUMENT, ChromeConnectionState.NOT_REQUESTED);
         var status = await AdminTools.Status(cancellationToken: cancellationToken);
         if (status.Status != StatusCode.OK)
@@ -132,16 +137,19 @@ public sealed class ChromeConnectionTools
             return new(ChromeConnectionCode.STALE_WINDOW, ChromeConnectionState.NOT_REQUESTED,
                 Detail: resolved.ToString());
         return await WindowChromeBroker.ConnectionAsync(
-            new ChromeConnectionRequest(window_id!, expected_profile!, action), cancellationToken);
+            new ChromeConnectionRequest(window_id!, expected_profile!, action,
+                activate_window_for_consent), cancellationToken);
     }
 
-    internal static bool ValidArguments(ChromeConnectionAction action, string? windowId, string? profile) =>
-        action == ChromeConnectionAction.LIST ? windowId is null && profile is null :
+    internal static bool ValidArguments(ChromeConnectionAction action, string? windowId, string? profile,
+        bool activateWindowForConsent = false) =>
+        (!activateWindowForConsent || action == ChromeConnectionAction.REQUEST) &&
+        (action == ChromeConnectionAction.LIST ? windowId is null && profile is null :
         (action is ChromeConnectionAction.REQUEST or ChromeConnectionAction.STATUS or
             ChromeConnectionAction.DISCONNECT) &&
             (windowId is null || WindowCatalog.TryParseId(windowId, out _)) &&
             profile is { Length: >= 1 and <= 100 } && !string.IsNullOrWhiteSpace(profile) &&
-            !profile.Contains('\0');
+            !profile.Contains('\0'));
 }
 
 // The Chrome native avatar button is UIA, independent of CDP permission.
