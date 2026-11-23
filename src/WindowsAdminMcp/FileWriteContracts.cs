@@ -1,7 +1,7 @@
 using System.Text.Json.Serialization;
 
 [JsonConverter(typeof(JsonStringEnumConverter<FileWriteAction>))]
-public enum FileWriteAction { BEGIN, APPEND, COMMIT, ABORT, STATUS }
+public enum FileWriteAction { BEGIN, APPEND, COMMIT, ABORT, STATUS, WRITE_ATOMIC }
 
 [JsonConverter(typeof(JsonStringEnumConverter<FileOverwritePolicy>))]
 public enum FileOverwritePolicy { FAIL_IF_EXISTS, REPLACE_IF_MATCH }

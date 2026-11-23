@@ -8,7 +8,7 @@ using System.Text.Json.Serialization;
 using System.Windows.Automation;
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowActionKind>))]
-public enum WindowActionKind { INVOKE, SET_VALUE, SELECT, TOGGLE, EXPAND, COLLAPSE, CLICK, KEY_PRESS, TYPE_TEXT, SCROLL, HOVER, DRAG }
+public enum WindowActionKind { INVOKE, SET_VALUE, SELECT, TOGGLE, EXPAND, COLLAPSE, CLICK, KEY_PRESS, TYPE_TEXT, SCROLL, HOVER, DRAG, DOUBLE_CLICK, RIGHT_CLICK }
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowScrollDirection>))]
 public enum WindowScrollDirection { UP, DOWN, LEFT, RIGHT }
@@ -364,6 +364,8 @@ internal static class WindowAction
                 }
                 var result = request.Action == WindowActionKind.CLICK
                     ? ClickWithNativeFallback()
+                    : request.Action is WindowActionKind.DOUBLE_CLICK or WindowActionKind.RIGHT_CLICK
+                    ? WindowPhysicalClick.Click(hwnd,element,request,clock)
                     : request.Action == WindowActionKind.SCROLL
                     ? ScrollTarget(hwnd,element,request,clock)
                     : request.Action is WindowActionKind.HOVER or WindowActionKind.DRAG

@@ -147,6 +147,40 @@ if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("GITHUB_A
             !NativeFileWriter.Valid(Begin(path,id,new byte[1]) with {ExpectedBytes=NativeFileWriter.MaxUploadBytes+1}) &&
             !NativeFileWriter.Valid(Begin(path,id,payload) with {ExpectedSha256="bad"}),
             "filewrite.typed_bounds_and_operation_identity");
+        // A one-call user operation is expanded before the existing SQLite
+        // PREPARE/OBSERVE boundary. Its stages still have exactly one stable ID.
+        string inlinePath=Path.Combine(root,"inline.txt"),inlineId=Guid.NewGuid().ToString("N");
+        byte[] inlineBytes=System.Text.Encoding.UTF8.GetBytes("native one-call 🌍");
+        var inlineRequest=new FileWriteRequest(FileWriteAction.WRITE_ATOMIC,inlinePath,inlineId,
+            CommandContext.USER,DataBase64:Convert.ToBase64String(inlineBytes));
+        Check(NativeFileWriter.TryInlineSteps(inlineRequest,out var inlineSteps,out _) &&
+            inlineSteps.Length==3 && inlineSteps[0].Action==FileWriteAction.BEGIN &&
+            inlineSteps[1].Action==FileWriteAction.APPEND &&
+            inlineSteps[2].Action==FileWriteAction.COMMIT &&
+            inlineSteps[0].ExpectedSha256==Hash(inlineBytes) &&
+            inlineSteps.All(s=>s.OperationId==inlineId && NativeFileWriter.Valid(s)),
+            "filewrite.inline_plan_uses_original_durable_writer");
+        Check(inlineSteps.Select(Write).Select(r=>r.Status).SequenceEqual(
+            [FileWriteCode.STAGED,FileWriteCode.STAGED,FileWriteCode.COMMITTED]) &&
+            File.ReadAllBytes(inlinePath).SequenceEqual(inlineBytes) &&
+            Write(inlineSteps[0]).Status==FileWriteCode.COMMITTED &&
+            Write(Step(FileWriteAction.STATUS,inlinePath,inlineId)).Status==FileWriteCode.COMMITTED,
+            "filewrite.inline_same_id_lost_ack_is_read_only");
+        Check(!NativeFileWriter.TryInlineSteps(inlineRequest with {DataBase64="not base64"},
+                out _,out var invalidBase64) && invalidBase64==FileWriteCode.INVALID_ARGUMENT &&
+            !NativeFileWriter.TryInlineSteps(inlineRequest with {OperationId="invalid"},out _,out _) &&
+            !NativeFileWriter.TryInlineSteps(inlineRequest with {
+                DataBase64=Convert.ToBase64String(new byte[NativeFileWriter.MaxInlineBytes+1])},out _,out _) &&
+            !NativeFileWriter.TryInlineSteps(inlineRequest with {ExpectedSha256=Hash([1,2,3])},
+                out _,out var invalidHash) && invalidHash==FileWriteCode.HASH_MISMATCH &&
+            !NativeFileWriter.Valid(inlineRequest),
+            "filewrite.inline_invalid_inputs_rejected_before_disk");
+        string inlineEmpty=Path.Combine(root,"inline-empty.bin");
+        Check(NativeFileWriter.TryInlineSteps(inlineRequest with {Path=inlineEmpty,
+            OperationId=Guid.NewGuid().ToString("N"),DataBase64=""},out var emptySteps,out _) &&
+            emptySteps.Length==2 && emptySteps.Select(Write).ToArray()[^1].Status==FileWriteCode.COMMITTED &&
+            File.Exists(inlineEmpty) && new FileInfo(inlineEmpty).Length==0,
+            "filewrite.inline_empty_file_is_atomic");
         var begin=Write(Begin(path,id,payload));
         Check(begin is {Status:FileWriteCode.STAGED,ReceivedBytes:0} && !File.Exists(path) &&
             Write(Begin(path,id,payload)).Status==FileWriteCode.STAGED &&
@@ -406,6 +440,16 @@ Check(System.Text.Json.JsonSerializer.Deserialize<AdminStatus>(doctorWire, PipeW
     !System.Text.Json.JsonSerializer.Serialize(new AdminStatus(StatusCode.OK, "ci"), PipeWire.Json)
         .Contains("diagnostics", StringComparison.Ordinal),
     "status.optional_typed_doctor_without_changing_default_status");
+var historicTrial=UpdateTools.WithCurrentReadiness(new(UpdateToolCode.COMPLETED,
+    Stage:"trial_not_ready",RollbackPending:true),doctorStatus);
+Check(historicTrial is {Stage:"trial_not_ready",RollbackPending:true,
+    CurrentServiceStatus:StatusCode.OK,CurrentLocalOperationalReady:true,
+    CurrentObservedUtc:not null} &&
+    System.Text.Json.JsonSerializer.Serialize(historicTrial,PipeWire.Json)
+        .Contains("current_local_operational_ready",StringComparison.Ordinal) &&
+    UpdateTools.WithCurrentReadiness(historicTrial,new(StatusCode.SERVICE_UNAVAILABLE,"ci")) is
+        {CurrentServiceStatus:StatusCode.SERVICE_UNAVAILABLE,CurrentLocalOperationalReady:null},
+    "update.historic_trial_stage_separate_from_current_readback");
 var testWindowIdentity = new WindowIdentity(0x12345, 4242, 133700000000000000, 1);
 string testWindowId = WindowCatalog.FormatId(testWindowIdentity);
 Check(WindowCatalog.TryParseId(testWindowId, out var decodedWindowId) && decodedWindowId == testWindowIdentity &&
@@ -426,6 +470,8 @@ Check(WindowManager.Valid(WindowManageAction.ACTIVATE,null,null,null,null) &&
     WindowManager.Valid(WindowManageAction.MAXIMIZE,null,null,null,null) &&
     WindowManager.Valid(WindowManageAction.MOVE,0,-25,null,null) &&
     WindowManager.Valid(WindowManageAction.RESIZE,null,null,1024,768) &&
+    WindowManager.Valid(WindowManageAction.CLOSE,null,null,null,null) &&
+    !WindowManager.Valid(WindowManageAction.CLOSE,1,null,null,null) &&
     !WindowManager.Valid(WindowManageAction.MOVE,1,null,null,null) &&
     !WindowManager.Valid(WindowManageAction.RESIZE,null,null,0,500) &&
     !WindowManager.Valid(WindowManageAction.ACTIVATE,1,1,null,null) &&
@@ -433,6 +479,15 @@ Check(WindowManager.Valid(WindowManageAction.ACTIVATE,null,null,null,null) &&
     WindowManager.Execute(testWindowId,WindowManageAction.RESTORE,null,null,null,null,2).Status==
         WindowManageCode.USER_CONTEXT_UNAVAILABLE,
     "windows.manage_typed_bounds_and_cross_session_rejection");
+Check(WindowPhysicalClick.PointerPlan(WindowActionKind.CLICK)==(0x0002u,0x0004u,1) &&
+    WindowPhysicalClick.PointerPlan(WindowActionKind.DOUBLE_CLICK)==(0x0002u,0x0004u,2) &&
+    WindowPhysicalClick.PointerPlan(WindowActionKind.RIGHT_CLICK)==(0x0008u,0x0010u,1) &&
+    WindowChromeCdp.PointerAction(WindowActionKind.DOUBLE_CLICK) &&
+    WindowChromeCdp.PointerAction(WindowActionKind.RIGHT_CLICK),
+    "windows.native_and_background_mouse_sequences_typed");
+Check(WindowChromeCdp.InspectTab(IntPtr.Zero,testWindowId,WindowInspectScope.TABS,null,10,0,
+    null,null).ElapsedMs is >=0,
+    "windows.chrome_inspection_emits_elapsed_ms_on_failures");
 Check(new WindowManageResult(WindowManageCode.INVALID_ARGUMENT).SafeToRetry &&
     !new WindowManageResult(WindowManageCode.EFFECT_UNKNOWN,
         EffectState:WindowEffectState.EFFECT_UNKNOWN).SafeToRetry &&
@@ -783,7 +838,8 @@ Check(WindowChromeCdp.ValidTabElementRef(freshTabRef) && WindowAction.Valid(chro
         new(Inspect: new(WindowInspectCode.COMPLETED, []))),
     "chrome.browser_bound_broker_reuses_connection_across_profiles");
 Check(Enum.GetValues<WindowActionKind>().Where(WindowChromeCdp.PointerAction).ToHashSet().SetEquals(
-        [WindowActionKind.CLICK, WindowActionKind.INVOKE, WindowActionKind.SELECT,
+        [WindowActionKind.CLICK, WindowActionKind.DOUBLE_CLICK, WindowActionKind.RIGHT_CLICK,
+         WindowActionKind.INVOKE, WindowActionKind.SELECT,
          WindowActionKind.TOGGLE, WindowActionKind.EXPAND, WindowActionKind.COLLAPSE]) &&
     !WindowChromeCdp.PointerAction(WindowActionKind.SET_VALUE) &&
     !WindowChromeCdp.PointerAction(WindowActionKind.TYPE_TEXT) &&
@@ -1621,6 +1677,15 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                 typed.ExpectedStateObserved == true && actualText == typedValue,
                 "windows.type_text_owned_edit_value_observed_after_native_input");
         }
+        // Last action on our own synthetic form: WM_CLOSE must be observed,
+        // never confused with mere PostMessage acceptance or process killing.
+        var closed=await Task.Run(() => WindowManager.Execute(realWindowId,
+            WindowManageAction.CLOSE,null,null,null,null,current.SessionId))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        Check(closed is {Status:WindowManageCode.COMPLETED,
+            EffectState:WindowEffectState.EFFECT_VERIFIED} &&
+            WindowCatalog.ResolveId(realWindowId,current.SessionId,out _)==WindowResolveCode.STALE_WINDOW,
+            "windows.manage_graceful_close_verified_exact_hwnd_disappears");
     }
     finally
     {

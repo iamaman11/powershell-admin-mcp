@@ -33,7 +33,7 @@ public sealed record WindowListResult(
 public sealed class WindowTools
 {
     [McpServerTool(Name = "windows.manage_window",UseStructuredContent = true),
-     Description("Native Win32 window ACTIVATE/RESTORE/MINIMIZE/MAXIMIZE/MOVE/RESIZE; exact HWND/process/session identity and verified before/after state.")]
+     Description("Native Win32 ACTIVATE/RESTORE/MINIMIZE/MAXIMIZE/MOVE/RESIZE/CLOSE; exact HWND/process/session identity. CLOSE posts WM_CLOSE (no forced process termination), verified only when the exact window disappears.")]
     public static async Task<WindowManageResult> ManageWindow(string window_id,WindowManageAction action,
         int? x=null,int? y=null,int? width=null,int? height=null,CancellationToken cancellationToken=default)
     {

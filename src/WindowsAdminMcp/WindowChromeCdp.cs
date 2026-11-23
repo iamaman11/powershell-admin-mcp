@@ -81,7 +81,8 @@ internal static partial class WindowChromeCdp
     internal static WindowActionResult? TryDispatch(IntPtr hwnd, AutomationElement target,
         WindowActionRequest request, Stopwatch clock)
     {
-        if (request.Action is not (WindowActionKind.CLICK or WindowActionKind.KEY_PRESS or
+        if (request.Action is not (WindowActionKind.CLICK or WindowActionKind.DOUBLE_CLICK or
+            WindowActionKind.RIGHT_CLICK or WindowActionKind.KEY_PRESS or
             WindowActionKind.TYPE_TEXT or WindowActionKind.SET_VALUE) ||
             request.Action==WindowActionKind.KEY_PRESS && request.VirtualKey is not null ||
             !TryWebRole(target, out string? role, out string? name) ||
@@ -232,7 +233,8 @@ internal static partial class WindowChromeCdp
                 !element.Current.IsEnabled)
                 return Rejected(WindowActionCode.STALE_ELEMENT);
             string providerResponse = "CDP_BACKGROUND";
-            if (request.Action == WindowActionKind.CLICK)
+            if (request.Action is WindowActionKind.CLICK or WindowActionKind.DOUBLE_CLICK or
+                WindowActionKind.RIGHT_CLICK)
             {
                 var box = await cdp.Call("DOM.getBoxModel", new { backendNodeId }, sessionId);
                 var metrics = await cdp.Call("Page.getLayoutMetrics", new { }, sessionId);
@@ -257,10 +259,15 @@ internal static partial class WindowChromeCdp
                 if (pointerHitsTarget)
                 {
                     dispatched = true;
-                    await cdp.Call("Input.dispatchMouseEvent", new { type = "mousePressed", x, y,
-                        button = "left", clickCount = 1 }, sessionId);
-                    await cdp.Call("Input.dispatchMouseEvent", new { type = "mouseReleased", x, y,
-                        button = "left", clickCount = 1 }, sessionId);
+                    string button=request.Action==WindowActionKind.RIGHT_CLICK?"right":"left";
+                    int repeats=request.Action==WindowActionKind.DOUBLE_CLICK?2:1;
+                    for(int click=1;click<=repeats;click++)
+                    {
+                        await cdp.Call("Input.dispatchMouseEvent", new { type = "mousePressed", x, y,
+                            button, clickCount = click }, sessionId);
+                        await cdp.Call("Input.dispatchMouseEvent", new { type = "mouseReleased", x, y,
+                            button, clickCount = click }, sessionId);
+                    }
                 }
                 else return Rejected(WindowActionCode.TARGET_OCCLUDED);
             }
