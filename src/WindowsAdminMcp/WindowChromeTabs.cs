@@ -469,7 +469,64 @@ internal static partial class WindowChromeCdp
         return unique.Length == 1 ? unique[0] : null;
     }
 
-    private static async Task<List<TabTarget>> TargetsForWindow(Session cdp, IntPtr hwnd)
+    // Chrome accessibility labels can decorate a tab title with its memory
+    // state or selected state. Extract only the exact quoted title; never do
+    // fuzzy substring matching against arbitrary web page controls.
+    internal static string? ChromeTabLabel(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        foreach (string prefix in new[] { "Вкладка \"", "Tab \"" })
+        {
+            if (!name.StartsWith(prefix, StringComparison.Ordinal)) continue;
+            int end = name.IndexOf('"', prefix.Length);
+            return end > prefix.Length ? name[prefix.Length..end] : null;
+        }
+        return name;
+    }
+
+    // A page can contain ARIA tab items. Only one sibling tab-strip group
+    // containing the native window's *active tab title* can be evidence.
+    internal static string[]? NativeTabStripTitles(
+        IEnumerable<(string Path, string Name)> tabItems, string nativeWindowTitle)
+    {
+        const string suffix = " - Google Chrome";
+        if (!nativeWindowTitle.EndsWith(suffix, StringComparison.Ordinal)) return null;
+        string activeTitle = nativeWindowTitle[..^suffix.Length];
+        var groups = tabItems.Select(t =>
+        {
+            int dot = t.Path.LastIndexOf('.');
+            return (Parent: dot > 0 ? t.Path[..dot] : "", Title: ChromeTabLabel(t.Name));
+        }).Where(t => t.Parent.Length > 0 && t.Title is not null)
+          .GroupBy(t => t.Parent, StringComparer.Ordinal)
+          .Where(g => g.Any(t => string.Equals(t.Title, activeTitle, StringComparison.Ordinal)))
+          .Take(2).ToArray();
+        return groups.Length == 1 ? groups[0].Select(t => t.Title!)
+            .Distinct(StringComparer.Ordinal).ToArray() : null;
+    }
+
+    // An overlapping/maximized second Chrome window can have the SAME active
+    // page title. Disambiguate only when a native tab-strip title belongs to
+    // exactly one candidate CDP window; competing exclusive matches fail shut.
+    internal static int? UniqueTabFingerprintWindow(IEnumerable<int> candidateWindowIds,
+        IEnumerable<(int WindowId, string Title)> pageTitles, IEnumerable<string> nativeTabTitles)
+    {
+        var candidates = candidateWindowIds.Where(id => id > 0).ToHashSet();
+        var native = nativeTabTitles.ToHashSet(StringComparer.Ordinal);
+        var owners = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
+        foreach (var page in pageTitles)
+        {
+            if (!candidates.Contains(page.WindowId) || !native.Contains(page.Title)) continue;
+            if (!owners.TryGetValue(page.Title, out var windows))
+                owners.Add(page.Title, windows = []);
+            windows.Add(page.WindowId);
+        }
+        var unique = owners.Values.Where(w => w.Count == 1).Select(w => w.Single())
+            .Distinct().Take(2).ToArray();
+        return unique.Length == 1 ? unique[0] : null;
+    }
+
+    private static async Task<List<TabTarget>> TargetsForWindow(Session cdp, IntPtr hwnd,
+        string windowId, CancellationToken cancellationToken)
     {
         if (!GetWindowRect(hwnd, out var rect)) return [];
         string nativeTitle = GetTitle(hwnd);
@@ -524,6 +581,31 @@ internal static partial class WindowChromeCdp
         // Distinct TargetInfo contexts are allowed *within that same window*;
         // multiple CDP window IDs (even at identical bounds) are not guessed.
         var selected = UniqueWindowId(titleMatches, out int distinctCount);
+        if (selected is null && distinctCount > 1)
+        {
+            // Reuse the existing bounded, isolated UIA inspector. Never run a
+            // potentially hung Chrome accessibility provider in the CDP broker.
+            var ui = await WindowInspector.RunIsolatedAsync(windowId,
+                WindowInspector.MaxDepth, 100, cancellationToken,
+                roleFilter: WindowRoleFilter.TAB_ITEM);
+            if (ui.Status == WindowInspectCode.COMPLETED && !ui.Truncated)
+            {
+                var tabTitles = NativeTabStripTitles(
+                    ui.Elements.Select(e => (e.Path, e.Name)), nativeTitle);
+                if (tabTitles is not null)
+                {
+                    var titles = new List<(int WindowId, string Title)>();
+                    var nativeLabels = tabTitles.ToHashSet(StringComparer.Ordinal);
+                    var candidates = titleMatches.Select(x => x.WindowId).ToHashSet();
+                    foreach (var page in pages.Where(p => nativeLabels.Contains(p.Title)))
+                    {
+                        int id = await WindowId(page.Id);
+                        if (candidates.Contains(id)) titles.Add((id, page.Title));
+                    }
+                    selected = UniqueTabFingerprintWindow(candidates, titles, tabTitles);
+                }
+            }
+        }
         if (selected is null)
             throw new CdpWindowMappingException(distinctCount == 0 ?
                 CdpWindowMappingState.NOT_FOUND : CdpWindowMappingState.AMBIGUOUS);
@@ -602,9 +684,10 @@ internal static partial class WindowChromeCdp
         string? nameFilter, WindowRoleFilter? roleFilter,
         string? expectedProfile, string? expectedOrigin, string? expectedUrl)
     {
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(TabConnected ? 6 : 24));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(
+            TabConnected ? 7500 : 24000));
         var cdp = await TabSessionAsync(endpoint, timeout.Token);
-        var tabs = await TargetsForWindow(cdp, hwnd);
+        var tabs = await TargetsForWindow(cdp, hwnd, windowId, timeout.Token);
         if (scope == WindowInspectScope.TABS)
         {
             tabs = tabs.Where(t => MatchesContext(t.Url, expectedOrigin, expectedUrl)).ToList();
@@ -899,11 +982,11 @@ internal static partial class WindowChromeCdp
     {
         bool dispatched = false;
         using var timeout = new CancellationTokenSource(
-            TimeSpan.FromMilliseconds(request.ObservationTimeoutMs + (TabConnected ? 3000 : 24000)));
+            TimeSpan.FromMilliseconds(request.ObservationTimeoutMs + (TabConnected ? 5500 : 24000)));
         try
         {
             var cdp = await TabSessionAsync(endpoint, timeout.Token);
-            var tabs = await TargetsForWindow(cdp, hwnd);
+            var tabs = await TargetsForWindow(cdp, hwnd, request.WindowId, timeout.Token);
             var selected = tabs.SingleOrDefault(t => t.Id == target.TargetId);
             if (selected is null) return Rejected(WindowActionCode.CDP_TARGET_AMBIGUOUS);
             if (!MatchesContext(selected.Url, request.ExpectedOrigin, request.ExpectedUrl) ||

@@ -848,6 +848,35 @@ Check(matchingCdpWindow == 12 &&
     WindowChromeCdp.UniqueWindowId(new (int WindowId, string? ContextId)[]
     { (12, "") }) is null,
     "chrome.cdp_native_window_unique_across_optional_distinct_contexts");
+var chromeTabStrip = WindowChromeCdp.NativeTabStripTitles(new (string Path, string Name)[]
+{
+    ("0.1.0", "Вкладка \"Profile Control Plane\" использует 58 МБ памяти"),
+    ("0.1.1", "Unique Native Tab"),
+    ("0.2.0", "Different web page ARIA tab")
+}, "Profile Control Plane - Google Chrome");
+var secondTabStrip = WindowChromeCdp.NativeTabStripTitles(new (string Path, string Name)[]
+{
+    ("0.1.0", "Profile Control Plane"), ("0.2.0", "Tab \"Profile Control Plane\" inactive")
+}, "Profile Control Plane - Google Chrome");
+var candidatePages = new (int WindowId, string Title)[]
+{
+    (12, "Profile Control Plane"), (12, "Unique Native Tab"),
+    (13, "Profile Control Plane"), (13, "Other Window's Tab")
+};
+Check(chromeTabStrip is { Length: 2 } && chromeTabStrip.Contains("Profile Control Plane") &&
+    chromeTabStrip.Contains("Unique Native Tab") && secondTabStrip is null &&
+    WindowChromeCdp.NativeTabStripTitles(new (string Path, string Name)[]
+    { ("0.1.0", "Profile Control Plane") }, "Different title - Google Chrome") is null &&
+    WindowChromeCdp.ChromeTabLabel("Вкладка \"Name\" неактивна") == "Name" &&
+    WindowChromeCdp.ChromeTabLabel("Tab \"English\" inactive") == "English" &&
+    WindowChromeCdp.ChromeTabLabel("Вкладка \"\" неактивна") is null &&
+    WindowChromeCdp.UniqueTabFingerprintWindow(new[] { 12, 13 }, candidatePages,
+        chromeTabStrip!) == 12 &&
+    WindowChromeCdp.UniqueTabFingerprintWindow(new[] { 12, 13 }, candidatePages,
+        new[] { "Profile Control Plane" }) is null &&
+    WindowChromeCdp.UniqueTabFingerprintWindow(new[] { 12, 13 }, candidatePages,
+        new[] { "Profile Control Plane", "Unique Native Tab", "Other Window's Tab" }) is null,
+    "chrome.cdp_ambiguous_overlapping_windows_resolved_only_by_exclusive_native_tab_strip");
 Check(WindowPhysicalClick.CanUseNativeFallback(null) &&
     WindowPhysicalClick.CanUseNativeFallback(new(WindowActionCode.CDP_UNAVAILABLE,
         FailureStage: WindowFailureStage.CDP_CONNECT)) &&
