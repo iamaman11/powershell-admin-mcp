@@ -79,8 +79,8 @@ try{
         $manage=@($list.tools|Where-Object name -eq 'windows.manage_window')
         $systemQuery=@($list.tools|Where-Object name -eq 'windows.system_query')
         Assert ($systemQuery.Count -eq 1 -and
-            @(@('kind','pid','service_name','page_size','offset')|Where-Object {-not $systemQuery[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
-            @(@('status','kind','processes','services','network_interfaces','next_offset','native_error')|Where-Object {-not $systemQuery[0].outputSchema.properties.Contains($_)}).Count -eq 0) 'issue72.native_typed_system_query_catalog'
+            @(@('kind','pid','service_name','page_size','offset','event_log','event_id','registry_hive','registry_path','registry_view','include_value','task_folder')|Where-Object {-not $systemQuery[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
+            @(@('status','kind','processes','services','network_interfaces','events','registry_entries','scheduled_tasks','next_offset','native_error')|Where-Object {-not $systemQuery[0].outputSchema.properties.Contains($_)}).Count -eq 0) 'issue72.native_typed_system_query_catalog'
         Assert ($fileWrite.Count -eq 1 -and $locator.Count -eq 1 -and $manage.Count -eq 1 -and
             @(@('action','path','operation_id','expected_bytes','expected_sha256','offset','data_base64','chunk_sha256','execution_context')|Where-Object {-not $fileWrite[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
             @(@('status','operation_id','effect_state','received_bytes','safe_to_retry')|Where-Object {-not $fileWrite[0].outputSchema.properties.Contains($_)}).Count -eq 0 -and
@@ -144,6 +144,23 @@ try{
         Send $p 45 'tools/call' @{name='windows.system_query';arguments=@{kind='PROCESSES';pid=-1};_meta=$meta}
         $invalidProcess=(Receive $p 45).structuredContent
         Assert ($invalidProcess.status -eq 'INVALID_ARGUMENT' -and -not $invalidProcess.Contains('processes')) 'issue72.system_query_invalid_rejects_before_os'
+        Send $p 46 'tools/call' @{name='windows.system_query';arguments=@{kind='EVENT_LOG';event_log='APPLICATION';page_size=5};_meta=$meta}
+        $events=(Receive $p 46).structuredContent
+        Assert ($events.status -eq 'COMPLETED' -and $events.kind -eq 'EVENT_LOG' -and
+            @($events.events).Count -le 5 -and -not $events.Contains('registry_entries')) 'issue72.windows_eventlog_native_bounded_metadata'
+        Send $p 47 'tools/call' @{name='windows.system_query';arguments=@{kind='REGISTRY';registry_hive='LOCAL_MACHINE';registry_path='SOFTWARE\Microsoft\Windows NT\CurrentVersion';page_size=5};_meta=$meta}
+        $registry=(Receive $p 47).structuredContent
+        Assert ($registry.status -eq 'COMPLETED' -and $registry.kind -eq 'REGISTRY' -and
+            @($registry.registry_entries).Count -gt 0 -and @($registry.registry_entries).Count -le 5 -and
+            -not $registry.Contains('scheduled_tasks') -and
+            @($registry.registry_entries|Where-Object {$_.Contains('data_text')}).Count -eq 0) 'issue72.windows_registry_metadata_opt_in_content'
+        Send $p 48 'tools/call' @{name='windows.system_query';arguments=@{kind='SCHEDULED_TASKS';task_folder='\';page_size=5};_meta=$meta}
+        $scheduled=(Receive $p 48).structuredContent
+        Assert ($scheduled.status -eq 'COMPLETED' -and $scheduled.kind -eq 'SCHEDULED_TASKS' -and
+            @($scheduled.scheduled_tasks).Count -le 5) 'issue72.windows_task_scheduler_native_readonly'
+        Send $p 49 'tools/call' @{name='windows.system_query';arguments=@{kind='EVENT_LOG';event_log='APPLICATION';registry_hive='USERS'};_meta=$meta}
+        $invalidExtra=(Receive $p 49).structuredContent
+        Assert ($invalidExtra.status -eq 'INVALID_ARGUMENT') 'issue72.system_query_rejects_mixed_domains'
         Send $p 43 'tools/call' @{name='powershell_status';arguments=@{include_tunnel_metrics=$true};_meta=$meta}
         $vendor=(Receive $p 43).structuredContent
         Write-Host "ISSUE69_TUNNEL_METRICS_STATUS=$($vendor.tunnel_metrics.status)"

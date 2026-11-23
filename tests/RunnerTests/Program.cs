@@ -58,6 +58,48 @@ static void Check(bool ok, string label)
         "issue72.system_query_typed_variant_wire_without_command_payload");
 }
 {
+    Check(SystemSnapshot.Valid(SystemQueryKind.EVENT_LOG,null,null,5,0,
+            eventLog:SystemEventLogKind.APPLICATION,eventId:1000) &&
+        SystemSnapshot.Valid(SystemQueryKind.REGISTRY,null,null,5,0,
+            registryHive:SystemRegistryHive.LOCAL_MACHINE,
+            registryPath:@"SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+            registryView:SystemRegistryView.REGISTRY64) &&
+        SystemSnapshot.Valid(SystemQueryKind.SCHEDULED_TASKS,null,null,5,0,taskFolder:@"\") &&
+        !SystemSnapshot.Valid(SystemQueryKind.EVENT_LOG,null,null,5,0) &&
+        !SystemSnapshot.Valid(SystemQueryKind.EVENT_LOG,null,null,5,0,
+            eventLog:SystemEventLogKind.APPLICATION,eventId:-1) &&
+        !SystemSnapshot.Valid(SystemQueryKind.EVENT_LOG,null,null,5,0,
+            eventLog:SystemEventLogKind.SYSTEM,registryHive:SystemRegistryHive.USERS) &&
+        !SystemSnapshot.Valid(SystemQueryKind.REGISTRY,null,null,5,0,
+            registryHive:SystemRegistryHive.CURRENT_USER,registryPath:@"SOFTWARE",
+            eventId:1) &&
+        !SystemSnapshot.Valid(SystemQueryKind.SCHEDULED_TASKS,null,null,5,0,
+            taskFolder:@"\..\Windows") &&
+        !SystemSnapshot.Valid(SystemQueryKind.PROCESSES,null,null,5,0,
+            includeValue:true) &&
+        !SystemSnapshot.Valid(SystemQueryKind.REGISTRY,null,null,5,1001,
+            registryHive:SystemRegistryHive.LOCAL_MACHINE,registryPath:@"SOFTWARE"),
+        "issue72.system_query_windows_diagnostic_variant_validation");
+    var eventLog=SystemSnapshot.Observe(SystemQueryKind.EVENT_LOG,null,null,5,0,
+        CancellationToken.None,eventLog:SystemEventLogKind.APPLICATION);
+    var registry=SystemSnapshot.Observe(SystemQueryKind.REGISTRY,null,null,5,0,
+        CancellationToken.None,registryHive:SystemRegistryHive.LOCAL_MACHINE,
+        registryPath:@"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
+    var tasks=SystemSnapshot.Observe(SystemQueryKind.SCHEDULED_TASKS,null,null,5,0,
+        CancellationToken.None,taskFolder:@"\");
+    Check(eventLog.Status==SystemQueryCode.COMPLETED && eventLog.Events is { Length: <=5 } &&
+        registry.Status==SystemQueryCode.COMPLETED && registry.RegistryEntries is { Length: >0 and <=5 } &&
+        tasks.Status==SystemQueryCode.COMPLETED && tasks.ScheduledTasks is { Length: <=5 },
+        "issue72.native_event_registry_scheduler_queries_read_only");
+    string wire=System.Text.Json.JsonSerializer.Serialize(registry,PipeWire.Json);
+    Check(wire.Contains("\"kind\":\"REGISTRY\"",StringComparison.Ordinal) &&
+        wire.Contains("\"registry_entries\":",StringComparison.Ordinal) &&
+        !wire.Contains("\"data_text\":",StringComparison.Ordinal) &&
+        !wire.Contains("\"events\":",StringComparison.Ordinal) &&
+        !wire.Contains("\"scheduled_tasks\":",StringComparison.Ordinal),
+        "issue72.registry_value_content_opt_in_and_variant_wire");
+}
+{
     string fixture = """
         # HELP commands_enqueued_total total
         commands_enqueued_total{tunnel_id="sensitive-tunnel-identity"} 18

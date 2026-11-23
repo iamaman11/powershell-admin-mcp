@@ -17,7 +17,7 @@ are needed for the native operations below.
 | Read binary, text, or a large file exactly | `windows.file_read_chunk` |
 | Create or replace a file atomically | `windows.file_write` |
 | Create, copy, move or delete files and folders | `windows.file_manage` |
-| Inspect processes, Windows services or network interfaces with native typed fields | `windows.system_query` |
+| Read processes, services, adapters, Windows events, registry metadata or scheduled tasks with native typed fields | `windows.system_query` |
 | Find a window | `windows.list_windows` |
 | Inspect window controls or Chrome tabs | `windows.inspect_window` |
 | Capture a single covered window | `windows.capture_window` |
@@ -30,12 +30,24 @@ These 17 tools share native Windows identities and typed results. There is no
 arbitrary path, UI-role or administrator-cmdlet allowlist. Windows ACLs, desktop
 sessions, Chrome's permission dialog, and exact resource identity still apply.
 
-`windows.system_query(kind=PROCESSES|SERVICES|NETWORK_INTERFACES)` is read-only and
-uses the MCP frontend's real Windows token. Process ID and service name select an
-exact subject; lists are paged (up to 50 entries per call). Details that the OS
-does not authorize are marked unavailable, never silently converted to zero.
-For privileged modifications or other diagnostics, `powershell_exec` continues
-to support USER and explicit SYSTEM execution.
+`windows.system_query(kind=PROCESSES|SERVICES|NETWORK_INTERFACES|EVENT_LOG|REGISTRY|SCHEDULED_TASKS)`
+is read-only and uses the MCP frontend's real Windows token. Process ID and
+service name select exact subjects; lists are paged (up to 50 entries per call).
+For `EVENT_LOG`, select `event_log=APPLICATION|SYSTEM|SECURITY` and optionally
+`event_id` (0–65535); results expose event identity, provider, level and time,
+not event messages. The newest events come first and offsets are bounded to 200.
+For `REGISTRY`, specify `registry_hive=LOCAL_MACHINE|CURRENT_USER|USERS|CLASSES_ROOT|CURRENT_CONFIG`
+and a hive-relative `registry_path`. It lists immediate subkeys/value names;
+`registry_view=DEFAULT|REGISTRY32|REGISTRY64` selects the view. Value content
+is omitted unless explicitly requested with `include_value=true` and is
+truncated or hashed in bounded result fields. This may reveal sensitive
+configuration to the authorized caller. For `SCHEDULED_TASKS`, optionally
+select `task_folder` (default `\`); results list tasks in that exact folder,
+including hidden tasks allowed by ACLs, but never execution arguments.
+No query elevates a token, modifies state, or bypasses ACLs. Unavailable details
+are explicitly marked rather than silently turned into zero. For privileged
+modifications or other diagnostics, `powershell_exec` continues to support
+USER and explicit SYSTEM execution.
 
 ## Small file: one call
 
