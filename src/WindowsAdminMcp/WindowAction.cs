@@ -50,6 +50,7 @@ public enum WindowActionCode
     ACCESS_DENIED, DISABLED, PASSWORD_DENIED, UNSUPPORTED_ACTION,
     UIA_UNAVAILABLE, AUDIT_UNAVAILABLE, AUDIT_RESULT_FAILED,
     TIMEOUT_UNKNOWN_EFFECT, ACTION_FAILED_UNKNOWN_EFFECT, WORKER_FAILED_UNKNOWN_EFFECT,
+    UIA_ELEMENTNOTENABLED_UNKNOWN_EFFECT,
     EXPECTED_STATE_ALREADY_TRUE, WINDOW_NOT_VISIBLE, FOREGROUND_UNAVAILABLE,
     FOREGROUND_INPUT_DISALLOWED,
     CLICK_POINT_UNAVAILABLE, TARGET_OCCLUDED, INPUT_FAILED_UNKNOWN_EFFECT,
@@ -678,7 +679,9 @@ internal static class WindowAction
     // Preserve the original provider code and diagnostics even when the
     // requested transition is observed after a reported dispatch failure.
     internal static WindowActionResult ReconcileObserved(WindowActionResult result, bool observed) =>
-        result with { Status = observed && result.Status == WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT &&
+        result with { Status = observed && result.Status is
+                    (WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT or
+                     WindowActionCode.UIA_ELEMENTNOTENABLED_UNKNOWN_EFFECT) &&
                 result.FailureStage == WindowFailureStage.DISPATCH_UIA && result.HResult is not null
                 ? WindowActionCode.EFFECT_VERIFIED_PROVIDER_REJECTED : result.Status,
             ExpectedStateObserved = observed,

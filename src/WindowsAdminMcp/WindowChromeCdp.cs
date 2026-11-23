@@ -181,7 +181,7 @@ internal static partial class WindowChromeCdp
             string title = GetTitle(hwnd);
             if (string.IsNullOrWhiteSpace(title))
                 return Rejected(WindowActionCode.CDP_TARGET_AMBIGUOUS);
-            var candidates = new List<string>();
+            var candidates = new List<(string TargetId, string Url, int WindowId)>();
             foreach (var info in targets.GetProperty("targetInfos").EnumerateArray())
             {
                 if (info.GetProperty("type").GetString() != "page" ||
@@ -203,10 +203,13 @@ internal static partial class WindowChromeCdp
                 uint dpi = GetDpiForWindow(hwnd);
                 if (MatchesWindow(title, targetTitle,
                     nativeBounds, new(left.GetInt32(), top.GetInt32(), width.GetInt32(), height.GetInt32()),
-                    dpi == 0 ? 1 : dpi / 96.0)) candidates.Add(targetId);
+                    dpi == 0 ? 1 : dpi / 96.0))
+                    candidates.Add((targetId, url.GetString()!, windowId));
             }
             if (candidates.Count != 1) return Rejected(WindowActionCode.CDP_TARGET_AMBIGUOUS);
-            string sessionId = await Attach(cdp, candidates[0]);
+            var selected = candidates[0];
+            string sessionId = await Attach(cdp, selected.TargetId);
+            string loaderId = await Loader(cdp, sessionId);
             var document = await cdp.Call("DOM.getDocument", new { depth = 0 }, sessionId);
             int nodeId = document.GetProperty("root").GetProperty("nodeId").GetInt32();
             var matches = role is null
@@ -262,6 +265,9 @@ internal static partial class WindowChromeCdp
                     hitVerified.ValueKind == JsonValueKind.True;
                 if (pointerHitsTarget)
                 {
+                    var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
+                        selected.TargetId, selected.Url, selected.WindowId, loaderId);
+                    if (checkpoint is not null) return Rejected(checkpoint.Value);
                     dispatched = true;
                     string button=request.Action==WindowActionKind.RIGHT_CLICK?"right":"left";
                     int repeats=request.Action==WindowActionKind.DOUBLE_CLICK?2:1;
@@ -279,13 +285,17 @@ internal static partial class WindowChromeCdp
             {
                 if (!await EditableDomNode(cdp, sessionId, backendNodeId))
                     return Rejected(WindowActionCode.UNSUPPORTED_ACTION);
-                await cdp.Call("DOM.focus", new { backendNodeId }, sessionId);
+                var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
+                    selected.TargetId, selected.Url, selected.WindowId, loaderId);
+                if (checkpoint is not null) return Rejected(checkpoint.Value);
+                // Focus may itself fire a page event, so it is not a safe
+                // pre-dispatch probe and must not be replayed on timeout.
                 dispatched = true;
+                await cdp.Call("DOM.focus", new { backendNodeId }, sessionId);
                 await ReplaceFocusedText(cdp, sessionId, request.Value!);
             }
             else
             {
-                await cdp.Call("DOM.focus", new { backendNodeId }, sessionId);
                 var (key, code, vk, keyText) = request.Key switch
                 {
                     WindowKey.ENTER => ("Enter", "Enter", 13, "\r"),
@@ -293,7 +303,11 @@ internal static partial class WindowChromeCdp
                     WindowKey.ESCAPE => ("Escape", "Escape", 27, ""),
                     _ => throw new InvalidOperationException("INVALID_KEY")
                 };
+                var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
+                    selected.TargetId, selected.Url, selected.WindowId, loaderId);
+                if (checkpoint is not null) return Rejected(checkpoint.Value);
                 dispatched = true;
+                await cdp.Call("DOM.focus", new { backendNodeId }, sessionId);
                 await cdp.Call("Input.dispatchKeyEvent", new { type = "keyDown", key, code,
                     windowsVirtualKeyCode = vk, text = keyText }, sessionId);
                 await cdp.Call("Input.dispatchKeyEvent", new { type = "keyUp", key, code,

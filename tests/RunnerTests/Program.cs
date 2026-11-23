@@ -1472,6 +1472,26 @@ Check(WindowChromeCdp.MatchesWindow("Profile Control Plane - Google Chrome (Vale
         "Profile Control Plane", new WindowBounds(900, 80, 1200, 800),
         new WindowBounds(80, 64, 960, 640), 1.25),
     "chrome.cdp_exact_window_title_and_bounds");
+using (var validInfo = System.Text.Json.JsonDocument.Parse(
+    "{\"targetInfo\":{\"targetId\":\"0123456789abcdef\",\"type\":\"page\",\"url\":\"https://staging.example.test/form\"}}"))
+using (var navigatedInfo = System.Text.Json.JsonDocument.Parse(
+    "{\"targetInfo\":{\"targetId\":\"0123456789abcdef\",\"type\":\"page\",\"url\":\"https://staging.example.test/other\"}}"))
+using (var replacedInfo = System.Text.Json.JsonDocument.Parse(
+    "{\"targetInfo\":{\"targetId\":\"fedcba9876543210\",\"type\":\"page\",\"url\":\"https://staging.example.test/form\"}}"))
+using (var malformedInfo = System.Text.Json.JsonDocument.Parse("{\"targetInfo\":{\"url\":17}}"))
+{
+    Check(WindowChromeCdp.MatchesDispatchTarget(validInfo.RootElement,
+            "0123456789abcdef", "https://staging.example.test/form",
+            "https://staging.example.test", null) &&
+        !WindowChromeCdp.MatchesDispatchTarget(navigatedInfo.RootElement,
+            "0123456789abcdef", "https://staging.example.test/form",
+            "https://staging.example.test", null) &&
+        !WindowChromeCdp.MatchesDispatchTarget(replacedInfo.RootElement,
+            "0123456789abcdef", "https://staging.example.test/form", null, null) &&
+        !WindowChromeCdp.MatchesDispatchTarget(malformedInfo.RootElement,
+            "0123456789abcdef", "https://staging.example.test/form", null, null),
+        "chrome.cdp_predispatch_snapshot_rejects_navigation_target_swap_and_invalid_response");
+}
 using (var model = System.Text.Json.JsonDocument.Parse("{\"quad\":[10,20,30,20,30,40,10,40],\"viewport\":{\"clientWidth\":100,\"clientHeight\":100}}"))
 {
     var root = model.RootElement;
@@ -1487,6 +1507,26 @@ var providerFailed = new WindowActionResult(WindowActionCode.ACTION_FAILED_UNKNO
     ExecutionMethod: WindowExecutionMethod.UIA_PATTERN);
 var reconciled = WindowAction.ReconcileObserved(providerFailed, true);
 var unverified = WindowAction.ReconcileObserved(providerFailed, false);
+var disabledAtDispatch = providerFailed with
+{
+    Status = WindowActionNoFocus.ProviderErrorCode(unchecked((int)0x80040200)),
+    EnabledBefore = true
+};
+var disabledObserved = WindowAction.ReconcileObserved(disabledAtDispatch, true);
+var disabledUnknown = WindowAction.ReconcileObserved(disabledAtDispatch, false);
+Check(disabledAtDispatch.Status == WindowActionCode.UIA_ELEMENTNOTENABLED_UNKNOWN_EFFECT &&
+    WindowActionNoFocus.ProviderErrorCode(unchecked((int)0x80004005)) ==
+        WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT &&
+    disabledUnknown.Status == WindowActionCode.UIA_ELEMENTNOTENABLED_UNKNOWN_EFFECT &&
+    disabledUnknown.ProviderOutcome == WindowProviderOutcome.REJECTED &&
+    disabledUnknown.EnabledBefore == true &&
+    disabledUnknown.EffectState == WindowEffectState.EFFECT_UNKNOWN &&
+    !disabledUnknown.SafeToRetry &&
+    !WindowAction.CanFallbackAfterNativeClick(disabledUnknown) &&
+    disabledObserved.Status == WindowActionCode.EFFECT_VERIFIED_PROVIDER_REJECTED &&
+    disabledObserved.EffectState == WindowEffectState.EFFECT_VERIFIED &&
+    disabledObserved.ProviderOutcome == WindowProviderOutcome.REJECTED,
+    "windows.uia_elementnotenabled_typed_rejection_or_verified_effect_no_replay");
 Check(reconciled.Status == WindowActionCode.EFFECT_VERIFIED_PROVIDER_REJECTED &&
     reconciled.EffectState == WindowEffectState.EFFECT_VERIFIED && !reconciled.EffectUnknown &&
     reconciled.ProviderOutcome == WindowProviderOutcome.REJECTED && !reconciled.SafeToRetry &&
