@@ -24,7 +24,7 @@ try{
     # Hash these scripts in manifest.json like all other deployed files.
     $helpers=Join-Path $native 'installer'
     [void][IO.Directory]::CreateDirectory($helpers)
-    foreach($name in @('Install-Native.ps1','Update-Native.ps1','Update-OperatorTask.ps1','NativeFileSwap.ps1','VendorLock.Generated.ps1')){
+    foreach($name in @('Install-Native.ps1','Update-Native.ps1','Update-OperatorTask.ps1','NativeFileSwap.ps1','BackupRetention.ps1','VendorLock.Generated.ps1')){
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $helpers
     }
     Invoke-WebRequest -Uri $VendorLockZipSource -OutFile $zip

@@ -77,6 +77,7 @@ jobs:
           }
           Write-Host 'POWERSHELL_PARSE=PASS'
           ./tests/Test-OperatorUpdate.ps1
+          ./tests/Test-BackupRetention.ps1
           ./installer/Sync-VendorLock.ps1
       - uses: actions/setup-dotnet@v6
         with:

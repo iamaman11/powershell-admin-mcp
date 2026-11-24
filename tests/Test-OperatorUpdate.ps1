@@ -58,6 +58,17 @@ $action.Arguments=$forgetArgs.Replace(' -ExpectedCommit '+$acceptCommit,'')
 Check (-not(Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript)) 'operator.legacy_cleanup_requires_exact_commit'
 $action.Arguments=$forgetArgs+' -Unexpected'
 Check (-not(Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript)) 'operator.legacy_cleanup_rejects_injected_args'
+$backupPlan='c'*64
+$pruneArgs=New-OperatorArguments $operatorScript 'prune' $operatorId $acceptCommit $backupPlan
+$action.Arguments=$pruneArgs
+Check ((Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript) -and
+    (Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript $operatorId '' '' 'prune' $acceptCommit $backupPlan)) 'operator.backup_cleanup_exact_plan_identity'
+Check (-not(Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript $operatorId '' '' 'prune' $acceptCommit ('d'*64)) -and
+    -not(Test-ScheduledUpdateIdentity $task 'ACME\Operator' $operatorScript $operatorId '' '' 'prune' ('d'*40) $backupPlan)) 'operator.backup_cleanup_rejects_changed_commit_or_plan'
+$action.Arguments=$pruneArgs.Replace(' -ExpectedPlanSha256 '+$backupPlan,'')
+Check (-not(Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript)) 'operator.backup_cleanup_requires_plan'
+$action.Arguments=$pruneArgs+' -Unexpected'
+Check (-not(Test-OperatorDefinition $task 'ACME\Operator' $operatorExe $operatorScript)) 'operator.backup_cleanup_rejects_injected_args'
 $action.Arguments=New-OperatorArguments $operatorScript 'update' $operatorId
 $actual=[Security.Principal.WindowsIdentity]::GetCurrent()
 $task.Principal.UserId=$actual.User.Translate([Security.Principal.NTAccount]).Value

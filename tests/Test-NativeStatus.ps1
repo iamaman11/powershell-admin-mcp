@@ -125,8 +125,12 @@ try{
         Assert ($updateTool.Count -eq 1 -and $updateTool[0].inputSchema.properties.Contains('action') -and
             $updateTool[0].inputSchema.properties.Contains('remote_acceptance_confirmed') -and
             $updateTool[0].inputSchema.properties.Contains('expected_commit') -and
+            $updateTool[0].inputSchema.properties.Contains('plan_sha256') -and
             $updateTool[0].outputSchema.properties.Contains('operation_id') -and
             $updateTool[0].outputSchema.properties.Contains('installed_commit') -and
+            $updateTool[0].outputSchema.properties.Contains('candidate_bytes') -and
+            $updateTool[0].outputSchema.properties.Contains('reclaimed_bytes') -and
+            $updateTool[0].outputSchema.properties.Contains('plan_sha256') -and
             $updateTool[0].outputSchema.properties.Contains('operation_action')) 'r5.typed_independent_operator_update_contract'
         Send $p 75 'tools/call' @{name='powershell_update';arguments=@{action='ACCEPT';expected_commit=('a'*40)};_meta=$meta}
         $invalidAccept=(Receive $p 75).structuredContent

@@ -925,6 +925,22 @@ Check(UpdateTools.ValidArguments(UpdateToolAction.FORGET_LEGACY,false,new string
     !UpdateTools.ValidArguments(UpdateToolAction.FORGET_LEGACY,true,new string('a',40)) &&
     !UpdateTools.ValidArguments(UpdateToolAction.FORGET_LEGACY,false,new string('z',40)),
     "update.legacy_forget_requires_exact_commit_without_accept");
+Check(UpdateTools.ValidArguments(UpdateToolAction.PREVIEW_BACKUPS,false,null) &&
+    !UpdateTools.ValidArguments(UpdateToolAction.PREVIEW_BACKUPS,false,new string('a',40)) &&
+    UpdateTools.ValidArguments(UpdateToolAction.CLEANUP_BACKUPS,false,new string('a',40),new string('b',64)) &&
+    !UpdateTools.ValidArguments(UpdateToolAction.CLEANUP_BACKUPS,false,new string('a',40)) &&
+    !UpdateTools.ValidArguments(UpdateToolAction.CLEANUP_BACKUPS,true,new string('a',40),new string('b',64)) &&
+    !UpdateTools.ValidArguments(UpdateToolAction.CLEANUP_BACKUPS,false,new string('a',40),new string('z',64)),
+    "update.backup_cleanup_requires_exact_preflight_hash");
+var backupPlanWire = new BackupRetentionPlanWire("READY",new string('a',40),new string('b',64),
+    2,14_000_000_000,2,450_000_000,true,
+    [".trial-backup-"+new string('1',40),".accepted-backup-"+new string('2',40)]);
+string backupPlanJson = System.Text.Json.JsonSerializer.Serialize(backupPlanWire,PipeWire.Json);
+Check(System.Text.Json.JsonSerializer.Deserialize<BackupRetentionPlanWire>(backupPlanJson,PipeWire.Json)
+    is { Status:"READY",CandidateCount:2,CandidateBytes:14_000_000_000,
+         RetainedCount:2,RollbackPending:true,CandidateNames:{Length:2} } &&
+    backupPlanJson.Contains("\"candidate_bytes\"",StringComparison.Ordinal),
+    "update.backup_retention_wire_strict_typed_fields");
 var doctorSnapshot = new DoctorSnapshot(DoctorState.DEGRADED,
     [new DoctorCheck(DoctorComponent.Store, DoctorState.DEGRADED,
         DoctorReason.RECONCILIATION_REQUIRED, DoctorAction.INSPECT_JOBS)],

@@ -36,6 +36,14 @@ These 23 tools share native Windows identities and typed results. There is no
 arbitrary path, UI-role or administrator-cmdlet allowlist. Windows ACLs, desktop
 sessions, Chrome's permission dialog, and exact resource identity still apply.
 
+Installation backup maintenance uses the existing `powershell_update` tool:
+`PREVIEW_BACKUPS` only counts eligible historical archives and returns a SHA-256
+plan plus reclaimable bytes; `CLEANUP_BACKUPS` requires that exact
+`plan_sha256` and `expected_commit`. Its Scheduler result is read with `STATUS`.
+The current files and `.rollback` are never cleanup candidates; the nearest
+trial chain and most recent accepted backup are retained. The cleanup does not
+restart WindowsAdminMCP or disturb Chrome, and is never automatic.
+
 `windows.system_query(kind=PROCESSES|SERVICES|NETWORK_INTERFACES|TCP_CONNECTIONS|EVENT_LOG|REGISTRY|SCHEDULED_TASKS)`
 is read-only and uses the MCP frontend's real Windows token. Process ID and
 service name select exact subjects; lists are paged (up to 50 entries per call).

@@ -1,11 +1,12 @@
 # Local operator orchestration only. The existing installer owns verification,
 # protected file swaps and rollback. SCM/Task Scheduler own process lifetime.
 [CmdletBinding()]
-param([ValidateSet('update','rollback','accept','forget')][string]$Action='update',
+param([ValidateSet('update','rollback','accept','forget','prune')][string]$Action='update',
       [switch]$RemoteAcceptanceConfirmed,
       [switch]$ScheduledOperator,
        [ValidatePattern('^[a-f0-9]{32}$')][string]$OperationId,
-       [ValidatePattern('^[a-f0-9]{40}$')][string]$ExpectedCommit)
+       [ValidatePattern('^[a-f0-9]{40}$')][string]$ExpectedCommit,
+       [ValidatePattern('^[a-f0-9]{64}$')][string]$ExpectedPlanSha256)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 function Select-UpdateRun($runs,[string]$commit){
@@ -278,11 +279,15 @@ function Test-UpdaterPrincipal([string]$userId,[string]$account,[string]$sid='')
 }
 function Test-ScheduledUpdateIdentity($task,[string]$account,[string]$updater,[string]$operation,
                                        [string]$sid='',[string]$pwsh='',
-                                       [string]$mode='update',[string]$expectedCommit=''){
+                                       [string]$mode='update',[string]$expectedCommit='',
+                                       [string]$expectedPlan=''){
     $verb=if($mode -ceq 'accept'){
         '-Action accept -RemoteAcceptanceConfirmed -ExpectedCommit '+$expectedCommit
     }elseif($mode -ceq 'forget' -and $expectedCommit -cmatch '^[a-f0-9]{40}$'){
         '-Action forget -ExpectedCommit '+$expectedCommit
+    }elseif($mode -ceq 'prune' -and $expectedCommit -cmatch '^[a-f0-9]{40}$' -and
+             $expectedPlan -cmatch '^[a-f0-9]{64}$'){
+        '-Action prune -ExpectedCommit '+$expectedCommit+' -ExpectedPlanSha256 '+$expectedPlan
     }elseif($mode -ceq 'update' -and -not $expectedCommit){
         '-Action update'
     }else{return $false}
@@ -312,14 +317,16 @@ if(-not [Environment]::UserInteractive -or [Diagnostics.Process]::GetCurrentProc
     throw 'UPDATE_LOCAL_INTERACTIVE_ADMIN_REQUIRED'
 }
 if($ScheduledOperator){
-    if($Action -notin @('update','accept','forget') -or -not $OperationId -or
+    if($Action -notin @('update','accept','forget','prune') -or -not $OperationId -or
        ($Action -eq 'accept' -and (-not $RemoteAcceptanceConfirmed -or -not $ExpectedCommit)) -or
-       ($Action -eq 'forget' -and ($RemoteAcceptanceConfirmed -or -not $ExpectedCommit)) -or
-       ($Action -eq 'update' -and ($RemoteAcceptanceConfirmed -or $ExpectedCommit))){
+       ($Action -eq 'forget' -and ($RemoteAcceptanceConfirmed -or -not $ExpectedCommit -or $ExpectedPlanSha256)) -or
+       ($Action -eq 'prune' -and ($RemoteAcceptanceConfirmed -or -not $ExpectedCommit -or -not $ExpectedPlanSha256)) -or
+       ($Action -eq 'accept' -and $ExpectedPlanSha256) -or
+       ($Action -eq 'update' -and ($RemoteAcceptanceConfirmed -or $ExpectedCommit -or $ExpectedPlanSha256))){
         throw 'UPDATE_SCHEDULED_OPERATION_INVALID'
     }
     $operatorTask=Get-ScheduledTask -TaskName 'WindowsAdminMCP-OperatorUpdate' -ErrorAction SilentlyContinue
-    $verifiedOperator=Test-ScheduledUpdateIdentity $operatorTask $identity.Name $PSCommandPath $OperationId $identity.User.Value (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe') $Action $ExpectedCommit
+    $verifiedOperator=Test-ScheduledUpdateIdentity $operatorTask $identity.Name $PSCommandPath $OperationId $identity.User.Value (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe') $Action $ExpectedCommit $ExpectedPlanSha256
     if(-not $verifiedOperator){
         throw 'UPDATE_SCHEDULED_TASK_NOT_CONFIRMED'
     }
@@ -330,9 +337,10 @@ $root=Join-Path $env:ProgramFiles 'WindowsAdminMCP'
 $native=Join-Path $root 'native\WindowsAdminMCP.exe'
 $startup=Join-Path $root 'native\NativeStartup.ps1'
 $installer=Join-Path $PSScriptRoot 'Install-Native.ps1'
+$retention=Join-Path $PSScriptRoot 'BackupRetention.ps1'
 $repo='iamaman11/powershell-admin-mcp'
 $checkout=Split-Path -Parent $PSScriptRoot
-$stage=if($Action -eq 'accept'){'accept_preflight'}elseif($Action -eq 'forget'){'legacy_preflight'}else{'preflight'}
+$stage=if($Action -eq 'accept'){'accept_preflight'}elseif($Action -eq 'forget'){'legacy_preflight'}elseif($Action -eq 'prune'){'backup_preflight'}else{'preflight'}
 $download=$null
 $stopping=$false
 $maintenance=$false
@@ -347,14 +355,21 @@ $current=$null
 $installed=$null
 $legacyDeleted=$null
 $legacyRemaining=$null
+$backupPlan=$null
+$backupCandidates=$null
+$backupCandidateBytes=$null
+$backupRetained=$null
+$backupReclaimed=$null
 function Write-OperatorStage([string]$state,[string]$reason=''){
     if(-not $ScheduledOperator){return}
     $target=Join-Path $root '.operator-update.json'
     $temp=Join-Path $root ('.operator-update-'+$OperationId+'.tmp')
     $commit=if($null -ne $current){$current.commit}elseif($null -ne $installed){$installed.commit}else{$null}
     $status=[ordered]@{schema=1;operation_id=$OperationId;state=$state;stage=$stage;
-        operation_action=if($Action -eq 'accept'){'ACCEPT'}elseif($Action -eq 'forget'){'FORGET_LEGACY'}else{'REQUEST'};
+        operation_action=if($Action -eq 'accept'){'ACCEPT'}elseif($Action -eq 'forget'){'FORGET_LEGACY'}elseif($Action -eq 'prune'){'CLEANUP_BACKUPS'}else{'REQUEST'};
         commit=$commit;reason=$reason;deleted_count=$legacyDeleted;remaining_count=$legacyRemaining;
+        plan_sha256=$backupPlan;candidate_count=$backupCandidates;candidate_bytes=$backupCandidateBytes;
+        retained_count=$backupRetained;reclaimed_bytes=$backupReclaimed;
         rollback_pending=(Test-Path -LiteralPath (Join-Path $root '.rollback\journal.json'));
         updated_utc=[DateTimeOffset]::UtcNow.ToString('o')}
     [IO.File]::WriteAllText($temp,($status|ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
@@ -488,6 +503,29 @@ try{
         $stage='accepted'
         Write-OperatorStage 'COMPLETED'
         $accepted|ConvertTo-Json -Compress
+        return
+    }
+    if($Action -eq 'prune'){
+        if($installed.commit -cne $ExpectedCommit -or -not $ExpectedPlanSha256){
+            throw 'UPDATE_BACKUP_COMMIT_OR_PLAN_MISMATCH'
+        }
+        $d=Read-InstalledDoctor
+        if($d.package.commit -cne $installed.commit -or -not $d.localOperationalReady){
+            throw 'UPDATE_BACKUP_INSTALLED_PACKAGE_UNREADY'
+        }
+        $stage='backup_cleanup'
+        Write-OperatorStage 'RUNNING'
+        $removed=& $retention -Action Apply -ExpectedCommit $installed.commit -ExpectedPlanSha256 $ExpectedPlanSha256|ConvertFrom-Json
+        if($removed.status -cne 'COMPLETED' -or $removed.installed_commit -cne $installed.commit -or
+           $removed.plan_sha256 -cne $ExpectedPlanSha256 -or $removed.deleted_count -lt 0 -or
+           $removed.reclaimed_bytes -lt 0){throw 'UPDATE_BACKUP_EFFECT_UNCONFIRMED'}
+        $legacyDeleted=[int]$removed.deleted_count
+        $legacyRemaining=[int]$removed.remaining_count
+        $backupPlan=$removed.plan_sha256
+        $backupReclaimed=[long]$removed.reclaimed_bytes
+        $stage='backup_cleaned'
+        Write-OperatorStage 'COMPLETED'
+        $removed|ConvertTo-Json -Compress
         return
     }
     $d=Read-InstalledDoctor
