@@ -2163,7 +2163,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             disabledPreflight.FailureStage == WindowFailureStage.PREPARE_UIA &&
             disabledPreflight.EffectState == WindowEffectState.NO_EFFECT &&
             disabledPreflight.ProviderOutcome == WindowProviderOutcome.NOT_DISPATCHED &&
-            !disabledPreflight.EffectUnknown,
+            !disabledPreflight.EffectUnknown &&
+            Volatile.Read(ref disabledSaveClickCount) == 0,
             "windows.disabled_native_button_rejected_before_provider_dispatch");
         Check(WindowInspector.TryParsePath(disabledButton.Path, out var disabledPath),
             "windows.disabled_native_button_has_exact_uia_path");
@@ -2176,12 +2177,17 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         var providerDisabled = await Task.Run(() => WindowActionNoFocus.Invoke(created.Handle,
             disabledPath, nativeDisabled!.GetRuntimeId(), disabledRequest, Stopwatch.StartNew()))
             .WaitAsync(TimeSpan.FromSeconds(5));
-        // The WinForms provider on some Windows builds acknowledges Invoke
-        // on a disabled button without actually emitting a Click event. A
-        // successful provider call is not a verified effect.
+        // Actual WinForms providers can report success AND dispatch a Click
+        // even with IsEnabled=false. This is why the production preflight
+        // must reject before entering the provider. The direct test-only
+        // call is dispatched exactly once, with independent event readback.
         int saveClicks = Volatile.Read(ref disabledSaveClickCount);
-        Check(saveClicks == 0 && !nativeDisabled!.Current.IsEnabled,
-            "windows.disabled_native_provider_did_not_emit_click_event");
+        bool enabledAfter = nativeDisabled!.Current.IsEnabled;
+        Console.WriteLine($"CI_UIA_DISABLED_PROVIDER_RESULT status={providerDisabled.Status} " +
+            $"stage={providerDisabled.FailureStage} hresult={providerDisabled.HResult} " +
+            $"clicks={saveClicks} enabled_after={enabledAfter}");
+        Check(saveClicks is >= 0 and <= 1 && !enabledAfter,
+            "windows.disabled_native_provider_exact_event_count_and_enabled_readback");
         if (providerDisabled.Status == WindowActionCode.UIA_ELEMENTNOTENABLED_UNKNOWN_EFFECT)
         {
             Check(providerDisabled.HResult == "80040200" &&
@@ -2191,15 +2197,23 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                 providerDisabled.EffectState == WindowEffectState.EFFECT_UNKNOWN &&
                 !providerDisabled.SafeToRetry,
                 "windows.real_uia_provider_elementnotenabled_hresult_is_typed_no_replay");
+            var reconciledDisabled = WindowAction.ReconcileObserved(providerDisabled, saveClicks == 1);
+            Check(saveClicks == 0 || reconciledDisabled.Status ==
+                WindowActionCode.EFFECT_VERIFIED_PROVIDER_REJECTED,
+                "windows.provider_rejection_with_real_event_is_reconciled_without_replay");
         }
         else if (providerDisabled.Status == WindowActionCode.COMPLETED)
         {
             Check(providerDisabled.ProviderOutcome == WindowProviderOutcome.ACKNOWLEDGED &&
                 providerDisabled.EffectState == WindowEffectState.EFFECT_UNKNOWN &&
                 providerDisabled.ExecutionMethod == WindowExecutionMethod.UIA_PATTERN,
-                "windows.uia_provider_ack_does_not_prove_effect_on_disabled_button");
+                "windows.uia_provider_ack_alone_does_not_prove_effect");
+            Check(WindowAction.ReconcileObserved(providerDisabled, saveClicks == 1)
+                    .EffectState == (saveClicks == 1 ? WindowEffectState.EFFECT_VERIFIED :
+                        WindowEffectState.EFFECT_UNKNOWN),
+                "windows.disabled_native_provider_effect_requires_independent_event");
             Console.WriteLine("NOT_TESTED / EXTERNAL_BLOCKER " +
-                "windows.real_uia_provider_elementnotenabled reason=PROVIDER_ACK_WITHOUT_EFFECT");
+                "windows.real_uia_provider_elementnotenabled reason=PROVIDER_ACK");
         }
         else Console.WriteLine("NOT_TESTED / EXTERNAL_BLOCKER " +
             $"windows.real_uia_provider_elementnotenabled reason={providerDisabled.Status} " +
