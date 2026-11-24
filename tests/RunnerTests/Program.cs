@@ -22,6 +22,24 @@ if (args is ["--chrome-pipe-live-action", var liveWindow, var liveProfile, var l
         ManagedProfileId: managedProfileId), TraceId: Guid.NewGuid().ToString("N"));
     var statusRequest = Status();
     var status = await ChromeBrokerPipe.ExchangeAsync(statusRequest, limit.Token);
+    if (status?.Connection?.Status == ChromeConnectionCode.PROFILE_MISMATCH &&
+        WindowCatalog.TryParseId(liveWindow, out var identity))
+    {
+        // The throwaway browser can update its native avatar label while
+        // multiple independent clients are starting. This rejected STATUS
+        // dispatched no browser action; re-read the same HWND and PID before
+        // trying the read-only STATUS once with the current native selector.
+        using var self = Process.GetCurrentProcess();
+        var observed = ChromeProfileCatalog.ReadWindowProfileStable(liveWindow,
+            self.SessionId, out _);
+        if (observed is { } current && current.WindowId == liveWindow &&
+            current.ProcessId == identity.ProcessId)
+        {
+            liveProfile = current.DisplayName;
+            statusRequest = Status();
+            status = await ChromeBrokerPipe.ExchangeAsync(statusRequest, limit.Token);
+        }
+    }
     var inspectRequest = new ChromeBrokerRequest(Inspect: new WindowInspectRequest(
         liveWindow, 4, 20, null, null, 0, false, "CI_CDP_BUTTON",
         WindowRoleFilter.BUTTON, 0, WindowInspectScope.TAB,
@@ -55,7 +73,13 @@ if (args is ["--chrome-pipe-live-action", var liveWindow, var liveProfile, var l
     {
         owner_pid = status?.OwnerPid,
         session_generation = status?.Connection?.SessionGeneration,
+        connection_code = status?.Connection?.Status.ToString(),
+        connection_state = status?.Connection?.State.ToString(),
+        connection_detail = status?.Connection?.Detail,
+        inspect_code = inspect?.Inspect?.Status.ToString(),
+        inspect_detail = inspect?.Inspect?.Detail,
         status = action?.Action?.Status.ToString(),
+        action_detail = action?.Action?.Detail,
         verified = valid
     }, PipeWire.Json));
     Environment.ExitCode = valid ? 0 : 1;

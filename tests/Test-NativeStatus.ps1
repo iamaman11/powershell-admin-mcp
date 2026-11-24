@@ -68,7 +68,7 @@ try{
         $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element','windows.invoke_locator','windows.manage_window','windows.chrome_connection','windows.chrome_tab','powershell_update','windows.file_query','windows.file_read_chunk','windows.file_write','windows.file_manage','windows.system_query','windows.tcp_connections','windows.file_acl','windows.process_wait_chain','windows.network_probe','windows.admin_action')
         Assert (@($required|Where-Object {$_ -notin $names}).Count -eq 0 -and
             $names.Count -eq $required.Count -and
-            $names.Count -eq @($names|Select-Object -Unique).Count) 'native_schema.exact_22_tool_inventory'
+            $names.Count -eq @($names|Select-Object -Unique).Count) 'native_schema.exact_23_tool_inventory'
         $structured=@($list.tools|Where-Object {$_.name -ne 'powershell_screenshot'})
         Assert (@($structured|Where-Object {
             -not $_.Contains('outputSchema') -or
