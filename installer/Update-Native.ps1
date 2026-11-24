@@ -352,12 +352,20 @@ function Write-OperatorStage([string]$state,[string]$reason=''){
     [IO.File]::WriteAllText($temp,($status|ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
     [IO.File]::Move($temp,$target,$true)
 }
+function Assert-InstalledDoctorReport($d){
+    # The updater consumes the package integrity field, not a particular
+    # Doctor presentation schema. A new Doctor schema must not make a verified
+    # installation look broken during the exact-commit readiness readback.
+    if($null -eq $d -or ($d.schemaVersion -isnot [int] -and $d.schemaVersion -isnot [long]) -or
+       $d.schemaVersion -lt 1 -or
+       $d.package.status -ne 'VERIFIED'){throw 'UPDATE_INSTALLED_PACKAGE_UNVERIFIED'}
+}
 function Read-InstalledDoctor {
     # doctor deliberately returns nonzero for NOT_TESTED remote evidence.
     $PSNativeCommandUseErrorActionPreference=$false
     $raw=& $native doctor
     $d=$raw|ConvertFrom-Json
-    if($d.schemaVersion -ne 1 -or $d.package.status -ne 'VERIFIED'){throw 'UPDATE_INSTALLED_PACKAGE_UNVERIFIED'}
+    Assert-InstalledDoctorReport $d
     return $d
 }
 function Get-UpdateClients([int[]]$allowedParents){
