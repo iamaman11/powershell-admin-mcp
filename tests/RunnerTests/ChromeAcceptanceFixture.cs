@@ -139,6 +139,26 @@ internal static class ChromeAcceptanceFixture
                     $"current_label={observed?.DisplayName} " +
                     $"initial_id={profile.ProfileId} current_id={observed?.ProfileId}";
             }
+            void RefreshOwnedProfile()
+            {
+                // In an unsigned, new test profile Chrome may change its
+                // native avatar tooltip from a sign-in hint to "You". The
+                // test owns this exact HWND/PID and user-data-dir, so obtain
+                // the current selector from the real UIA avatar before each
+                // *new* operation. Production never substitutes a selector.
+                var observed = ChromeProfileCatalog.ReadWindowProfileStable(windowId!,
+                    self.SessionId, out var probe);
+                if (observed is null || observed.WindowId != windowId ||
+                    observed.ProcessId != browserPid)
+                    throw new InvalidOperationException(
+                        $"CI_CDP_OWNED_PROFILE_LOST probe={probe} {ProfileEvidence()}");
+                if (!string.Equals(selector, observed.DisplayName, StringComparison.Ordinal))
+                {
+                    Console.WriteLine("CHROME_CI_OWNED_AVATAR_LABEL_UPDATED " +
+                        "(same native window and process)");
+                    selector = observed.DisplayName;
+                }
+            }
 
             // Use the real USER owner from the first request onward. The 100
             // cycles and the 2/4/8 independent clients must share its single
@@ -187,6 +207,7 @@ internal static class ChromeAcceptanceFixture
             WindowInspectResult? preflight = null;
             for (int attempt = 0; attempt < 30; attempt++)
             {
+                RefreshOwnedProfile();
                 preflight = (await ExchangeAsync(new(Inspect: new WindowInspectRequest(
                     windowId!, 4, 20, null, null, 0, false, "CI_CDP_VALUE",
                     WindowRoleFilter.EDIT, 0, WindowInspectScope.TAB,
@@ -202,6 +223,7 @@ internal static class ChromeAcceptanceFixture
 
             for (int iteration = 0; iteration < Cycles; iteration++)
             {
+                RefreshOwnedProfile();
                 var status = (await ExchangeAsync(Connection(ChromeConnectionAction.STATUS))).Connection;
                 if (status?.State != ChromeConnectionState.CONNECTED ||
                     status.SessionGeneration != generation)
@@ -255,6 +277,7 @@ internal static class ChromeAcceptanceFixture
             int expected = state.Clicks;
             foreach (int concurrency in new[] { 2, 4, 8 })
             {
+                RefreshOwnedProfile();
                 var reports = await Task.WhenAll(Enumerable.Range(0, concurrency)
                     .Select(_ => RunPipeClientAsync(windowId!, selector, url)));
                 if (!reports.All(r => r.OwnerPid == self.Id &&
