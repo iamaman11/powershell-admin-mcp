@@ -31,10 +31,8 @@ internal static class ChromeAcceptanceFixture
             return;
         }
 
-        // The production resolver uses Chrome's default DevToolsActivePort path.
-        // On a *fresh CI runner only*, bridge the endpoint metadata of our own
-        // temporary, explicitly debug-enabled profile without changing Chrome
-        // flags, consent, credentials, or any existing profile data.
+        // The managed resolver must use its exact dedicated user-data-dir.
+        // CI must never synthesize an endpoint in Chrome's normal user profile.
         string endpointFile = Path.Combine(Environment.GetFolderPath(
             Environment.SpecialFolder.LocalApplicationData), "Google", "Chrome", "User Data",
             "DevToolsActivePort");
@@ -45,7 +43,8 @@ internal static class ChromeAcceptanceFixture
         }
 
         string root = Path.Combine(Path.GetTempPath(), "wmcp-owned-chrome-" + Guid.NewGuid().ToString("N"));
-        string profileDir = Path.Combine(root, "profile");
+        string managedProfileId = "ci_" + Guid.NewGuid().ToString("N");
+        string profileDir = ChromeManagedProfile.DataDirectory(managedProfileId)!;
         Directory.CreateDirectory(profileDir);
         var server = new TcpListener(IPAddress.Loopback, 0);
         server.Start();
@@ -55,7 +54,6 @@ internal static class ChromeAcceptanceFixture
         using var serverStop = new CancellationTokenSource();
         Task accepting = ServeAsync(server, nonce, state, serverStop.Token);
         Process? browser = null;
-        bool endpointCreated = false;
         try
         {
             var info = new ProcessStartInfo(chrome)
@@ -121,18 +119,7 @@ internal static class ChromeAcceptanceFixture
             if (!endpointReady)
                 throw new InvalidOperationException("CI_CHROME_OWNED_ENDPOINT_READ_TIMEOUT");
             if (File.Exists(endpointFile))
-            {
-                Blocked("CI_CHROME_ENDPOINT_NOT_EXCLUSIVE");
-                return;
-            }
-            Directory.CreateDirectory(Path.GetDirectoryName(endpointFile)!);
-            using (var target = new FileStream(endpointFile, FileMode.CreateNew, FileAccess.Write,
-                FileShare.Read))
-            {
-                byte[] bytes = Encoding.UTF8.GetBytes(text!);
-                await target.WriteAsync(bytes);
-                endpointCreated = true;
-            }
+                throw new InvalidOperationException("CI_DEFAULT_CHROME_PROFILE_WAS_MODIFIED");
 
             string? windowId = null;
             ChromeProfileInfo? profile = null;
@@ -209,12 +196,14 @@ internal static class ChromeAcceptanceFixture
             }
 
             ChromeBrokerRequest Connection(ChromeConnectionAction action) => new(
-                Connection: new ChromeConnectionRequest(windowId!, selector, action));
+                Connection: new ChromeConnectionRequest(windowId!, selector, action,
+                    Mode: ChromeConnectionMode.MANAGED_BROWSER,
+                    ManagedProfileId: managedProfileId));
             var connected = await ExchangeAsync(Connection(ChromeConnectionAction.REQUEST));
             if (connected.Connection?.State != ChromeConnectionState.CONNECTED)
             {
-                for (int attempt = 0; attempt < 15 && connected.Connection?.State ==
-                     ChromeConnectionState.CONSENT_PENDING; attempt++)
+                for (int attempt = 0; attempt < 15 && connected.Connection?.State is
+                     ChromeConnectionState.CONSENT_PENDING or ChromeConnectionState.CONNECTING; attempt++)
                 {
                     await Task.Delay(300);
                     connected = await ExchangeAsync(Connection(ChromeConnectionAction.STATUS));
@@ -345,7 +334,7 @@ internal static class ChromeAcceptanceFixture
             {
                 RefreshOwnedProfile();
                 var reports = await Task.WhenAll(Enumerable.Range(0, concurrency)
-                    .Select(_ => RunPipeClientAsync(windowId!, selector, url)));
+                    .Select(_ => RunPipeClientAsync(windowId!, selector, url, managedProfileId)));
                 if (!reports.All(r => r.OwnerPid == self.Id &&
                     r.Generation == generation && r.Verified))
                     throw new InvalidOperationException(
@@ -381,6 +370,47 @@ internal static class ChromeAcceptanceFixture
                     $"query={sockets.Status} established={established}");
             Console.WriteLine($"PASS chrome_ci.one_shared_cdp_worker_and_websocket " +
                 $"worker_pid={children[0]} owner_pid={self.Id} socket_count={established}");
+
+            // The new typed tab lifecycle shares the exact same owner and
+            // consented socket; each effect is independently read back.
+            RefreshOwnedProfile();
+            async Task<ChromeTabResult> Tab(ChromeTabAction action, string? tab = null,
+                string? navigateUrl = null)
+            {
+                var reply = await ExchangeAsync(new(TabManage: new ChromeTabRequest(
+                    windowId!, selector, action, tab, navigateUrl)));
+                return reply.TabManage ?? throw new InvalidOperationException("CI_TAB_REPLY_MISSING");
+            }
+            var tabList = await Tab(ChromeTabAction.LIST);
+            if (tabList.Status != ChromeTabCode.COMPLETED ||
+                tabList.Tabs?.All(t => t.Url != url) != false)
+                throw new InvalidOperationException($"CI_TAB_LIST_{tabList.Status}");
+            var openedTab = await Tab(ChromeTabAction.OPEN, navigateUrl: url);
+            if (openedTab.Status != ChromeTabCode.COMPLETED || openedTab.TabId is null ||
+                openedTab.EffectState != WindowEffectState.EFFECT_VERIFIED)
+                throw new InvalidOperationException($"CI_TAB_OPEN_{openedTab.Status}_{openedTab.Detail}");
+            string newTab = openedTab.TabId;
+            string secondUrl = url + "?history=1";
+            foreach (var (action, destination) in new[]
+            {
+                (ChromeTabAction.NAVIGATE, secondUrl),
+                (ChromeTabAction.BACK, url),
+                (ChromeTabAction.FORWARD, secondUrl),
+                (ChromeTabAction.RELOAD, (string?)null)
+            })
+            {
+                var changed = await Tab(action, newTab, action == ChromeTabAction.NAVIGATE
+                    ? destination : null);
+                if (changed.Status != ChromeTabCode.COMPLETED ||
+                    changed.EffectState != WindowEffectState.EFFECT_VERIFIED)
+                    throw new InvalidOperationException($"CI_TAB_{action}_{changed.Status}_{changed.Detail}");
+            }
+            var closedTab = await Tab(ChromeTabAction.CLOSE, newTab);
+            if (closedTab.Status != ChromeTabCode.COMPLETED ||
+                closedTab.EffectState != WindowEffectState.EFFECT_VERIFIED)
+                throw new InvalidOperationException($"CI_TAB_CLOSE_{closedTab.Status}");
+            Console.WriteLine("PASS chrome_ci.native_typed_tab_lifecycle " +
+                "list_open_navigate_back_forward_reload_close same_broker_same_socket");
             }
             finally
             {
@@ -397,11 +427,13 @@ internal static class ChromeAcceptanceFixture
                 if (!browser.HasExited) browser.Kill(entireProcessTree: true);
                 browser.Dispose();
             }
-            if (endpointCreated) File.Delete(endpointFile);
             serverStop.Cancel();
             server.Stop();
             try { await accepting; } catch (OperationCanceledException) { }
             try { Directory.Delete(root, recursive: true); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            { /* Chrome may still be releasing test-only files. */ }
+            try { Directory.Delete(profileDir, recursive: true); }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             { /* Chrome may still be releasing test-only files. */ }
         }
@@ -671,7 +703,7 @@ internal static class ChromeAcceptanceFixture
     private sealed record PipeClientReport(int OwnerPid, string Generation, bool Verified);
 
     private static async Task<PipeClientReport> RunPipeClientAsync(string window, string profile,
-        string url)
+        string url, string managedProfileId)
     {
         string executable = Environment.ProcessPath ??
             throw new InvalidOperationException("CI_PIPE_CLIENT_EXE_MISSING");
@@ -688,6 +720,7 @@ internal static class ChromeAcceptanceFixture
         start.ArgumentList.Add(window);
         start.ArgumentList.Add(profile);
         start.ArgumentList.Add(url);
+        start.ArgumentList.Add(managedProfileId);
         using var client = Process.Start(start) ??
             throw new InvalidOperationException("CI_CDP_PIPE_CLIENT_START_FAILED");
         var output = client.StandardOutput.ReadToEndAsync();

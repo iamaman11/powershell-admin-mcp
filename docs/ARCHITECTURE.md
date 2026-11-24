@@ -7,7 +7,7 @@ acceptance matrix live in [Issue #56](https://github.com/iamaman11/powershell-ad
 
 | Owner | Responsibility | Implementation |
 | --- | --- | --- |
-| MCP frontend | Typed tool schemas, validation, dispatch and JSON results | `AdminTools`, `WindowTools`, `ChromeConnectionTools`, `FileTools`, `SystemTools`, `TcpConnectionTools`, `ExpertDiagnosticsTools`, `NetworkProbeTools`, `NativeAdminTools`, `UpdateTools` |
+| MCP frontend | Typed tool schemas, validation, dispatch and JSON results | `AdminTools`, `WindowTools`, `ChromeConnectionTools`, `ChromeTabTools`, `FileTools`, `SystemTools`, `TcpConnectionTools`, `ExpertDiagnosticsTools`, `NetworkProbeTools`, `NativeAdminTools`, `UpdateTools` |
 | SYSTEM service | SQLite admission, encrypted durable PowerShell queue, idempotency, cancellation and recovery | `AdminService`, `JobCoordinator`, `StoreSchema` |
 | USER worker | UIA, Win32, WGC, user desktop and session-bound operations | `UserWorker`, `WindowInspector`, `WindowAction`, `WindowCapture` |
 | Chrome child | Native consented CDP connection, browser context/window/profile binding and background tab actions | `WindowChromeBroker`, `WindowChromeCdp` and its partial-class modules |
@@ -24,9 +24,9 @@ frontend, not a separate permanent browser manager. No extra HTTP API.
 
 ## Code boundaries and public schemas
 
-The registered MCP surface lives only in `Program.cs` (`stdio`): **22 tools**.
+The registered MCP surface lives only in `Program.cs` (`stdio`): **23 tools**.
 Each tool declares typed arguments and a result DTO. `powershell_screenshot`
-deliberately returns image content; the other 21 tools expose structured
+deliberately returns image content; the other 22 tools expose structured
 output schemas. CI reads the *actual* SDK-generated `tools/list` and checks
 the exact inventory, structured outputs and a bounded 80-KiB catalog.
 
@@ -40,6 +40,8 @@ Keep these responsibilities separate when adding functionality:
 | `SystemTools.cs` | Legacy `windows.system_query` MCP entry point |
 | `TcpConnectionTools.cs` | Narrow `windows.tcp_connections` contract and snapshot projection |
 | `WindowChromeConnection.cs` | One authorized socket owner, Chrome consent and profile/endpoint checks |
+| `ChromeManagedProfile.cs` | Strict managed profile identifiers and per-user data-directory boundary |
+| `ChromeTabTools.cs`, `WindowChromeTabManagement.cs` | Typed tab lifecycle, audited intent, independent effect verification |
 | `WindowChromeTabMapping.cs` | Exact native window-to-CDP target association |
 | `WindowChromeTabInspection.cs` | Read-only accessible document/tab snapshots |
 | `WindowChromeTabActions.cs` | Pre-dispatch identity checks, one effectful input and postcondition observation |
@@ -50,7 +52,16 @@ Keep these responsibilities separate when adding functionality:
 Splitting source files does not create another socket, process, state store or
 permission path. A timed-out individual `Page.getFrameTree` call cancels its
 waiter; the WebSocket reader stays alive for other tabs. The legacy
-`windows.system_query(kind=TCP_CONNECTIONS)` wire result is unchanged. The
+`USER_BROWSER` mode uses Chrome's native per-session consent; `MANAGED_BROWSER`
+selects only an explicitly launched, non-elevated Chrome with a dedicated
+user-data-dir under `%LOCALAPPDATA%\WindowsAdminMCP\ChromeProfiles`.
+Both modes use the existing one-process/one-WebSocket broker and require
+fresh native window and profile identity for each operation. An explicit
+mode switch is rejected while the prior connection is active. `OPEN` has no
+CDP-native target-window selector, so it requires one Chrome window and
+verifies the new target's browser window identity after creation.
+
+The legacy `windows.system_query(kind=TCP_CONNECTIONS)` wire result is unchanged. The
 dedicated `windows.tcp_connections` result projects exactly seven fields and
 its `kind` enum admits only `TCP_CONNECTIONS`; adding unrelated fields to its
 output is a contract regression.

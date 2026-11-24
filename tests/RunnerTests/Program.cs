@@ -13,13 +13,33 @@ if (args is ["window-cdp-worker", var cdpParent] &&
     return;
 }
 
-if (args is ["--chrome-pipe-live-action", var liveWindow, var liveProfile, var liveUrl])
+if (args is ["--chrome-pipe-live-action", var liveWindow, var liveProfile, var liveUrl,
+        var managedProfileId])
 {
     using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(60));
     ChromeBrokerRequest Status() => new(Connection: new(liveWindow, liveProfile,
-        ChromeConnectionAction.STATUS), TraceId: Guid.NewGuid().ToString("N"));
+        ChromeConnectionAction.STATUS, Mode: ChromeConnectionMode.MANAGED_BROWSER,
+        ManagedProfileId: managedProfileId), TraceId: Guid.NewGuid().ToString("N"));
     var statusRequest = Status();
     var status = await ChromeBrokerPipe.ExchangeAsync(statusRequest, limit.Token);
+    if (status?.Connection?.Status == ChromeConnectionCode.PROFILE_MISMATCH &&
+        WindowCatalog.TryParseId(liveWindow, out var identity))
+    {
+        // The throwaway browser can update its native avatar label while
+        // multiple independent clients are starting. This rejected STATUS
+        // dispatched no browser action; re-read the same HWND and PID before
+        // trying the read-only STATUS once with the current native selector.
+        using var self = Process.GetCurrentProcess();
+        var nativeAvatar = ChromeProfileCatalog.ReadWindowProfileStable(liveWindow,
+            self.SessionId, out _);
+        if (nativeAvatar is { } resolvedAvatar && resolvedAvatar.WindowId == liveWindow &&
+            resolvedAvatar.ProcessId == identity.ProcessId)
+        {
+            liveProfile = resolvedAvatar.DisplayName;
+            statusRequest = Status();
+            status = await ChromeBrokerPipe.ExchangeAsync(statusRequest, limit.Token);
+        }
+    }
     var inspectRequest = new ChromeBrokerRequest(Inspect: new WindowInspectRequest(
         liveWindow, 4, 20, null, null, 0, false, "CI_CDP_BUTTON",
         WindowRoleFilter.BUTTON, 0, WindowInspectScope.TAB,
@@ -53,7 +73,13 @@ if (args is ["--chrome-pipe-live-action", var liveWindow, var liveProfile, var l
     {
         owner_pid = status?.OwnerPid,
         session_generation = status?.Connection?.SessionGeneration,
+        connection_code = status?.Connection?.Status.ToString(),
+        connection_state = status?.Connection?.State.ToString(),
+        connection_detail = status?.Connection?.Detail,
+        inspect_code = inspect?.Inspect?.Status.ToString(),
+        inspect_detail = inspect?.Inspect?.Detail,
         status = action?.Action?.Status.ToString(),
+        action_detail = action?.Action?.Detail,
         verified = valid
     }, PipeWire.Json));
     Environment.ExitCode = valid ? 0 : 1;
@@ -907,25 +933,26 @@ var doctorStatus = new AdminStatus(StatusCode.OK, "ci", Diagnostics: doctorSnaps
 var doctorWire = System.Text.Json.JsonSerializer.Serialize(doctorStatus, PipeWire.Json);
 Check(System.Text.Json.JsonSerializer.Deserialize<AdminStatus>(doctorWire, PipeWire.Json)?.Diagnostics is
     { Status: DoctorState.DEGRADED, ReconciliationCount: 17, LocalOperationalReady: true,
-      RollbackPending: true, ToolCatalog: { ToolCount: 22, StructuredToolCount: 21,
-          NativeDtoResultCount: 20 },
+      RollbackPending: true, ToolCatalog: { ToolCount: 23, StructuredToolCount: 22,
+          NativeDtoResultCount: 21 },
       Checks: [{ Reason: DoctorReason.RECONCILIATION_REQUIRED }] } &&
     !System.Text.Json.JsonSerializer.Serialize(new AdminStatus(StatusCode.OK, "ci"), PipeWire.Json)
         .Contains("diagnostics", StringComparison.Ordinal),
     "status.optional_typed_doctor_without_changing_default_status");
 var doctorCatalog = DoctorCatalog.Observe();
-Check(DoctorCatalog.IsComplete(doctorCatalog) && doctorCatalog.ToolCount == 22 &&
+Check(DoctorCatalog.IsComplete(doctorCatalog) && doctorCatalog.ToolCount == 23 &&
     doctorCatalog.ToolNames.Contains("windows.tcp_connections") &&
     doctorCatalog.ToolNames.Contains("windows.file_acl") &&
     doctorCatalog.ToolNames.Contains("windows.process_wait_chain") &&
     doctorCatalog.ToolNames.Contains("windows.network_probe") &&
     doctorCatalog.ToolNames.Contains("windows.admin_action") &&
     doctorCatalog.ToolNames.Contains("windows.chrome_connection") &&
+    doctorCatalog.ToolNames.Contains("windows.chrome_tab") &&
     doctorCatalog.Source == DoctorCatalogSource.SERVER_ASSEMBLY_METADATA,
     "doctor.v2_declared_typed_catalog_without_claiming_published_client_schema");
 string doctorCatalogJson=System.Text.Json.JsonSerializer.Serialize(doctorCatalog,PipeWire.Json);
-Check(doctorCatalogJson.Contains("\"tool_count\":22", StringComparison.Ordinal) &&
-    doctorCatalogJson.Contains("\"native_dto_result_count\":20", StringComparison.Ordinal) &&
+Check(doctorCatalogJson.Contains("\"tool_count\":23", StringComparison.Ordinal) &&
+    doctorCatalogJson.Contains("\"native_dto_result_count\":21", StringComparison.Ordinal) &&
     doctorWire.Contains("\"rollback_pending\":true", StringComparison.Ordinal),
     "doctor.v2_strict_catalog_and_update_trial_wire");
 string missingRollbackRoot=Path.Combine(Path.GetTempPath(), "wmcp-doctor-test-" + Guid.NewGuid().ToString("N"));
@@ -1308,6 +1335,49 @@ Check(ChromeConnectionTools.ValidArguments(ChromeConnectionAction.LIST, null, nu
     !ChromeConnectionTools.ValidArguments((ChromeConnectionAction)99, testWindowId, "Valer"),
     "chrome.connection_action_schema_rejects_ambiguous_profile_selection");
 var connectRequest = new ChromeConnectionRequest(testWindowId, "Valer", ChromeConnectionAction.REQUEST);
+var managedConnection = connectRequest with { Mode = ChromeConnectionMode.MANAGED_BROWSER,
+    ManagedProfileId = "work-1" };
+Check(ChromeManagedProfile.ValidId("work-1") && !ChromeManagedProfile.ValidId("../bad") &&
+    !ChromeManagedProfile.ValidId("bad\\name") &&
+    ChromeManagedProfile.DataDirectory("work-1") == Path.Combine(
+        ChromeManagedProfile.Root, "work-1") &&
+    ChromeConnectionTools.ValidArguments(ChromeConnectionAction.REQUEST, testWindowId,
+        "Valer", false, ChromeConnectionMode.MANAGED_BROWSER, "work-1") &&
+    !ChromeConnectionTools.ValidArguments(ChromeConnectionAction.REQUEST, testWindowId,
+        "Valer", true, ChromeConnectionMode.MANAGED_BROWSER, "work-1") &&
+    !ChromeConnectionTools.ValidArguments(ChromeConnectionAction.REQUEST, testWindowId,
+        "Valer", false, ChromeConnectionMode.MANAGED_BROWSER, "../bad") &&
+    new ChromeBrokerRequest(Connection: managedConnection).Valid &&
+    System.Text.Json.JsonSerializer.Serialize(managedConnection, PipeWire.Json)
+        .Contains("\"mode\":\"MANAGED_BROWSER\"", StringComparison.Ordinal),
+    "chrome.managed_mode_is_typed_and_confined_to_owned_profile_root");
+var sampleTabId = "0123456789abcdef0123456789abcdef";
+var chromeTabRequest = new ChromeTabRequest(testWindowId, "Valer", ChromeTabAction.NAVIGATE,
+    sampleTabId, "https://example.com/");
+var chromeTabWire = System.Text.Json.JsonSerializer.Serialize(chromeTabRequest, PipeWire.Json);
+Check(WindowChromeCdp.ValidTabRequest(chromeTabRequest) &&
+    WindowChromeCdp.ValidTabRequest(chromeTabRequest with { Action = ChromeTabAction.LIST,
+        TabId = null, Url = null }) &&
+    !WindowChromeCdp.ValidTabRequest(chromeTabRequest with { Url = "javascript:alert(1)" }) &&
+    !WindowChromeCdp.ValidTabRequest(chromeTabRequest with { TabId = "bad" }) &&
+    !WindowChromeCdp.ValidTabRequest(chromeTabRequest with { Action = ChromeTabAction.CLOSE,
+        Url = "https://example.com/" }) &&
+    chromeTabWire.Contains("\"action\":\"NAVIGATE\"", StringComparison.Ordinal) &&
+    new ChromeTabResult(ChromeTabCode.COMPLETED, ChromeTabAction.NAVIGATE).EffectState ==
+        WindowEffectState.EFFECT_VERIFIED &&
+    new ChromeTabResult(ChromeTabCode.COMPLETED, ChromeTabAction.LIST).EffectState ==
+        WindowEffectState.NO_EFFECT &&
+    !new ChromeTabResult(ChromeTabCode.EFFECT_UNKNOWN, ChromeTabAction.NAVIGATE).SafeToRetry &&
+    new ChromeTabResult(ChromeTabCode.EFFECT_UNKNOWN, ChromeTabAction.NAVIGATE).NextStep ==
+        ChromeTabNextStep.INSPECT_STATE_DO_NOT_RETRY,
+    "chrome.typed_tab_lifecycle_requires_exact_target_url_and_never_retries_unknown_effect");
+var invalidTabCall = await ChromeTabTools.ChromeTab("bad", "Valer", ChromeTabAction.LIST);
+var unconfirmedTabCall = await ChromeTabTools.ChromeTab(testWindowId, "Valer",
+    ChromeTabAction.CLOSE, sampleTabId, confirm: false);
+Check(invalidTabCall.Status == ChromeTabCode.INVALID_ARGUMENT &&
+    unconfirmedTabCall.Status == ChromeTabCode.CONFIRMATION_REQUIRED &&
+    unconfirmedTabCall.EffectState == WindowEffectState.NO_EFFECT,
+    "chrome.tab_tool_invalid_and_unconfirmed_fail_before_native_io");
 var foregroundConsentRequest = connectRequest with { ActivateWindowForConsent = true };
 string foregroundConsentWire = System.Text.Json.JsonSerializer.Serialize(foregroundConsentRequest, PipeWire.Json);
 Check(!connectRequest.ActivateWindowForConsent &&

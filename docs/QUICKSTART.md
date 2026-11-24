@@ -30,8 +30,9 @@ are needed for the native operations below.
 | Find one element and act without a preceding inspection | `windows.invoke_locator` |
 | Activate, move, resize, minimize, or close an exact window | `windows.manage_window` |
 | Find and connect a Chrome profile through its own consent dialog | `windows.chrome_connection` |
+| List, open, navigate, reload or close exact Chrome tabs | `windows.chrome_tab` |
 
-These 22 tools share native Windows identities and typed results. There is no
+These 23 tools share native Windows identities and typed results. There is no
 arbitrary path, UI-role or administrator-cmdlet allowlist. Windows ACLs, desktop
 sessions, Chrome's permission dialog, and exact resource identity still apply.
 
@@ -189,6 +190,45 @@ window can display the native consent dialog; otherwise it returns
 attempt *for the permission prompt only*. After user consent, inspect
 `scope=TABS` and `scope=TAB`; ordinary CDP actions remain background-only.
 The application never silently approves Chrome permissions.
+
+### Two supported Chrome connection modes
+
+- `mode=USER_BROWSER` (default) attaches to an already running Chrome 144+.
+  Enable `chrome://inspect/#remote-debugging` and approve Chrome's native
+  per-session prompt. The permission cannot be bypassed.
+- `mode=MANAGED_BROWSER` connects to an already launched separate Chrome with
+  a persistent data directory. Its `managed_profile_id` contains 1..40 ASCII
+  letters, digits, `_` or `-`; the directory is
+  `%LOCALAPPDATA%\WindowsAdminMCP\ChromeProfiles\<managed_profile_id>`.
+  No personal profile is copied and no elevated Chrome is launched by MCP.
+
+To set up a managed browser, start Chrome once from a **non-elevated** Windows
+user terminal (replace `work` with your managed profile ID):
+
+```powershell
+$profilePath = Join-Path $env:LOCALAPPDATA 'WindowsAdminMCP\ChromeProfiles\work'
+& "$env:ProgramFiles\Google\Chrome\Application\chrome.exe" `
+  "--user-data-dir=$profilePath" '--remote-debugging-port=0'
+```
+
+Call `windows.chrome_connection(action=LIST)` to discover the exact new
+`window_id` and `expected_profile`, then call
+`windows.chrome_connection(action=REQUEST, mode=MANAGED_BROWSER,
+managed_profile_id=work, window_id=..., expected_profile=...)`.
+`CONNECTING` means wait for `STATUS`; `CONNECTED` proves a usable CDP socket.
+The separate managed profile needs no native consent prompt on every connection.
+
+After connecting either mode, use `windows.chrome_tab`:
+
+1. `LIST` is read-only and returns each exact `tab_id` and URL.
+2. `OPEN` requires an HTTP(S) URL and one matching native Chrome window;
+   `background=true` is the default.
+3. `NAVIGATE`, `BACK`, `FORWARD`, `RELOAD` and `CLOSE` require that `tab_id`.
+4. Only independently observed outcomes return `effect_state=EFFECT_VERIFIED`.
+   `EFFECT_UNKNOWN` means read-only inspection, never an automatic replay.
+
+Internal Chrome pages, OS file pickers and privileged prompts may still require
+the existing native UIA/foreground consent policy rather than a CDP action.
 
 ## Updates and errors
 

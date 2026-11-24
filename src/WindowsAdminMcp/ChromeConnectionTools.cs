@@ -22,7 +22,7 @@ public enum ChromeConnectionState
 {
     NOT_REQUESTED, DEBUGGING_UNAVAILABLE, CONSENT_PENDING, CONNECTED,
     CONSENT_NOT_CONFIRMED, CONSENT_TIMED_OUT, CONNECTION_FAILED,
-    CONSENT_WINDOW_UNAVAILABLE, DISCONNECTED, CONNECTION_LOST
+    CONSENT_WINDOW_UNAVAILABLE, DISCONNECTED, CONNECTION_LOST, CONNECTING
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<ChromeConnectionFailureReason>))]
@@ -37,7 +37,7 @@ public enum ChromeConnectionFailureReason
 public enum ChromeConnectionNextAction
 {
     NONE, SELECT_PROFILE, ENABLE_CHROME_DEBUGGING, ALLOW_CHROME_PROMPT,
-    SHOW_CHROME_FOR_CONSENT, RETRY_CONNECTION
+    SHOW_CHROME_FOR_CONSENT, RETRY_CONNECTION, WAIT_FOR_CONNECTION, START_MANAGED_BROWSER
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<ChromeProfileEmailSource>))]
@@ -74,7 +74,10 @@ public sealed record ChromeConnectionResult(
     [property: JsonPropertyName("session_generation"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         string? SessionGeneration = null,
     [property: JsonPropertyName("trace_id"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        string? TraceId = null)
+        string? TraceId = null,
+    [property: JsonPropertyName("mode")] ChromeConnectionMode Mode = ChromeConnectionMode.USER_BROWSER,
+    [property: JsonPropertyName("managed_profile_id"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        string? ManagedProfileId = null)
 {
     [JsonPropertyName("transport_connected")]
     public bool TransportConnected => State == ChromeConnectionState.CONNECTED;
@@ -90,21 +93,26 @@ public sealed record ChromeConnectionResult(
 internal sealed record ChromeConnectionRequest(string WindowId, string ExpectedProfile,
     ChromeConnectionAction Action,
     [property: JsonPropertyName("activate_window_for_consent")]
-        bool ActivateWindowForConsent = false);
+        bool ActivateWindowForConsent = false,
+    [property: JsonPropertyName("mode")] ChromeConnectionMode Mode = ChromeConnectionMode.USER_BROWSER,
+    [property: JsonPropertyName("managed_profile_id")] string? ManagedProfileId = null);
 
 [McpServerToolType]
 public sealed class ChromeConnectionTools
 {
     [McpServerTool(Name = "windows.chrome_connection", UseStructuredContent = true),
-     Description("Discover Chrome profiles and request or check native user-approved CDP connection. " +
+     Description("Discover Chrome profiles and request or check a native CDP connection. USER_BROWSER uses Chrome 144+ native user consent and never bypasses it. MANAGED_BROWSER attaches to an explicitly started separate Chrome --user-data-dir under WindowsAdminMCP/ChromeProfiles and does not raise an elevation or consent prompt. " +
          "Never activates Chrome by default; activate_window_for_consent explicitly permits foreground activation for an approval prompt. " +
          "A unique open profile may be selected by email without window_id; ambiguous windows require window_id.")]
     public static async Task<ChromeConnectionResult> Connection(ChromeConnectionAction action,
         string? window_id = null, string? expected_profile = null,
         bool activate_window_for_consent = false,
+        ChromeConnectionMode mode = ChromeConnectionMode.USER_BROWSER,
+        string? managed_profile_id = null,
         CancellationToken cancellationToken = default)
     {
-        if (!ValidArguments(action, window_id, expected_profile, activate_window_for_consent))
+        if (!ValidArguments(action, window_id, expected_profile, activate_window_for_consent,
+            mode, managed_profile_id))
             return new(ChromeConnectionCode.INVALID_ARGUMENT, ChromeConnectionState.NOT_REQUESTED);
         var status = await AdminTools.Status(cancellationToken: cancellationToken);
         if (status.Status != StatusCode.OK)
@@ -138,13 +146,19 @@ public sealed class ChromeConnectionTools
                 Detail: resolved.ToString());
         return await WindowChromeBroker.ConnectionAsync(
             new ChromeConnectionRequest(window_id!, expected_profile!, action,
-                activate_window_for_consent), cancellationToken);
+                activate_window_for_consent, mode, managed_profile_id), cancellationToken);
     }
 
     internal static bool ValidArguments(ChromeConnectionAction action, string? windowId, string? profile,
-        bool activateWindowForConsent = false) =>
+        bool activateWindowForConsent = false,
+        ChromeConnectionMode mode = ChromeConnectionMode.USER_BROWSER,
+        string? managedProfileId = null) =>
+        Enum.IsDefined(mode) && (mode == ChromeConnectionMode.USER_BROWSER
+            ? managedProfileId is null
+            : ChromeManagedProfile.ValidId(managedProfileId) && !activateWindowForConsent) &&
         (!activateWindowForConsent || action == ChromeConnectionAction.REQUEST) &&
-        (action == ChromeConnectionAction.LIST ? windowId is null && profile is null :
+        (action == ChromeConnectionAction.LIST ? mode == ChromeConnectionMode.USER_BROWSER &&
+            windowId is null && profile is null :
         (action is ChromeConnectionAction.REQUEST or ChromeConnectionAction.STATUS or
             ChromeConnectionAction.DISCONNECT) &&
             (windowId is null || WindowCatalog.TryParseId(windowId, out _)) &&
