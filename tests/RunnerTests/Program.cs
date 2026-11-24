@@ -472,6 +472,15 @@ if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("GITHUB_A
             inlineSteps[0].ExpectedSha256==Hash(inlineBytes) &&
             inlineSteps.All(s=>s.OperationId==inlineId && NativeFileWriter.Valid(s)),
             "filewrite.inline_plan_uses_original_durable_writer");
+        Check(NativeFileWriter.TryInlineSteps(inlineRequest with {
+                ExpectedBytes=inlineBytes.LongLength,ExpectedSha256=Hash(inlineBytes)},
+                out var guardedInline,out _) && guardedInline.Length==3 &&
+            guardedInline[0].ExpectedBytes==inlineBytes.LongLength &&
+            guardedInline[0].ExpectedSha256==Hash(inlineBytes) &&
+            !NativeFileWriter.TryInlineSteps(inlineRequest with {
+                ExpectedBytes=inlineBytes.LongLength+1},out _,out var wrongSize) &&
+            wrongSize==FileWriteCode.INVALID_ARGUMENT,
+            "filewrite.inline_optional_size_and_digest_guard_before_effect");
         Check(inlineSteps.Select(Write).Select(r=>r.Status).SequenceEqual(
             [FileWriteCode.STAGED,FileWriteCode.STAGED,FileWriteCode.COMMITTED]) &&
             File.ReadAllBytes(inlinePath).SequenceEqual(inlineBytes) &&

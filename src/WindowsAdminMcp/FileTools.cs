@@ -69,7 +69,7 @@ public sealed class FileTools
     }
 
     [McpServerTool(Name="windows.file_write",UseStructuredContent=true),
-     Description("WRITE_ATOMIC writes up to 16 KiB of base64 in one call; larger files use BEGIN/APPEND/COMMIT. Supply stable operation_id (GUID N format). STATUS recovers lost replies. CAS replacement requires expected_version and original_sha256.")]
+     Description("WRITE_ATOMIC writes up to 16 KiB of base64 in one call; optional expected_bytes and expected_sha256 must match decoded content. Larger files use BEGIN/APPEND/COMMIT. Supply stable operation_id (GUID N format). STATUS recovers lost replies. CAS replacement requires expected_version and original_sha256.")]
     public static async Task<FileWriteReply> Write(FileWriteAction action,string path,string operation_id,
         long? expected_bytes=null,string? expected_sha256=null,
         FileOverwritePolicy overwrite_policy=FileOverwritePolicy.FAIL_IF_EXISTS,

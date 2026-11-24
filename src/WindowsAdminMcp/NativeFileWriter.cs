@@ -50,13 +50,17 @@ internal static class NativeFileWriter
         steps=[];
         error=FileWriteCode.INVALID_ARGUMENT;
         if(request.Action!=FileWriteAction.WRITE_ATOMIC || request.Offset is not null ||
-            request.ChunkSha256 is not null || request.ExpectedBytes is not null ||
+            request.ChunkSha256 is not null ||
             request.DataBase64 is not {Length:<=((MaxInlineBytes+2)/3)*4} ||
             request.ExpectedSha256 is not null && !Digest(request.ExpectedSha256))return false;
         byte[] bytes;
         try{bytes=Convert.FromBase64String(request.DataBase64);}
         catch(FormatException){return false;}
         if(bytes.Length>MaxInlineBytes)return false;
+        // An explicit expected_bytes is a useful caller-side integrity guard.
+        // Validate it before any durable receipt or file operation, just as
+        // expected_sha256 is validated below.
+        if(request.ExpectedBytes is { } expected && expected!=bytes.LongLength)return false;
         string sha=Convert.ToHexString(SHA256.HashData(bytes));
         if(request.ExpectedSha256 is not null &&
             !string.Equals(request.ExpectedSha256,sha,StringComparison.OrdinalIgnoreCase))
