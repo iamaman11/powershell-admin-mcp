@@ -178,19 +178,21 @@ internal static class ChromeAcceptanceFixture
                 bool setText = iteration % 2 == 0;
                 string label = setText ? "CI_CDP_VALUE" : "CI_CDP_BUTTON";
                 var inspect = (await ExchangeAsync(new(Inspect: new WindowInspectRequest(
-                    windowId!, 4, 20, null, null, 0, false, label, null, 0,
+                    windowId!, 4, 20, null, null, 0, false, label,
+                    setText ? WindowRoleFilter.EDIT : WindowRoleFilter.BUTTON, 0,
                     WindowInspectScope.TAB, ExpectedProfile: selector, ExpectedUrl: url)))).Inspect;
-                var target = inspect?.Elements.SingleOrDefault(e => e.ElementId.StartsWith("c1:",
-                    StringComparison.Ordinal));
-                if (inspect?.Status != WindowInspectCode.COMPLETED || target is null ||
+                var targets = inspect?.Elements.Where(e => e.ElementId.StartsWith("c1:",
+                    StringComparison.Ordinal)).ToArray() ?? [];
+                if (inspect?.Status != WindowInspectCode.COMPLETED || targets.Length != 1 ||
                     inspect.SessionGeneration != generation || inspect.Tabs?.Length != 1 ||
                     inspect.Tabs[0].Url != url)
                     throw new InvalidOperationException($"CI_CDP_INSPECT cycle={iteration} " +
-                        $"status={inspect?.Status} detail={inspect?.Detail} count={inspect?.Elements.Length}");
+                        $"status={inspect?.Status} detail={inspect?.Detail} count={inspect?.Elements.Length} " +
+                        $"candidates={targets.Length}");
 
                 string value = $"CI_CDP_CYCLE_{iteration:D3}";
                 var action = (await ExchangeAsync(new(Action: new WindowActionRequest(
-                    windowId!, target.ElementId, setText ? WindowActionKind.SET_VALUE :
+                    windowId!, targets[0].ElementId, setText ? WindowActionKind.SET_VALUE :
                         WindowActionKind.CLICK, setText ? value : null,
                     ExpectedProfile: selector, ExpectedUrl: url,
                     ObservationTimeoutMs: 1500)))).Action;
