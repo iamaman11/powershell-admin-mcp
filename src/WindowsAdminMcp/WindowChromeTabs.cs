@@ -513,11 +513,15 @@ internal static partial class WindowChromeCdp
 
     internal enum CdpWindowMappingState { NOT_FOUND, AMBIGUOUS }
 
-    private sealed class CdpWindowMappingException(CdpWindowMappingState state)
+    private sealed class CdpWindowMappingException(CdpWindowMappingState state,
+        WindowCdpMappingFailure failure, int titleCandidates, int fingerprintCandidates)
         : InvalidOperationException(state == CdpWindowMappingState.NOT_FOUND
             ? "CDP_WINDOW_NO_MATCH" : "CDP_WINDOW_NOT_UNIQUE")
     {
         internal CdpWindowMappingState State { get; } = state;
+        internal WindowCdpMappingFailure Failure { get; } = failure;
+        internal int TitleCandidates { get; } = titleCandidates;
+        internal int FingerprintCandidates { get; } = fingerprintCandidates;
     }
 
     internal static WindowInspectCode InspectMappingCode(CdpWindowMappingState state) =>
@@ -609,9 +613,32 @@ internal static partial class WindowChromeCdp
         return unique.Length == 1 ? unique[0] : null;
     }
 
+    // A missing/stale active-page title is not authority to guess by geometry.
+    // Accept a fallback only when >=2 different native tab titles exclusively
+    // corroborate the SAME bounds-matching CDP window, with all but at most
+    // one native tab represented in that window and no conflicting owner.
+    internal static int? UniqueStrongTabFingerprintWindow(IEnumerable<int> candidateWindowIds,
+        IEnumerable<(int WindowId, string Title)> pageTitles, IEnumerable<string> nativeTabTitles)
+    {
+        var candidates = candidateWindowIds.Where(id => id > 0).ToHashSet();
+        var native = nativeTabTitles.Where(t => !string.IsNullOrWhiteSpace(t))
+            .ToHashSet(StringComparer.Ordinal);
+        if (native.Count < 2 || candidates.Count == 0) return null;
+        var owners = pageTitles.Where(p => candidates.Contains(p.WindowId) && native.Contains(p.Title))
+            .GroupBy(p => p.Title, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.Select(p => p.WindowId).Distinct().ToArray(),
+                StringComparer.Ordinal);
+        var exclusive = owners.Values.Where(w => w.Length == 1).Select(w => w[0])
+            .GroupBy(id => id).Take(2).ToArray();
+        if (exclusive.Length != 1 || exclusive[0].Count() < 2) return null;
+        int selected = exclusive[0].Key;
+        int represented = owners.Values.Count(w => w.Contains(selected));
+        return represented >= native.Count - 1 ? selected : null;
+    }
+
     private static async Task<List<TabTarget>> TargetsForWindow(Session cdp, IntPtr hwnd,
         string windowId, CancellationToken cancellationToken, string? expectedOrigin = null,
-        string? expectedUrl = null, string? exactTabId = null)
+        string? expectedUrl = null, string? exactTabId = null, bool allowFallback = false)
     {
         if (!GetWindowRect(hwnd, out var rect)) return [];
         string nativeTitle = GetTitle(hwnd);
@@ -643,30 +670,39 @@ internal static partial class WindowChromeCdp
             return windowId;
         }
 
+        async Task<bool> BoundsMatch(int browserWindowId)
+        {
+            if (boundCache.TryGetValue(browserWindowId, out bool cached)) return cached;
+            var response = await cdp.Call("Browser.getWindowBounds", new { windowId = browserWindowId });
+            var b = response.GetProperty("bounds");
+            bool match = b.TryGetProperty("left", out var left) &&
+                b.TryGetProperty("top", out var top) && b.TryGetProperty("width", out var width) &&
+                b.TryGetProperty("height", out var height) &&
+                MatchesBounds(native, new(left.GetInt32(), top.GetInt32(),
+                    width.GetInt32(), height.GetInt32()), dpi);
+            boundCache.Add(browserWindowId, match);
+            return match;
+        }
+
         var titleMatches = new List<(int WindowId, string? ContextId)>();
-        foreach (var page in pages.Where(p => nativeTitle.StartsWith(p.Title + " - Google Chrome",
-                     StringComparison.Ordinal)))
+        var titlePages = pages.Where(p => nativeTitle.StartsWith(p.Title + " - Google Chrome",
+            StringComparison.Ordinal)).ToArray();
+        foreach (var page in titlePages)
         {
             int browserWindowId = await WindowId(page.Id);
-            if (!boundCache.TryGetValue(browserWindowId, out bool boundsMatch))
-            {
-                var response = await cdp.Call("Browser.getWindowBounds", new { windowId = browserWindowId });
-                var b = response.GetProperty("bounds");
-                boundsMatch = b.TryGetProperty("left", out var left) &&
-                    b.TryGetProperty("top", out var top) && b.TryGetProperty("width", out var width) &&
-                    b.TryGetProperty("height", out var height) &&
-                    MatchesBounds(native, new(left.GetInt32(), top.GetInt32(),
-                        width.GetInt32(), height.GetInt32()), dpi);
-                boundCache.Add(browserWindowId, boundsMatch);
-            }
-            if (boundsMatch) titleMatches.Add((browserWindowId, page.ContextId));
+            if (await BoundsMatch(browserWindowId))
+                titleMatches.Add((browserWindowId, page.ContextId));
         }
 
         // A native, profile-verified HWND must match exactly one CDP window.
         // Distinct TargetInfo contexts are allowed *within that same window*;
         // multiple CDP window IDs (even at identical bounds) are not guessed.
         var selected = UniqueWindowId(titleMatches, out int distinctCount);
-        if (selected is null && distinctCount > 1)
+        var failure = titlePages.Length == 0 ? WindowCdpMappingFailure.TITLE_NOT_FOUND :
+            distinctCount == 0 ? WindowCdpMappingFailure.BOUNDS_MISMATCH :
+            WindowCdpMappingFailure.FINGERPRINT_AMBIGUOUS;
+        int fingerprintCandidates = 0;
+        if (selected is null && (distinctCount > 1 || allowFallback))
         {
             // Reuse the existing bounded, isolated UIA inspector. Never run a
             // potentially hung Chrome accessibility provider in the CDP broker.
@@ -682,18 +718,37 @@ internal static partial class WindowChromeCdp
                     var titles = new List<(int WindowId, string Title)>();
                     var nativeLabels = tabTitles.ToHashSet(StringComparer.Ordinal);
                     var candidates = titleMatches.Select(x => x.WindowId).ToHashSet();
-                    foreach (var page in pages.Where(p => nativeLabels.Contains(p.Title)))
+                    var matchingPages = pages.Where(p => nativeLabels.Contains(p.Title) &&
+                        (distinctCount > 1 || MatchesContext(p.Url, null, null))).ToArray();
+                    fingerprintCandidates = matchingPages.Length;
+                    if (fingerprintCandidates > 64)
+                        failure = WindowCdpMappingFailure.FINGERPRINT_LIMIT;
+                    else
                     {
-                        int id = await WindowId(page.Id);
-                        if (candidates.Contains(id)) titles.Add((id, page.Title));
+                        foreach (var page in matchingPages)
+                        {
+                            int id = await WindowId(page.Id);
+                            if (distinctCount == 0 && await BoundsMatch(id)) candidates.Add(id);
+                            if (candidates.Contains(id)) titles.Add((id, page.Title));
+                        }
+                        selected = distinctCount > 1
+                            ? UniqueTabFingerprintWindow(candidates, titles, tabTitles)
+                            : UniqueStrongTabFingerprintWindow(candidates, titles, tabTitles);
+                        if (selected is null)
+                            failure = fingerprintCandidates == 0
+                                ? WindowCdpMappingFailure.FINGERPRINT_NOT_FOUND :
+                                candidates.Count == 0 ? WindowCdpMappingFailure.BOUNDS_MISMATCH :
+                                WindowCdpMappingFailure.FINGERPRINT_AMBIGUOUS;
                     }
-                    selected = UniqueTabFingerprintWindow(candidates, titles, tabTitles);
                 }
+                else failure = WindowCdpMappingFailure.TAB_STRIP_UNAVAILABLE;
             }
+            else failure = WindowCdpMappingFailure.TAB_STRIP_UNAVAILABLE;
         }
         if (selected is null)
             throw new CdpWindowMappingException(distinctCount == 0 ?
-                CdpWindowMappingState.NOT_FOUND : CdpWindowMappingState.AMBIGUOUS);
+                CdpWindowMappingState.NOT_FOUND : CdpWindowMappingState.AMBIGUOUS,
+                failure, titlePages.Length, fingerprintCandidates);
 
         var found = new List<TabTarget>();
         foreach (var page in pages.Where(p => IsRequestedTabCandidate(p.Id, p.Url,
@@ -749,7 +804,9 @@ internal static partial class WindowChromeCdp
             catch (CdpWindowMappingException e)
             {
                 // A window-mapping failure is not CDP transport loss.
-                return new(InspectMappingCode(e.State), [], Detail:e.Message);
+                return new(InspectMappingCode(e.State), [], Detail:e.Message,
+                    CdpMappingFailure:e.Failure, CdpTitleCandidates:e.TitleCandidates,
+                    CdpFingerprintCandidates:e.FingerprintCandidates);
             }
             catch (Exception e) when (e is WebSocketException or IOException or JsonException or
                 OperationCanceledException or InvalidOperationException or KeyNotFoundException)
@@ -785,7 +842,7 @@ internal static partial class WindowChromeCdp
             InspectTimeoutMs(TabConnected, tabId is not null)));
         var cdp = await TabSessionAsync(endpoint, timeout.Token);
         var tabs = await TargetsForWindow(cdp, hwnd, windowId, timeout.Token,
-            expectedOrigin, expectedUrl, tabId);
+            expectedOrigin, expectedUrl, tabId, expectedProfile is not null);
         if (scope == WindowInspectScope.TABS)
         {
             tabs = tabs.Where(t => MatchesContext(t.Url, expectedOrigin, expectedUrl)).ToList();
@@ -1173,7 +1230,8 @@ internal static partial class WindowChromeCdp
         {
             var cdp = await TabSessionAsync(endpoint, timeout.Token);
             var tabs = await TargetsForWindow(cdp, hwnd, request.WindowId, timeout.Token,
-                request.ExpectedOrigin, request.ExpectedUrl, target.TargetId);
+                request.ExpectedOrigin, request.ExpectedUrl, target.TargetId,
+                request.ExpectedProfile is not null);
             var selected = tabs.SingleOrDefault(t => t.Id == target.TargetId);
             if (selected is null) return Rejected(WindowActionCode.CDP_TARGET_AMBIGUOUS);
             if (!MatchesContext(selected.Url, request.ExpectedOrigin, request.ExpectedUrl))

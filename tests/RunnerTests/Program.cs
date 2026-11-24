@@ -1576,6 +1576,34 @@ Check(chromeTabStrip is { Length: 2 } && chromeTabStrip.Contains("Profile Contro
     WindowChromeCdp.UniqueTabFingerprintWindow(new[] { 12, 13 }, candidatePages,
         new[] { "Profile Control Plane", "Unique Native Tab", "Other Window's Tab" }) is null,
     "chrome.cdp_ambiguous_overlapping_windows_resolved_only_by_exclusive_native_tab_strip");
+var staleActiveTitleNative = new[] { "Stale Active Title", "Unique A", "Unique B", "Shared" };
+var fallbackPages = new (int WindowId, string Title)[]
+{
+    (12,"Unique A"),(12,"Unique B"),(12,"Shared"),(13,"Shared"),(13,"Other")
+};
+Check(WindowChromeCdp.UniqueStrongTabFingerprintWindow(new[] { 12,13 },fallbackPages,
+        staleActiveTitleNative)==12 &&
+    WindowChromeCdp.UniqueStrongTabFingerprintWindow(new[] { 12,13 },
+        new[] { (12,"Unique A"),(13,"Shared") },staleActiveTitleNative) is null &&
+    WindowChromeCdp.UniqueStrongTabFingerprintWindow(new[] { 12,13 },
+        new[] { (12,"Unique A"),(12,"Unique B"),(13,"Shared"),(13,"Other"),
+            (13,"Unique B") },staleActiveTitleNative) is null &&
+    WindowChromeCdp.UniqueStrongTabFingerprintWindow(new[] { 12,13 },
+        new[] { (12,"Unique A"),(12,"Unique B") },
+        new[] { "Stale Active Title","Unique A","Unique B","Third","Fourth" }) is null &&
+    WindowChromeCdp.UniqueStrongTabFingerprintWindow(new[] { 12,13 },fallbackPages,
+        new[] { "Stale Active Title","Shared" }) is null,
+    "chrome.cdp_missing_active_title_requires_multiple_exclusive_near_complete_tab_matches");
+string mappingWire=System.Text.Json.JsonSerializer.Serialize(new WindowInspectResult(
+    WindowInspectCode.CDP_TARGET_NOT_FOUND,[],Detail:"CDP_WINDOW_NO_MATCH",
+    CdpMappingFailure:WindowCdpMappingFailure.FINGERPRINT_AMBIGUOUS,
+    CdpTitleCandidates:0,CdpFingerprintCandidates:9),PipeWire.Json);
+Check(mappingWire.Contains("\"cdp_mapping_failure\":\"FINGERPRINT_AMBIGUOUS\"",
+        StringComparison.Ordinal) &&
+    mappingWire.Contains("\"cdp_title_candidates\":0",StringComparison.Ordinal) &&
+    mappingWire.Contains("\"cdp_fingerprint_candidates\":9",StringComparison.Ordinal) &&
+    !mappingWire.Contains("targetIds",StringComparison.OrdinalIgnoreCase),
+    "chrome.cdp_window_mapping_failure_typed_bounded_metadata_without_target_leak");
 Check(WindowPhysicalClick.CanUseNativeFallback(null) &&
     WindowPhysicalClick.CanUseNativeFallback(new(WindowActionCode.CDP_UNAVAILABLE,
         FailureStage: WindowFailureStage.CDP_CONNECT)) &&
