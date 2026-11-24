@@ -10,11 +10,15 @@ The server therefore advertises **two** read-only, bounded, typed entry points:
 - `windows.system_query(kind="TCP_CONNECTIONS", pid?, page_size?, offset?)`, kept
   for clients whose generated enum is current.
 - `windows.tcp_connections(pid?, page_size?, offset?)`, with no enum discriminator
-  in its input schema. It uses the same `GetExtendedTcpTable` snapshot and the
-  same `SystemQueryResult`, with `kind: "TCP_CONNECTIONS"` and a typed status.
+  in its input schema. It reuses the same `GetExtendedTcpTable` snapshot, but
+  publishes a dedicated `TcpConnectionsResult` output schema with **only**
+  `status`, `kind: "TCP_CONNECTIONS"`, `observed_utc`, `tcp_connections`,
+  `next_offset`, `native_error`, and `elapsed_ms`. Unrelated processes,
+  services, events, registry, and task schemas are not exposed by this tool.
 
 An MCP `tools/list` regression test (`tests/Test-TcpCatalog.ps1 -Exe <path>`) checks
-the actual freshly generated server schema and rejects missing tool definitions.
+the actual freshly generated server schema, including the **exact** dedicated
+TCP output fields, and rejects missing tool definitions or output schema bloat.
 It does **not** test or forcibly refresh the externally published connector
 catalog. That catalog must be refreshed/discovered by the connector operator
 after the new build is installed. Until the new tool is visible to the client,

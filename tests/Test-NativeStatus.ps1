@@ -66,7 +66,15 @@ try{
         $list=Receive $p 1
         $names=@($list.tools|ForEach-Object {$_.name})
         $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element','windows.invoke_locator','windows.manage_window','windows.chrome_connection','powershell_update','windows.file_query','windows.file_read_chunk','windows.file_write','windows.file_manage','windows.system_query','windows.tcp_connections','windows.file_acl','windows.process_wait_chain','windows.network_probe','windows.admin_action')
-        Assert (@($required|Where-Object {$_ -notin $names}).Count -eq 0 -and $names.Count -eq @($names|Select-Object -Unique).Count) 'r5.required_window_tools_without_duplicates'
+        Assert (@($required|Where-Object {$_ -notin $names}).Count -eq 0 -and
+            $names.Count -eq $required.Count -and
+            $names.Count -eq @($names|Select-Object -Unique).Count) 'native_schema.exact_22_tool_inventory'
+        $structured=@($list.tools|Where-Object {$_.name -ne 'powershell_screenshot'})
+        Assert (@($structured|Where-Object {
+            -not $_.Contains('outputSchema') -or
+            -not $_.outputSchema.Contains('properties') -or
+            $_.outputSchema.properties.Count -eq 0
+        }).Count -eq 0) 'native_schema.every_structured_tool_has_typed_output'
         $inspectTool=@($list.tools|Where-Object name -eq 'windows.inspect_window')
         $actionTool=@($list.tools|Where-Object name -eq 'windows.invoke_element')
         $statusTool=@($list.tools|Where-Object name -eq 'powershell_status')
@@ -131,8 +139,7 @@ try{
             $statusTool[0].outputSchema.properties.Contains('tunnel_metrics')) 'r5.optional_typed_doctor_and_tunnel_metrics_without_new_tool'
         $schemaBytes=[Text.Encoding]::UTF8.GetByteCount(($list|ConvertTo-Json -Depth 30 -Compress))
         Write-Host "MCP_TOOLS_LIST_BYTES=$schemaBytes"
-        # Five additional strictly typed native tools grow the catalog to
-        # ~75.8 KiB. Keep a measured 80 KiB ceiling so a future accidental
+        # Keep the measured 80 KiB ceiling so a future accidental
         # unbounded schema expansion still fails this real MCP tools/list test.
         Assert ($schemaBytes -le 81920) 'issue56.typed_tool_schema_under_80kib'
         Assert (@($list.tools|Where-Object {$_.name -eq 'powershell_status' -and $_.Contains('outputSchema')}).Count -eq 1) 'r1.typed_status_schema'

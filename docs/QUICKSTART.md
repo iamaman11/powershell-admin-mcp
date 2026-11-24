@@ -18,6 +18,11 @@ are needed for the native operations below.
 | Create or replace a file atomically | `windows.file_write` |
 | Create, copy, move or delete files and folders | `windows.file_manage` |
 | Read processes, services, adapters, TCP connections with owning PID, Windows events, registry metadata or scheduled tasks with native typed fields | `windows.system_query` |
+| Read TCP IPv4/IPv6 connections without the broad system-query discriminator | `windows.tcp_connections` |
+| Diagnose a file or directory ACL without changing it | `windows.file_acl` |
+| Inspect native Windows process wait chains | `windows.process_wait_chain` |
+| Actively test DNS, TCP, TLS or bounded HTTP against an explicit host | `windows.network_probe` |
+| Start/stop a service or enable/disable a task with guarded native operations | `windows.admin_action` |
 | Find a window | `windows.list_windows` |
 | Inspect window controls or Chrome tabs | `windows.inspect_window` |
 | Capture a single covered window | `windows.capture_window` |
@@ -26,13 +31,18 @@ are needed for the native operations below.
 | Activate, move, resize, minimize, or close an exact window | `windows.manage_window` |
 | Find and connect a Chrome profile through its own consent dialog | `windows.chrome_connection` |
 
-These 17 tools share native Windows identities and typed results. There is no
+These 22 tools share native Windows identities and typed results. There is no
 arbitrary path, UI-role or administrator-cmdlet allowlist. Windows ACLs, desktop
 sessions, Chrome's permission dialog, and exact resource identity still apply.
 
 `windows.system_query(kind=PROCESSES|SERVICES|NETWORK_INTERFACES|TCP_CONNECTIONS|EVENT_LOG|REGISTRY|SCHEDULED_TASKS)`
 is read-only and uses the MCP frontend's real Windows token. Process ID and
 service name select exact subjects; lists are paged (up to 50 entries per call).
+`windows.tcp_connections(pid?, page_size?, offset?)` reads the same native TCP
+table but has its **own narrow result schema**. It is the preferred entry point
+when a published client has an older cached `windows.system_query` kind enum.
+The remote connector must still publish the refreshed tool catalog before a
+client can invoke it; the server cannot unilaterally refresh client metadata.
 For `TCP_CONNECTIONS`, `pid` optionally selects the owning process. Each
 IPv4/IPv6 row exposes local/remote endpoint, state and PID; listening endpoints
 omit the meaningless remote address and port. A TCP snapshot is not a stable
