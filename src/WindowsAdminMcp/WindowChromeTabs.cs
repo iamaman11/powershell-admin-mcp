@@ -354,7 +354,8 @@ internal static partial class WindowChromeCdp
         failure.Data["cdp_method"] is string method && method is
             ("Target.getTargets" or "Browser.getWindowForTarget" or
              "Browser.getWindowBounds" or "Target.attachToTarget" or
-             "Page.getFrameTree" or "Accessibility.getFullAXTree" or
+             "Page.getFrameTree" or "Page.getResourceTree" or
+             "Accessibility.getFullAXTree" or
              "Browser.getVersion" or "DOM.getBoxModel")
             ? "CDP_TIMEOUT_" + method : "CDP_TIMEOUT";
 
@@ -872,7 +873,7 @@ internal static partial class WindowChromeCdp
         if (!MatchesContext(selected.Url, expectedOrigin, expectedUrl))
             return new(WindowInspectCode.CDP_CONTEXT_MISMATCH, [], Detail: "TAB_URL_MISMATCH");
         string sessionId = await Attach(cdp, selected.Id);
-        string loader = await Loader(cdp, sessionId);
+        string loader = await ReadFrameLoaderAsync(cdp, sessionId, timeout.Token);
         var ax = await cdp.Call("Accessibility.getFullAXTree", new { }, sessionId);
         long stamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         var elements = new List<WindowElement>(maxElements);
@@ -955,11 +956,54 @@ internal static partial class WindowChromeCdp
         return sessionId;
     }
 
-    private static async Task<string> Loader(Session cdp, string sessionId)
+    // Page.getFrameTree can stall on an independently unresponsive background
+    // renderer while the browser's one consented CDP socket stays healthy.
+    // Page.getResourceTree returns the same main-frame loaderId, so it is a
+    // read-only alternative; neither route focuses, reloads or thaws a page.
+    // The first command has its *own* deadline: the canceled waiter leaves the
+    // socket reader alive and a late reply cannot be mistaken for the fallback.
+    // Both paths must yield a real loaderId, otherwise no actionable element
+    // fingerprint can be minted and no input can be dispatched.
+    internal static async Task<string> ReadFrameLoaderAsync(Session cdp, string sessionId,
+        CancellationToken requestDeadline, int frameTreeProbeMs = 4500)
     {
-        var response = await cdp.Call("Page.getFrameTree", new { }, sessionId);
-        return response.GetProperty("frameTree").GetProperty("frame")
-            .GetProperty("loaderId").GetString()!;
+        requestDeadline.ThrowIfCancellationRequested();
+        using var probe = CancellationTokenSource.CreateLinkedTokenSource(requestDeadline);
+        probe.CancelAfter(frameTreeProbeMs);
+        cdp.SetDeadline(probe.Token);
+        try
+        {
+            var first = await cdp.Call("Page.getFrameTree", new { }, sessionId);
+            return MainFrameLoader(first);
+        }
+        catch (OperationCanceledException) when (!requestDeadline.IsCancellationRequested)
+        {
+            // An unanswered *individual* command is not proof of a lost CDP
+            // connection, and no subsequent command may reuse its response.
+        }
+        finally
+        {
+            cdp.SetDeadline(requestDeadline);
+        }
+
+        var fallback = await cdp.Call("Page.getResourceTree", new { }, sessionId);
+        return MainFrameLoader(fallback);
+    }
+
+    private static string MainFrameLoader(JsonElement response)
+    {
+        if (response.ValueKind != JsonValueKind.Object ||
+            !response.TryGetProperty("frameTree", out var tree) ||
+            tree.ValueKind != JsonValueKind.Object ||
+            !tree.TryGetProperty("frame", out var frame) ||
+            frame.ValueKind != JsonValueKind.Object ||
+            !frame.TryGetProperty("loaderId", out var value) ||
+            value.ValueKind != JsonValueKind.String)
+            throw new InvalidOperationException("CDP_TAB_LOADER_UNAVAILABLE");
+        string? loader = value.GetString();
+        if (loader is null || loader.Length is < 1 or > 80 || loader.Contains(':'))
+            throw new InvalidOperationException("CDP_TAB_LOADER_UNAVAILABLE");
+        return loader;
     }
 
     private static bool HasAxName(JsonElement ax, string name)
@@ -1196,7 +1240,8 @@ internal static partial class WindowChromeCdp
     // that occurs during earlier, potentially slow DOM/AX preparation.
     private static async Task<(WindowActionCode? Code, string? Detail)> DispatchCheckpoint(Session cdp,
         string sessionId, IntPtr hwnd, WindowActionRequest request, string targetId,
-        string snapshotUrl, int browserWindowId, string loaderId)
+        string snapshotUrl, int browserWindowId, string loaderId,
+        CancellationToken cdpDeadline)
     {
         using var self = Process.GetCurrentProcess();
         if (WindowCatalog.ResolveId(request.WindowId, self.SessionId, out var current) !=
@@ -1216,7 +1261,7 @@ internal static partial class WindowChromeCdp
             !windowId.TryGetInt32(out int actualWindowId) ||
             actualWindowId != browserWindowId)
             return (WindowActionCode.CDP_CONTEXT_MISMATCH, "TAB_WINDOW_CHANGED");
-        return await Loader(cdp, sessionId) == loaderId
+        return await ReadFrameLoaderAsync(cdp, sessionId, cdpDeadline) == loaderId
             ? (null, null) : (WindowActionCode.STALE_ELEMENT, "TAB_LOADER_CHANGED");
     }
 
@@ -1240,7 +1285,7 @@ internal static partial class WindowChromeCdp
                 !VerifiedChromeProfile(hwnd, request.ExpectedProfile, out var profileFailure))
                 return Rejected(WindowActionCode.CDP_CONTEXT_MISMATCH, $"PROFILE_{profileFailure}");
             string sessionId = await Attach(cdp, selected.Id);
-            string loader = await Loader(cdp, sessionId);
+            string loader = await ReadFrameLoaderAsync(cdp, sessionId, timeout.Token);
             if (loader != target.LoaderId) return Rejected(WindowActionCode.STALE_ELEMENT);
             var ax = await cdp.Call("Accessibility.getFullAXTree", new { }, sessionId);
             var nodeMatches = ax.GetProperty("nodes").EnumerateArray().Where(node =>
@@ -1297,7 +1342,8 @@ internal static partial class WindowChromeCdp
                 if (!hit.GetProperty("result").TryGetProperty("value", out var ok) ||
                     ok.ValueKind != JsonValueKind.True) return Rejected(WindowActionCode.TARGET_OCCLUDED);
                 var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
-                    target.TargetId, selected.Url, selected.BrowserWindowId, target.LoaderId);
+                    target.TargetId, selected.Url, selected.BrowserWindowId, target.LoaderId,
+                    timeout.Token);
                 if (checkpoint.Code is not null) return Rejected(checkpoint.Code.Value,
                     checkpoint.Detail);
                 dispatched = true;
@@ -1310,7 +1356,8 @@ internal static partial class WindowChromeCdp
                     !await EditableDomNode(cdp, sessionId, target.BackendId))
                     return Rejected(WindowActionCode.UNSUPPORTED_ACTION);
                 var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
-                    target.TargetId, selected.Url, selected.BrowserWindowId, target.LoaderId);
+                    target.TargetId, selected.Url, selected.BrowserWindowId, target.LoaderId,
+                    timeout.Token);
                 if (checkpoint.Code is not null) return Rejected(checkpoint.Code.Value,
                     checkpoint.Detail);
                 // DOM.focus itself can fire web events. Once requested, any

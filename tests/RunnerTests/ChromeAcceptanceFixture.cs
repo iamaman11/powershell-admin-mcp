@@ -16,6 +16,7 @@ internal static class ChromeAcceptanceFixture
             Environment.GetEnvironmentVariable("RUNNER_OS") != "Windows") return;
 
         await VerifyReceivePumpAsync();
+        await VerifyFrameTreeFallbackAsync();
 
         string? chrome = new[]
         {
@@ -505,6 +506,75 @@ internal static class ChromeAcceptanceFixture
         if (!brokenWire.Aborted)
             throw new InvalidOperationException("CI_CDP_PROTOCOL_FAILURE_NOT_CLOSED");
         Console.WriteLine("PASS chrome_ci.malformed_protocol_fails_closed");
+    }
+
+    private static async Task VerifyFrameTreeFallbackAsync()
+    {
+        using var wire = new ScriptedWebSocket();
+        using var session = new WindowChromeCdp.Session(wire);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        const string sessionId = "ci-background-tab";
+
+        // Simulate the real failure: a single page's FrameTree is silent,
+        // while the same browser socket and tab session can answer another
+        // read-only Page command containing a main-frame loader identity.
+        Task<string> loader = WindowChromeCdp.ReadFrameLoaderAsync(session, sessionId,
+            deadline.Token, frameTreeProbeMs: 250);
+        var initial = await wire.NextCommandAsync(deadline.Token);
+        if (initial.GetProperty("method").GetString() != "Page.getFrameTree" ||
+            initial.GetProperty("sessionId").GetString() != sessionId)
+            throw new InvalidOperationException("CI_CDP_LOADER_FIRST_METHOD_NOT_FRAME_TREE");
+        int oldId = initial.GetProperty("id").GetInt32();
+        var fallback = await wire.NextCommandAsync(deadline.Token);
+        if (fallback.GetProperty("method").GetString() != "Page.getResourceTree" ||
+            fallback.GetProperty("sessionId").GetString() != sessionId)
+            throw new InvalidOperationException("CI_CDP_LOADER_FALLBACK_METHOD_INVALID");
+        int newId = fallback.GetProperty("id").GetInt32();
+        if (oldId == newId) throw new InvalidOperationException("CI_CDP_LOADER_ID_REUSED");
+
+        // The response for the abandoned first command must be discarded,
+        // not promoted to a fingerprint for the possibly navigated tab.
+        wire.Reply(JsonSerializer.Serialize(new { id = oldId, sessionId,
+            result = new { frameTree = new { frame = new { loaderId = "stale-loader" } } } }));
+        wire.Reply(JsonSerializer.Serialize(new { id = newId, sessionId,
+            result = new { frameTree = new { frame = new { loaderId = "fresh-loader" } } } }));
+        if (await loader.WaitAsync(deadline.Token) != "fresh-loader" || wire.Aborted)
+            throw new InvalidOperationException("CI_CDP_LOADER_FALLBACK_REUSED_STALE_RESPONSE");
+
+        // A normal root call immediately after this tab-specific fallback
+        // continues through the exact same owned socket and one receive pump.
+        session.SetDeadline(deadline.Token);
+        Task<JsonElement> healthy = session.Call("Browser.getVersion", new { });
+        var next = await wire.NextCommandAsync(deadline.Token);
+        int healthyId = next.GetProperty("id").GetInt32();
+        wire.Reply(JsonSerializer.Serialize(new { id = healthyId,
+            result = new { product = "Chrome/fixture" } }));
+        if ((await healthy.WaitAsync(deadline.Token)).GetProperty("product").GetString() !=
+            "Chrome/fixture" || wire.MaxConcurrentReads != 1 || wire.SentCount != 3)
+            throw new InvalidOperationException("CI_CDP_LOADER_FALLBACK_BROKE_SHARED_SOCKET");
+        Console.WriteLine("PASS chrome_ci.unresponsive_frame_tree_resource_loader_fallback " +
+            "late_reply_ignored_single_socket");
+
+        using var stalledWire = new ScriptedWebSocket();
+        using var stalledSession = new WindowChromeCdp.Session(stalledWire);
+        using var outer = new CancellationTokenSource(TimeSpan.FromMilliseconds(950));
+        Task<string> bothSlow = WindowChromeCdp.ReadFrameLoaderAsync(stalledSession,
+            sessionId, outer.Token, frameTreeProbeMs: 150);
+        _ = await stalledWire.NextCommandAsync(deadline.Token);
+        var resource = await stalledWire.NextCommandAsync(deadline.Token);
+        if (resource.GetProperty("method").GetString() != "Page.getResourceTree")
+            throw new InvalidOperationException("CI_CDP_LOADER_BOTH_SLOW_NO_RESOURCE_FALLBACK");
+        try
+        {
+            _ = await bothSlow.WaitAsync(deadline.Token);
+            throw new InvalidOperationException("CI_CDP_LOADER_BOTH_SLOW_MUST_FAIL_CLOSED");
+        }
+        catch (OperationCanceledException e) when (
+            e.Data["cdp_method"] is "Page.getResourceTree") { }
+        if (stalledWire.Aborted)
+            throw new InvalidOperationException("CI_CDP_LOADER_BOTH_SLOW_CLOSED_BROWSER_SOCKET");
+        Console.WriteLine("PASS chrome_ci.both_loader_methods_timeout_fails_closed " +
+            "without_connection_loss");
     }
 
     private sealed class ScriptedWebSocket : WebSocket

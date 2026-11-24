@@ -307,3 +307,19 @@ public sealed class SystemTools
         Task.FromResult(SystemSnapshot.Observe(kind,pid,service_name,page_size,offset,cancellationToken,
             event_log,event_id,registry_hive,registry_path,registry_view,include_value,task_folder,event_provider));
 }
+
+// Keep the historical discriminated windows.system_query interface intact, but
+// expose TCP snapshots through an independent, schema-stable MCP tool too.
+// A previously published client schema can cache the older SystemQueryKind
+// enum (without TCP_CONNECTIONS); this separate entry point does not require
+// clients to send a value absent from that cached enum after catalog refresh.
+[McpServerToolType]
+public sealed class TcpConnectionTools
+{
+    [McpServerTool(Name="windows.tcp_connections", UseStructuredContent=true),
+     Description("Native bounded read-only Windows TCP IPv4/IPv6 connection snapshot including owning process PID and state. Optional exact PID and paged results; no PowerShell, netstat, outbound connection, or secondary service.")]
+    public static Task<SystemQueryResult> Query(int? pid=null,int page_size=50,int offset=0,
+        CancellationToken cancellationToken=default) =>
+        Task.FromResult(SystemSnapshot.Observe(SystemQueryKind.TCP_CONNECTIONS,pid,null,
+            page_size,offset,cancellationToken));
+}

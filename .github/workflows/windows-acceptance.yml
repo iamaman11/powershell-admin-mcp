@@ -144,6 +144,11 @@ jobs:
           $ErrorActionPreference = 'Stop'
           dotnet publish src/WindowsAdminMcp/WindowsAdminMcp.csproj -c Release -r win-x64 --self-contained true --no-restore -o "${{ runner.temp }}/WindowsAdminMcpCandidate"
           if ($LASTEXITCODE -ne 0) { throw 'R1_PUBLISH_FAILED' }
+      - name: Assert published TCP MCP input and output schemas
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          ./tests/Test-TcpCatalog.ps1 -Exe "${{ runner.temp }}/WindowsAdminMcpCandidate/WindowsAdminMCP.exe"
       - name: Verify native service and MCP contract
         shell: pwsh
         run: |
@@ -155,6 +160,12 @@ jobs:
             $params.Performance=$true
           }
           ./tests/Test-NativeStatus.ps1 @params
+      - name: Prove lost MCP reply does not replay an effect
+        if: github.event_name != 'push' || steps.provenance.outputs.full == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          ./tests/Test-LostAcknowledgement.ps1 -Exe "${{ runner.temp }}/WindowsAdminMcpCandidate/WindowsAdminMCP.exe"
       - name: Build and test offline native installation package
         shell: pwsh
         run: |

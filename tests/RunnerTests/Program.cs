@@ -107,6 +107,14 @@ static void Check(bool ok, string label)
     Console.WriteLine("PASS " + label);
 }
 
+// The SDK's generated tool catalog and exact typed argument gates must stay
+// discoverable even when a separately published client cached an older schema.
+TcpSchemaAcceptance.Run(Check);
+NetworkProbeAcceptance.Run();
+await NetworkProbeAcceptance.RunLoopbackAsync();
+await ExpertDiagnosticsAcceptance.RunAsync();
+AdminActionFixture.Run();
+
 // Exercise the owned, throwaway Chrome browser before the remaining native
 // window tests, so their accessibility activity cannot disturb its toolbar.
 await ChromeAcceptanceFixture.RunAsync();
