@@ -1779,6 +1779,7 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
     int keyboardClickCount = 0;
     int asyncDispatchCount = 0;
     int titleDispatchCount = 0;
+    int disabledSaveClickCount = 0;
     int gestureHoverCount = 0;
     int gestureLeftDownCount = 0;
     int gestureRightDownCount = 0;
@@ -1862,6 +1863,7 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             using var saveButton = new System.Windows.Forms.Button
                 { Text = "CI_UIA_SAVE", AccessibleName = "CI_UIA_SAVE", Top = 347,
                   Width = 250, Enabled = false };
+            saveButton.Click += (_, _) => Interlocked.Increment(ref disabledSaveClickCount);
             form.Controls.Add(saveButton);
             input.TextChanged += (_, _) =>
             {
@@ -2174,6 +2176,12 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         var providerDisabled = await Task.Run(() => WindowActionNoFocus.Invoke(created.Handle,
             disabledPath, nativeDisabled!.GetRuntimeId(), disabledRequest, Stopwatch.StartNew()))
             .WaitAsync(TimeSpan.FromSeconds(5));
+        // The WinForms provider on some Windows builds acknowledges Invoke
+        // on a disabled button without actually emitting a Click event. A
+        // successful provider call is not a verified effect.
+        int saveClicks = Volatile.Read(ref disabledSaveClickCount);
+        Check(saveClicks == 0 && !nativeDisabled.Current.IsEnabled,
+            "windows.disabled_native_provider_did_not_emit_click_event");
         if (providerDisabled.Status == WindowActionCode.UIA_ELEMENTNOTENABLED_UNKNOWN_EFFECT)
         {
             Check(providerDisabled.HResult == "80040200" &&
@@ -2183,6 +2191,15 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                 providerDisabled.EffectState == WindowEffectState.EFFECT_UNKNOWN &&
                 !providerDisabled.SafeToRetry,
                 "windows.real_uia_provider_elementnotenabled_hresult_is_typed_no_replay");
+        }
+        else if (providerDisabled.Status == WindowActionCode.COMPLETED)
+        {
+            Check(providerDisabled.ProviderOutcome == WindowProviderOutcome.ACKNOWLEDGED &&
+                providerDisabled.EffectState == WindowEffectState.EFFECT_UNKNOWN &&
+                providerDisabled.ExecutionMethod == WindowExecutionMethod.UIA_PATTERN,
+                "windows.uia_provider_ack_does_not_prove_effect_on_disabled_button");
+            Console.WriteLine("NOT_TESTED / EXTERNAL_BLOCKER " +
+                "windows.real_uia_provider_elementnotenabled reason=PROVIDER_ACK_WITHOUT_EFFECT");
         }
         else Console.WriteLine("NOT_TESTED / EXTERNAL_BLOCKER " +
             $"windows.real_uia_provider_elementnotenabled reason={providerDisabled.Status} " +
