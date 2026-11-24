@@ -128,6 +128,17 @@ internal static class ChromeAcceptanceFixture
             // The throwaway CI profile has no stable account metadata. Its
             // verified native avatar display name is the binding selector.
             string selector = profile!.DisplayName;
+            // This test owns the entire new profile. The native avatar label
+            // is safe to report here when a profile check fails; production
+            // diagnostics never reveal unrelated Chrome profile labels.
+            string ProfileEvidence()
+            {
+                var observed = ChromeProfileCatalog.ReadWindowProfile(windowId!, self.SessionId,
+                    out var probe);
+                return $"native_probe={probe} initial_label={selector} " +
+                    $"current_label={observed?.DisplayName} " +
+                    $"initial_id={profile.ProfileId} current_id={observed?.ProfileId}";
+            }
 
             // Use the real USER owner from the first request onward. The 100
             // cycles and the 2/4/8 independent clients must share its single
@@ -196,7 +207,7 @@ internal static class ChromeAcceptanceFixture
                     status.SessionGeneration != generation)
                     throw new InvalidOperationException($"CI_CDP_STATUS_LOST cycle={iteration} " +
                         $"code={status?.Status} state={status?.State} detail={status?.Detail} " +
-                        $"failure={status?.FailureReason}");
+                        $"failure={status?.FailureReason} {ProfileEvidence()}");
 
                 bool setText = iteration % 2 == 0;
                 string label = setText ? "CI_CDP_VALUE" : "CI_CDP_BUTTON";
@@ -211,7 +222,7 @@ internal static class ChromeAcceptanceFixture
                     inspect.Tabs[0].Url != url)
                     throw new InvalidOperationException($"CI_CDP_INSPECT cycle={iteration} " +
                         $"status={inspect?.Status} detail={inspect?.Detail} count={inspect?.Elements.Length} " +
-                        $"candidates={targets.Length}");
+                        $"candidates={targets.Length} {ProfileEvidence()}");
 
                 string value = $"CI_CDP_CYCLE_{iteration:D3}";
                 var action = (await ExchangeAsync(new(Action: new WindowActionRequest(
@@ -224,7 +235,8 @@ internal static class ChromeAcceptanceFixture
                     action.ExecutionMethod != WindowExecutionMethod.CHROME_CDP ||
                     setText && action.ExpectedStateObserved != true)
                     throw new InvalidOperationException($"CI_CDP_ACTION cycle={iteration} " +
-                        $"status={action?.Status} detail={action?.Detail} unknown={action?.EffectUnknown}");
+                        $"status={action?.Status} detail={action?.Detail} unknown={action?.EffectUnknown} " +
+                        ProfileEvidence());
 
                 int expectedClicks = (iteration + 1) / 2;
                 bool observed = await UntilAsync(() => setText
