@@ -126,7 +126,11 @@ try{
         $invalidAccept=(Receive $p 75).structuredContent
         Assert ($invalidAccept.status -eq 'INVALID_ARGUMENT' -and
             $invalidAccept.detail -eq 'INVALID_ACTION_ARGUMENTS') 'r5.accept_without_explicit_confirmation_denied'
-        Assert ($actionTool[0].outputSchema.properties.Contains('foreground_changed') -and
+        Assert ($actionTool[0].inputSchema.properties.Contains('input_mode') -and
+            $actionTool[0].outputSchema.properties.Contains('effect_evidence') -and
+            $actionTool[0].outputSchema.properties.Contains('next_step') -and
+            $actionTool[0].outputSchema.properties.Contains('focus_behavior') -and
+            $actionTool[0].outputSchema.properties.Contains('foreground_changed') -and
             $actionTool[0].outputSchema.properties.Contains('target_activated') -and
             $actionTool[0].outputSchema.properties.Contains('effect_state') -and
             $actionTool[0].outputSchema.properties.Contains('execution_method') -and

@@ -135,15 +135,51 @@ always means a new action. File receipts share the same 100,000-row and
    can resolve one exact locator and act in a single request.
 3. Choose `INVOKE`, `CLICK`, `DOUBLE_CLICK`, `RIGHT_CLICK`, `SCROLL`, `HOVER`,
    `DRAG`, `KEY_PRESS` or an available semantic pattern. Provide an expected
-   postcondition for verification when possible. `input_mode=BACKGROUND_ONLY`
-   is the default: CDP and native UIA patterns do not inject OS mouse/keyboard
-   events. A physical-input-only action returns `FOREGROUND_INPUT_DISALLOWED`
-   with `effect_state=NO_EFFECT`. Explicit `input_mode=ALLOW_FOREGROUND_INPUT`
-   permits the existing verified pointer/keyboard path, including its Windows
-   foreground restrictions.
+   postcondition for verification. `input_mode=BACKGROUND_ONLY` is the default:
+   it prohibits **our** OS mouse/keyboard injection and calls to activate a
+   window. The UIA provider of another application can nevertheless briefly
+   raise its window. `foreground_changed=false` compares snapshots; it is not
+   proof that no transient activation happened. For consented Chrome web
+   controls, use `input_mode=CDP_ONLY` to prohibit both native UIA actions and
+   physical input; unsupported controls then return `CDP_ONLY_UNAVAILABLE`
+   without dispatching an effect. A physical-input-only action in the default
+   mode returns `FOREGROUND_INPUT_DISALLOWED` with `effect_state=NO_EFFECT`.
+   Explicit `input_mode=ALLOW_FOREGROUND_INPUT` permits the verified native
+   pointer/keyboard path, subject to Windows foreground restrictions.
 4. `windows.manage_window(action=CLOSE)` sends graceful `WM_CLOSE`. A successful
    message enqueue is **not** success: `COMPLETED` requires the exact HWND to
    disappear. Applications may show a save prompt; then the effect is unknown.
+
+### Understanding an action result
+
+For navigation (for example, opening a profile list), first inspect the
+current window and identify an element **unique to the destination screen**.
+Invoke the navigation control once, supplying that destination as
+`expected_name` and `expected_change=APPEARS`; optionally set
+`expected_kind=UIA_ELEMENT` (default) and `observation_timeout_ms` (100..15000).
+Never use the navigation button's name as the destination check if it was
+already visible before the click.
+
+The following fields have separate meanings:
+
+| Field | Interpretation |
+| --- | --- |
+| `status=COMPLETED`, `provider_outcome=ACKNOWLEDGED` | UIA/CDP accepted dispatch; **not** proof that navigation happened |
+| `effect_state=EFFECT_VERIFIED`, `effect_evidence=POSTCONDITION_VERIFIED` | The requested transition was independently observed |
+| `effect_state=EFFECT_UNKNOWN`, `effect_evidence=PROVIDER_ACK_ONLY` | No independently verified effect; do a fresh **read-only** inspection |
+| `effect_evidence=POSTCONDITION_NOT_OBSERVED` | A requested postcondition was checked but not seen; still no blind retry |
+| `safe_to_retry=false` | Do not re-dispatch the same state-changing action without independent evidence |
+| `next_step` | Typed guidance such as `INSPECT_AND_SUPPLY_POSTCONDITION` or `INSPECT_STATE_DO_NOT_RETRY` |
+| `focus_behavior=UIA_PROVIDER_MAY_ACTIVATE` | Even with `BACKGROUND_ONLY`, a third-party UIA provider may momentarily change foreground |
+| `focus_behavior=UNKNOWN_METHOD_MAY_ACTIVATE` | The action outcome/method is uncertain; do not infer that focus stayed unchanged |
+
+After `INSPECT_AND_SUPPLY_POSTCONDITION`, supply the discovered destination
+postcondition on a **future** action. Do not repeat an action whose effect is
+still unknown merely to add the missing expected-state fields.
+
+`CDP_ONLY` does not imply that arbitrary website JavaScript can never call
+focus APIs; it guarantees only that the MCP tool does not fall back to native
+UIA dispatch, OS foreground activation or synthetic keyboard/mouse input.
 
 For Chrome, first use `windows.chrome_connection` with the exact profile and
 window. `REQUEST` does not raise Chrome by default: an already foreground

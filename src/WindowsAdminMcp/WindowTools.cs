@@ -142,7 +142,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.invoke_element", UseStructuredContent = true),
-     Description("UIA/Chrome action; fresh element_id. BACKGROUND_ONLY by default: no OS mouse/keyboard injection or foreground activation. Physical input requires explicit ALLOW_FOREGROUND_INPUT.")]
+     Description("Act on a fresh UIA/Chrome element. Supply expected_name and expected_change for independently verified navigation. BACKGROUND_ONLY forbids our own OS input/activation but a UIA provider may briefly focus its window. CDP_ONLY requires consented Chrome and never falls back to UIA/SendInput. ALLOW_FOREGROUND_INPUT explicitly permits native pointer/keyboard input. EFFECT_UNKNOWN means inspect state, never replay blindly; inspect effect_evidence, next_step and focus_behavior.")]
     public static async Task<WindowActionResult> InvokeElement(string window_id, string element_id,
         WindowActionKind action, string? value = null, bool confirm = true,
         string? element_path = null, string? expected_name = null,
@@ -190,7 +190,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name="windows.invoke_locator",UseStructuredContent=true),
-     Description("Locate one live UIA element in a disposable worker, then act once via the shared broker. BACKGROUND_ONLY by default; OS mouse/keyboard input requires explicit ALLOW_FOREGROUND_INPUT.")]
+     Description("Find one exact accessible element and act once. For navigation set expected_name/expected_change to the new screen's observable state. BACKGROUND_ONLY may trigger provider-owned UIA focus despite no OS input; CDP_ONLY forbids native UIA actions, while ALLOW_FOREGROUND_INPUT permits explicit pointer/keyboard input. Read effect_evidence, next_step, focus_behavior; never replay EFFECT_UNKNOWN.")]
     public static Task<WindowActionResult> InvokeLocator(string window_id,WindowActionKind action,
         string? automation_id=null,string? name=null,WindowRoleFilter? role=null,
         string? value=null,bool confirm=true,
