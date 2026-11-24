@@ -76,8 +76,18 @@ internal static class ChromeAcceptanceFixture
             int browserPid = browser.Id;
 
             string ownedEndpoint = Path.Combine(profileDir, "DevToolsActivePort");
-            if (!await UntilAsync(() => File.Exists(ownedEndpoint), TimeSpan.FromSeconds(12)))
+            // Hosted Windows runners can spend substantially longer starting
+            // their first browser process under load. Wait for the browser's
+            // own endpoint file without touching another Chrome process.
+            if (!await UntilAsync(() => File.Exists(ownedEndpoint), TimeSpan.FromSeconds(30)))
             {
+                int? exitCode = browser.HasExited ? browser.ExitCode : null;
+                var chromeProcesses = Process.GetProcessesByName("chrome");
+                int chromeCount = chromeProcesses.Length;
+                foreach (var process in chromeProcesses) process.Dispose();
+                Console.WriteLine($"CHROME_CI_STARTUP_DIAGNOSTIC " +
+                    $"browser_exited={browser.HasExited} " +
+                    $"exit_code={exitCode} chrome_process_count={chromeCount}");
                 Blocked("CI_CHROME_DEBUG_ENDPOINT_UNAVAILABLE");
                 return;
             }
