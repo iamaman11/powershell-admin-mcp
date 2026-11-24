@@ -85,9 +85,11 @@ public sealed record ChromeConnectionResult(
     [JsonPropertyName("consent_confirmed")]
     public bool ConsentConfirmed => State == ChromeConnectionState.CONNECTED;
 
-    // A WebSocket STATUS does not prove a particular tab/action is ready.
+    // No tab was inspected by this connection-only tool. Null is deliberate:
+    // false would incorrectly report that a tab was probed and found unready.
+    // A caller uses chrome_tab LIST or inspect_window(TAB) for target evidence.
     [JsonPropertyName("target_ready")]
-    public bool TargetReady => false;
+    public bool? TargetReady => null;
 }
 
 internal sealed record ChromeConnectionRequest(string WindowId, string ExpectedProfile,
@@ -103,7 +105,8 @@ public sealed class ChromeConnectionTools
     [McpServerTool(Name = "windows.chrome_connection", UseStructuredContent = true),
      Description("Discover Chrome profiles and request or check a native CDP connection. USER_BROWSER uses Chrome 144+ native user consent and never bypasses it. MANAGED_BROWSER attaches to an explicitly started separate Chrome --user-data-dir under WindowsAdminMCP/ChromeProfiles and does not raise an elevation or consent prompt. " +
          "Never activates Chrome by default; activate_window_for_consent explicitly permits foreground activation for an approval prompt. " +
-         "A unique open profile may be selected by email without window_id; ambiguous windows require window_id.")]
+         "A unique open profile may be selected by email without window_id; ambiguous windows require window_id. " +
+         "CONNECTED proves the consented CDP transport, not a tab. target_ready=null means NOT_PROBED; use windows.chrome_tab LIST or windows.inspect_window(scope=TAB) to verify a target.")]
     public static async Task<ChromeConnectionResult> Connection(ChromeConnectionAction action,
         string? window_id = null, string? expected_profile = null,
         bool activate_window_for_consent = false,

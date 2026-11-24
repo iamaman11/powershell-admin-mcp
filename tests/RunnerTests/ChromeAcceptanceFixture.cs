@@ -616,6 +616,71 @@ internal static class ChromeAcceptanceFixture
         Console.WriteLine("PASS chrome_ci.unresponsive_frame_tree_resource_loader_fallback " +
             "late_reply_ignored_single_socket");
 
+        // A per-tab CDP rejection, or a successful reply missing loaderId,
+        // must also reach the read-only alternative. Neither invalid reply
+        // means the browser socket is gone or authorizes an effectful replay.
+        async Task VerifyNonTimeoutFallbackAsync(bool rejected)
+        {
+            using var alternateWire = new ScriptedWebSocket();
+            using var alternateSession = new WindowChromeCdp.Session(alternateWire);
+            using var alternateDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            Task<string> read = WindowChromeCdp.ReadFrameLoaderAsync(alternateSession,
+                sessionId, alternateDeadline.Token, frameTreeProbeMs: 2000);
+            var firstCommand = await alternateWire.NextCommandAsync(alternateDeadline.Token);
+            if (firstCommand.GetProperty("method").GetString() != "Page.getFrameTree")
+                throw new InvalidOperationException("CI_CDP_LOADER_WRONG_PRIMARY_METHOD");
+            int primaryId = firstCommand.GetProperty("id").GetInt32();
+            if (rejected)
+                alternateWire.Reply(JsonSerializer.Serialize(new { id = primaryId, sessionId,
+                    error = new { code = -32000, message = "renderer unavailable" } }));
+            else
+                alternateWire.Reply(JsonSerializer.Serialize(new { id = primaryId, sessionId,
+                    result = new { frameTree = new { frame = new { id = "main" } } } }));
+            var alternative = await alternateWire.NextCommandAsync(alternateDeadline.Token);
+            if (alternative.GetProperty("method").GetString() != "Page.getResourceTree" ||
+                alternative.GetProperty("id").GetInt32() == primaryId)
+                throw new InvalidOperationException("CI_CDP_LOADER_NO_ALTERNATIVE_ON_BAD_REPLY");
+            alternateWire.Reply(JsonSerializer.Serialize(new
+            {
+                id = alternative.GetProperty("id").GetInt32(), sessionId,
+                result = new { frameTree = new { frame = new { loaderId = "alternate-loader" } } }
+            }));
+            if (await read.WaitAsync(alternateDeadline.Token) != "alternate-loader" ||
+                alternateWire.Aborted || alternateWire.SentCount != 2)
+                throw new InvalidOperationException("CI_CDP_LOADER_ALTERNATIVE_NOT_VERIFIED");
+        }
+        await VerifyNonTimeoutFallbackAsync(rejected: true);
+        await VerifyNonTimeoutFallbackAsync(rejected: false);
+        Console.WriteLine("PASS chrome_ci.rejected_or_missing_loader_falls_back_read_only");
+
+        using (var rejectedWire = new ScriptedWebSocket())
+        using (var rejectedSession = new WindowChromeCdp.Session(rejectedWire))
+        using (var rejectedDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+        {
+            Task<string> failed = WindowChromeCdp.ReadFrameLoaderAsync(rejectedSession,
+                sessionId, rejectedDeadline.Token, frameTreeProbeMs: 2000);
+            foreach (string method in new[] { "Page.getFrameTree", "Page.getResourceTree" })
+            {
+                var command = await rejectedWire.NextCommandAsync(rejectedDeadline.Token);
+                if (command.GetProperty("method").GetString() != method)
+                    throw new InvalidOperationException("CI_CDP_LOADER_UNEXPECTED_REJECTED_METHOD");
+                rejectedWire.Reply(JsonSerializer.Serialize(new
+                {
+                    id = command.GetProperty("id").GetInt32(), sessionId,
+                    error = new { code = -32000, message = "renderer unavailable" }
+                }));
+            }
+            try
+            {
+                _ = await failed.WaitAsync(rejectedDeadline.Token);
+                throw new InvalidOperationException("CI_CDP_LOADER_BOTH_REJECTED_NOT_REPORTED");
+            }
+            catch (InvalidOperationException e) when (e.Message == "CDP_COMMAND_REJECTED") { }
+            if (rejectedWire.Aborted || rejectedWire.SentCount != 2)
+                throw new InvalidOperationException("CI_CDP_LOADER_REJECTION_BROKE_SHARED_SOCKET");
+        }
+        Console.WriteLine("PASS chrome_ci.both_loader_methods_rejected_preserves_socket");
+
         using var stalledWire = new ScriptedWebSocket();
         using var stalledSession = new WindowChromeCdp.Session(stalledWire);
         using var outer = new CancellationTokenSource(TimeSpan.FromMilliseconds(950));
