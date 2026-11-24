@@ -244,8 +244,11 @@ internal static class WindowAction
         try
         {
             if(request.ExpectedProfile is not null &&
-                !WindowChromeCdp.VerifiedChromeProfile(hwnd,request.ExpectedProfile))
-                return new(WindowActionCode.CDP_CONTEXT_MISMATCH,Detail:"PROFILE_NOT_VERIFIED");
+                !WindowChromeCdp.VerifiedChromeProfile(hwnd,request.ExpectedProfile,
+                    out var profileFailure))
+                return new(WindowActionCode.CDP_CONTEXT_MISMATCH,
+                    FailureStage:WindowFailureStage.CDP_TARGET,
+                    Detail:$"PROFILE_{profileFailure}");
             var root=AutomationElement.FromHandle(hwnd);
             if(root is null)return new(WindowActionCode.UIA_UNAVAILABLE);
             var walker=TreeWalker.ControlViewWalker;
@@ -304,14 +307,20 @@ internal static class WindowAction
                 ElapsedMs: clock.ElapsedMilliseconds);
         if (WindowChromeCdp.WellFormedTabElementRef(request.ElementId))
         {
-            if (!WindowChromeCdp.VerifiedChromeProfile(hwnd, request.ExpectedProfile!))
+            if (!WindowChromeCdp.VerifiedChromeProfile(hwnd, request.ExpectedProfile!,
+                out var profileFailure))
                 return new(WindowActionCode.CDP_CONTEXT_MISMATCH,
-                    Detail: "PROFILE_NOT_VERIFIED", ElapsedMs: clock.ElapsedMilliseconds);
+                    Detail: $"PROFILE_{profileFailure}",
+                    FailureStage: WindowFailureStage.CDP_TARGET,
+                    ElapsedMs: clock.ElapsedMilliseconds);
             return WindowChromeCdp.InvokeTab(hwnd, request, clock);
         }
         if (request.ExpectedProfile is not null &&
-            !WindowChromeCdp.VerifiedChromeProfile(hwnd, request.ExpectedProfile))
-            return new(WindowActionCode.CDP_CONTEXT_MISMATCH, Detail: "PROFILE_NOT_VERIFIED");
+            !WindowChromeCdp.VerifiedChromeProfile(hwnd, request.ExpectedProfile,
+                out var nonTabProfileFailure))
+            return new(WindowActionCode.CDP_CONTEXT_MISMATCH,
+                FailureStage: WindowFailureStage.CDP_TARGET,
+                Detail: $"PROFILE_{nonTabProfileFailure}");
         try
         {
             var root = AutomationElement.FromHandle(hwnd);
