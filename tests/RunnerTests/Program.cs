@@ -1827,14 +1827,13 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                     Interlocked.Increment(ref gestureRightDownCount);
             };
             form.Controls.Add(gestureButton);
-            using var scrollPanel = new System.Windows.Forms.Panel
-                { AccessibleName = "CI_UIA_SCROLL_PANEL", AccessibleRole =
-                    System.Windows.Forms.AccessibleRole.Pane,
-                  Left = 10, Top = 470, Width = 250, Height = 60, AutoScroll = true };
-            scrollPanel.MouseWheel += (_, _) => Interlocked.Increment(ref scrollWheelCount);
-            scrollPanel.Controls.Add(new System.Windows.Forms.Label
-                { Text = "CI_UIA_SCROLL_CONTENT", Top = 210, Width = 100, Height = 20 });
-            form.Controls.Add(scrollPanel);
+            using var scrollList = new System.Windows.Forms.ListBox
+                { AccessibleName = "CI_UIA_SCROLL_LIST", Left = 10, Top = 470,
+                  Width = 250, Height = 60 };
+            scrollList.Items.AddRange(Enumerable.Range(0, 40)
+                .Select(i => (object)$"Owned item {i}").ToArray());
+            scrollList.MouseWheel += (_, _) => Interlocked.Increment(ref scrollWheelCount);
+            form.Controls.Add(scrollList);
             // Emulate Chromium's deeply nested ControlView hierarchy without a browser dependency.
             var nested = new System.Windows.Forms.Panel
                 { Left = 10, Top = 142, Width = 275, Height = 42,
@@ -2438,10 +2437,10 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                     "windows.drag_owned_button_observes_down_and_destination");
 
             var scrollTree = await Task.Run(() => WindowInspector.InspectCore(created.Handle,
-                3, 50, realWindowId, nameContains: "CI_UIA_SCROLL_PANEL"))
+                3, 50, realWindowId, nameContains: "CI_UIA_SCROLL_LIST"))
                 .WaitAsync(TimeSpan.FromSeconds(5));
             Check(scrollTree.Status == WindowInspectCode.COMPLETED &&
-                scrollTree.Elements.Length == 1, "windows.owned_scroll_fixture_resolves_exact_container");
+                scrollTree.Elements.Length == 1, "windows.owned_scroll_fixture_resolves_exact_list");
             var scrollTarget = scrollTree.Elements[0];
             var scrolled = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
                 new WindowActionRequest(realWindowId, scrollTarget.ElementId, WindowActionKind.SCROLL,
@@ -2449,16 +2448,16 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                     ScrollUnits: 2, InputMode: WindowInputMode.ALLOW_FOREGROUND_INPUT)))
                 .WaitAsync(TimeSpan.FromSeconds(5));
             if (InputNotAvailable(scrolled))
-                Console.WriteLine($"NOT_TESTED windows.scroll_owned_panel status={scrolled.Status}");
+                Console.WriteLine($"NOT_TESTED windows.scroll_owned_list status={scrolled.Status}");
             else
                 Check(scrolled.Status == WindowActionCode.COMPLETED &&
                     (scrolled.ExecutionMethod is WindowExecutionMethod.UIA_PATTERN or
                         WindowExecutionMethod.WIN32_SENDINPUT) &&
                     await Observed(() => (bool)created.Form.Invoke(new Func<bool>(() =>
-                        created.Form.Controls.OfType<System.Windows.Forms.Panel>()
-                            .Single(p => p.AccessibleName == "CI_UIA_SCROLL_PANEL")
-                            .AutoScrollPosition.Y != 0))),
-                    "windows.scroll_owned_panel_observes_actual_scroll_offset");
+                        created.Form.Controls.OfType<System.Windows.Forms.ListBox>()
+                            .Single(p => p.AccessibleName == "CI_UIA_SCROLL_LIST")
+                            .TopIndex > 0))),
+                    "windows.scroll_owned_list_observes_actual_top_index_change");
             Console.WriteLine($"OWNED_POINTER_EVENTS hover={Volatile.Read(ref gestureHoverCount)} " +
                 $"right={Volatile.Read(ref gestureRightDownCount)} " +
                 $"left={Volatile.Read(ref gestureLeftDownCount)} " +
