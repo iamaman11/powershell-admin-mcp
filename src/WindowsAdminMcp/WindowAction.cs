@@ -28,13 +28,36 @@ public enum WindowObservationState { NOT_REQUESTED, OBSERVED, NOT_OBSERVED, UNKN
 [JsonConverter(typeof(JsonStringEnumConverter<WindowEffectState>))]
 public enum WindowEffectState { NO_EFFECT, EFFECT_VERIFIED, EFFECT_UNKNOWN }
 
+[JsonConverter(typeof(JsonStringEnumConverter<WindowEffectEvidence>))]
+public enum WindowEffectEvidence
+{
+    NOT_DISPATCHED, PROVIDER_ACK_ONLY, POSTCONDITION_NOT_OBSERVED,
+    POSTCONDITION_VERIFIED, DISPATCH_OUTCOME_UNKNOWN
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<WindowNextStep>))]
+public enum WindowNextStep
+{
+    NONE, INSPECT_AND_SUPPLY_POSTCONDITION, INSPECT_STATE_DO_NOT_RETRY,
+    REFRESH_ELEMENT, CHECK_CHROME_CONNECTION, CHANGE_INPUT_MODE,
+    FIX_ARGUMENTS
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<WindowFocusBehavior>))]
+public enum WindowFocusBehavior
+{
+    NOT_APPLICABLE, CDP_NO_NATIVE_ACTIVATION, UIA_PROVIDER_MAY_ACTIVATE,
+    EXPLICIT_FOREGROUND_INPUT, UNKNOWN_METHOD_MAY_ACTIVATE
+}
+
 [JsonConverter(typeof(JsonStringEnumConverter<WindowExecutionMethod>))]
 public enum WindowExecutionMethod { UIA_PATTERN, WIN32_SENDINPUT, CHROME_CDP }
 
-// Physical desktop input is an explicit opt-in. CDP targets and native UIA
-// patterns may execute without moving the user's cursor or stealing focus.
+// BACKGROUND_ONLY forbids our own foreground activation and OS input, but an
+// arbitrary UIA provider can still activate its window. CDP_ONLY forbids UIA
+// action dispatch too; it is available only for consented Chrome web targets.
 [JsonConverter(typeof(JsonStringEnumConverter<WindowInputMode>))]
-public enum WindowInputMode { BACKGROUND_ONLY, ALLOW_FOREGROUND_INPUT }
+public enum WindowInputMode { BACKGROUND_ONLY, ALLOW_FOREGROUND_INPUT, CDP_ONLY }
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowProviderOutcome>))]
 public enum WindowProviderOutcome { NOT_DISPATCHED, ACKNOWLEDGED, REJECTED, UNKNOWN }
@@ -53,6 +76,7 @@ public enum WindowActionCode
     UIA_ELEMENTNOTENABLED_UNKNOWN_EFFECT,
     EXPECTED_STATE_ALREADY_TRUE, WINDOW_NOT_VISIBLE, FOREGROUND_UNAVAILABLE,
     FOREGROUND_INPUT_DISALLOWED,
+    CDP_ONLY_UNAVAILABLE,
     CLICK_POINT_UNAVAILABLE, TARGET_OCCLUDED, INPUT_FAILED_UNKNOWN_EFFECT,
     FOCUS_UNAVAILABLE, CDP_UNAVAILABLE, CDP_TARGET_AMBIGUOUS, CDP_CONTEXT_MISMATCH,
     CDP_TARGET_NOT_VISIBLE, CDP_FAILED_UNKNOWN_EFFECT, CDP_CONSENT_PENDING,
@@ -131,7 +155,8 @@ public sealed record WindowActionResult(
             WindowActionCode.STALE_WINDOW or WindowActionCode.STALE_ELEMENT or
             WindowActionCode.LOCATOR_NOT_FOUND or WindowActionCode.LOCATOR_AMBIGUOUS or
             WindowActionCode.LOCATOR_TIMEOUT or WindowActionCode.LOCATOR_WORKER_FAILED or
-            WindowActionCode.AUDIT_UNAVAILABLE;
+            WindowActionCode.AUDIT_UNAVAILABLE or WindowActionCode.CDP_ONLY_UNAVAILABLE or
+            WindowActionCode.FOREGROUND_INPUT_DISALLOWED;
 
     // A successful provider call is dispatch acknowledgement, NOT proof that the UI changed.
     [JsonPropertyName("effect_state")]
@@ -147,6 +172,47 @@ public sealed record WindowActionResult(
             ? WindowProviderOutcome.REJECTED :
         Status == WindowActionCode.COMPLETED ? WindowProviderOutcome.ACKNOWLEDGED :
         WindowProviderOutcome.UNKNOWN;
+
+    // A provider acknowledgement and the absence of an observed foreground
+    // change are both narrower than a proven UI transition / focus guarantee.
+    [JsonPropertyName("effect_evidence")]
+    public WindowEffectEvidence EffectEvidence => ExpectedStateObserved switch
+    {
+        true => WindowEffectEvidence.POSTCONDITION_VERIFIED,
+        false => WindowEffectEvidence.POSTCONDITION_NOT_OBSERVED,
+        _ when Status == WindowActionCode.COMPLETED => WindowEffectEvidence.PROVIDER_ACK_ONLY,
+        _ when EffectState == WindowEffectState.EFFECT_UNKNOWN => WindowEffectEvidence.DISPATCH_OUTCOME_UNKNOWN,
+        _ => WindowEffectEvidence.NOT_DISPATCHED
+    };
+
+    [JsonPropertyName("next_step")]
+    public WindowNextStep NextStep => EffectState == WindowEffectState.EFFECT_UNKNOWN
+        ? EffectEvidence == WindowEffectEvidence.PROVIDER_ACK_ONLY
+            ? WindowNextStep.INSPECT_AND_SUPPLY_POSTCONDITION
+            : WindowNextStep.INSPECT_STATE_DO_NOT_RETRY
+        : Status switch
+        {
+            WindowActionCode.STALE_ELEMENT or WindowActionCode.STALE_WINDOW or
+                WindowActionCode.LOCATOR_NOT_FOUND or WindowActionCode.LOCATOR_AMBIGUOUS =>
+                WindowNextStep.REFRESH_ELEMENT,
+            WindowActionCode.CDP_UNAVAILABLE or WindowActionCode.CDP_CONSENT_PENDING =>
+                WindowNextStep.CHECK_CHROME_CONNECTION,
+            WindowActionCode.CDP_ONLY_UNAVAILABLE or WindowActionCode.FOREGROUND_INPUT_DISALLOWED =>
+                WindowNextStep.CHANGE_INPUT_MODE,
+            WindowActionCode.INVALID_ARGUMENT => WindowNextStep.FIX_ARGUMENTS,
+            _ => WindowNextStep.NONE
+        };
+
+    [JsonPropertyName("focus_behavior")]
+    public WindowFocusBehavior FocusBehavior => ExecutionMethod switch
+    {
+        WindowExecutionMethod.UIA_PATTERN => WindowFocusBehavior.UIA_PROVIDER_MAY_ACTIVATE,
+        WindowExecutionMethod.CHROME_CDP => WindowFocusBehavior.CDP_NO_NATIVE_ACTIVATION,
+        WindowExecutionMethod.WIN32_SENDINPUT => WindowFocusBehavior.EXPLICIT_FOREGROUND_INPUT,
+        _ when EffectState == WindowEffectState.EFFECT_UNKNOWN =>
+            WindowFocusBehavior.UNKNOWN_METHOD_MAY_ACTIVATE,
+        _ => WindowFocusBehavior.NOT_APPLICABLE
+    };
 }
 
 // The disposable child uses native UIA2 with AutoSetFocus disabled. An untrusted
@@ -432,7 +498,12 @@ internal static class WindowAction
                         ? ScrollTarget(hwnd, element, request, clock)
                         : WindowPhysicalClick.Pointer(hwnd, element, request, clock);
                 }
-                var result = request.Action == WindowActionKind.CLICK
+                // CDP_ONLY never dispatches a native UIA action or SendInput.
+                // If no consented web target can be addressed, fail before
+                // effect rather than silently falling back to an UIA provider.
+                var result = request.InputMode == WindowInputMode.CDP_ONLY
+                    ? CdpOnlyResult(WindowChromeCdp.TryDispatch(hwnd, element, request, clock), clock)
+                    : request.Action == WindowActionKind.CLICK
                     ? ClickWithNativeFallback()
                     : request.Action is WindowActionKind.DOUBLE_CLICK or WindowActionKind.RIGHT_CLICK
                     ? WindowPhysicalClick.Click(hwnd,element,request,clock)
@@ -746,6 +817,12 @@ internal static class WindowAction
             WindowActionCode.TARGET_OCCLUDED or WindowActionCode.CLICK_POINT_UNAVAILABLE or
             WindowActionCode.WINDOW_NOT_VISIBLE);
 
+    internal static WindowActionResult CdpOnlyResult(WindowActionResult? dispatched, Stopwatch clock) =>
+        dispatched ?? new(WindowActionCode.CDP_ONLY_UNAVAILABLE,
+            Detail:"CDP_ONLY_REQUIRES_CONSENTED_CHROME_WEB_TARGET",
+            FailureStage:WindowFailureStage.CDP_TARGET,
+            ElapsedMs:clock.ElapsedMilliseconds);
+
     internal static bool PreferPhysicalWebClick(WindowActionKind? semantic, bool insideDocument) =>
         insideDocument && semantic == WindowActionKind.INVOKE;
 
@@ -945,6 +1022,9 @@ internal static class WindowAction
                 broker_owner_pid = result?.BrokerOwnerPid,
                 session_generation = result?.SessionGeneration,
                 provider_outcome = result?.ProviderOutcome.ToString(),
+                effect_evidence = result?.EffectEvidence.ToString(),
+                next_step = result?.NextStep.ToString(),
+                focus_behavior = result?.FocusBehavior.ToString(),
                 enabled_before = result?.EnabledBefore,
                 safe_to_retry = result?.SafeToRetry,
                 effect_state = result?.EffectState.ToString(),

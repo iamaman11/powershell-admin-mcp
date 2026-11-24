@@ -1147,6 +1147,21 @@ Check(backgroundPolicyClick.InputMode == WindowInputMode.BACKGROUND_ONLY &&
     backgroundBlocked.ProviderOutcome == WindowProviderOutcome.NOT_DISPATCHED &&
     !backgroundBlocked.EffectUnknown,
     "windows.background_default_and_explicit_foreground_input_opt_in");
+var cdpOnly = backgroundPolicyClick with { InputMode = WindowInputMode.CDP_ONLY };
+var cdpOnlyWire = System.Text.Json.JsonSerializer.Serialize(cdpOnly, PipeWire.Json);
+var cdpOnlyBlocked = WindowAction.CdpOnlyResult(null, Stopwatch.StartNew());
+var cdpAccepted = new WindowActionResult(WindowActionCode.COMPLETED,
+    ExecutionMethod: WindowExecutionMethod.CHROME_CDP);
+Check(WindowAction.Valid(cdpOnly) && !WindowPhysicalClick.ForegroundInputAllowed(cdpOnly) &&
+    cdpOnlyWire.Contains("\"input_mode\":\"CDP_ONLY\"", StringComparison.Ordinal) &&
+    System.Text.Json.JsonSerializer.Deserialize<WindowActionRequest>(cdpOnlyWire, PipeWire.Json)?.InputMode ==
+        WindowInputMode.CDP_ONLY &&
+    cdpOnlyBlocked.Status == WindowActionCode.CDP_ONLY_UNAVAILABLE &&
+    cdpOnlyBlocked.EffectState == WindowEffectState.NO_EFFECT && cdpOnlyBlocked.SafeToRetry &&
+    cdpOnlyBlocked.NextStep == WindowNextStep.CHANGE_INPUT_MODE &&
+    cdpOnlyBlocked.ProviderOutcome == WindowProviderOutcome.NOT_DISPATCHED &&
+    ReferenceEquals(WindowAction.CdpOnlyResult(cdpAccepted, Stopwatch.StartNew()), cdpAccepted),
+    "windows.cdp_only_never_silently_dispatches_uia_or_native_input");
 Check(WindowAction.Valid(new WindowActionRequest(testWindowId,freshElementId,
         WindowActionKind.KEY_PRESS,null,VirtualKey:0x41,Ctrl:true,Shift:true)) &&
     !WindowAction.Valid(new WindowActionRequest(testWindowId,freshElementId,
@@ -1712,6 +1727,31 @@ Check(new WindowActionResult(WindowActionCode.COMPLETED).EffectState == WindowEf
     new WindowActionResult(WindowActionCode.STALE_ELEMENT).EffectState == WindowEffectState.NO_EFFECT &&
     new WindowActionResult(WindowActionCode.ACTION_FAILED_UNKNOWN_EFFECT, EffectUnknown: true).EffectState ==
         WindowEffectState.EFFECT_UNKNOWN, "windows.action_effect_state_never_assumes_success");
+var providerAck = new WindowActionResult(WindowActionCode.COMPLETED,
+    ExecutionMethod: WindowExecutionMethod.UIA_PATTERN, ForegroundChanged: false);
+var verifiedAction = providerAck with {ExpectedStateObserved = true};
+var missingPostcondition = providerAck with {ExpectedStateObserved = false};
+var timedOutAction = new WindowActionResult(WindowActionCode.TIMEOUT_UNKNOWN_EFFECT, EffectUnknown: true);
+Check(providerAck.EffectEvidence == WindowEffectEvidence.PROVIDER_ACK_ONLY &&
+    providerAck.NextStep == WindowNextStep.INSPECT_AND_SUPPLY_POSTCONDITION &&
+    providerAck.FocusBehavior == WindowFocusBehavior.UIA_PROVIDER_MAY_ACTIVATE &&
+    providerAck.ForegroundChanged == false && !providerAck.SafeToRetry &&
+    verifiedAction.EffectEvidence == WindowEffectEvidence.POSTCONDITION_VERIFIED &&
+    verifiedAction.NextStep == WindowNextStep.NONE &&
+    missingPostcondition.EffectEvidence == WindowEffectEvidence.POSTCONDITION_NOT_OBSERVED &&
+    missingPostcondition.NextStep == WindowNextStep.INSPECT_STATE_DO_NOT_RETRY &&
+    timedOutAction.EffectEvidence == WindowEffectEvidence.DISPATCH_OUTCOME_UNKNOWN &&
+    timedOutAction.NextStep == WindowNextStep.INSPECT_STATE_DO_NOT_RETRY &&
+    timedOutAction.FocusBehavior == WindowFocusBehavior.UNKNOWN_METHOD_MAY_ACTIVATE &&
+    cdpAccepted.FocusBehavior == WindowFocusBehavior.CDP_NO_NATIVE_ACTIVATION &&
+    new WindowActionResult(WindowActionCode.FOREGROUND_INPUT_DISALLOWED).NextStep ==
+        WindowNextStep.CHANGE_INPUT_MODE,
+    "windows.typed_effect_evidence_retry_guidance_and_uia_focus_risk");
+var guidanceWire = System.Text.Json.JsonSerializer.Serialize(providerAck, PipeWire.Json);
+Check(guidanceWire.Contains("\"effect_evidence\":\"PROVIDER_ACK_ONLY\"", StringComparison.Ordinal) &&
+    guidanceWire.Contains("\"next_step\":\"INSPECT_AND_SUPPLY_POSTCONDITION\"", StringComparison.Ordinal) &&
+    guidanceWire.Contains("\"focus_behavior\":\"UIA_PROVIDER_MAY_ACTIVATE\"", StringComparison.Ordinal),
+    "windows.typed_action_guidance_wire_contract");
 var executionWire = System.Text.Json.JsonSerializer.Serialize(new WindowActionResult(
     WindowActionCode.COMPLETED, ExecutionMethod: WindowExecutionMethod.WIN32_SENDINPUT), PipeWire.Json);
 Check(executionWire.Contains("\"execution_method\":\"WIN32_SENDINPUT\"", StringComparison.Ordinal) &&
@@ -2141,6 +2181,15 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             WindowInspector.TryParsePath(resolvedOnly.ResolvedElementPath, out _) &&
             Volatile.Read(ref clickCount) == clicksBeforeResolve,
             "windows.disposable_locator_resolves_without_dispatching_click");
+        var strictBackground = await Task.Run(() => WindowAction.InvokeInWorker(
+            new WindowActionRequest(realWindowId, "locator", WindowActionKind.INVOKE, null,
+                LocatorName: "CI_UIA_DELAYED_READY", LocatorRole: WindowRoleFilter.BUTTON,
+                InputMode: WindowInputMode.CDP_ONLY))).WaitAsync(TimeSpan.FromSeconds(8));
+        Check(strictBackground.Status == WindowActionCode.CDP_ONLY_UNAVAILABLE &&
+            strictBackground.EffectState == WindowEffectState.NO_EFFECT &&
+            strictBackground.ExecutionMethod is null && strictBackground.SafeToRetry &&
+            Volatile.Read(ref clickCount) == clicksBeforeResolve,
+            "windows.cdp_only_native_button_fails_without_provider_invoke_or_focus");
         var ambiguous=await Task.Run(()=>WindowAction.InvokeInWorker(new WindowActionRequest(
             realWindowId,"locator",WindowActionKind.INVOKE,null,
             LocatorRole:WindowRoleFilter.BUTTON))).WaitAsync(TimeSpan.FromSeconds(8));
