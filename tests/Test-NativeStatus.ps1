@@ -81,7 +81,7 @@ try{
         Assert ($chromeTool.Count -eq 1 -and
             $chromeTool[0].inputSchema.properties.Contains('activate_window_for_consent')) 'issue72.chrome_consent_foreground_is_explicit_opt_in'
         Assert ($systemQuery.Count -eq 1 -and
-            @(@('kind','pid','service_name','page_size','offset','event_log','event_id','registry_hive','registry_path','registry_view','include_value','task_folder')|Where-Object {-not $systemQuery[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
+            @(@('kind','pid','service_name','page_size','offset','event_log','event_id','event_provider','registry_hive','registry_path','registry_view','include_value','task_folder')|Where-Object {-not $systemQuery[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
             @(@('status','kind','processes','services','network_interfaces','tcp_connections','events','registry_entries','scheduled_tasks','next_offset','native_error')|Where-Object {-not $systemQuery[0].outputSchema.properties.Contains($_)}).Count -eq 0) 'issue72.native_typed_system_query_catalog'
         Assert ($fileWrite.Count -eq 1 -and $locator.Count -eq 1 -and $manage.Count -eq 1 -and
             $actionTool[0].inputSchema.properties.Contains('input_mode') -and
@@ -144,6 +144,8 @@ try{
         $nativeProcess=(Receive $p 44).structuredContent
         Assert ($nativeProcess.status -eq 'COMPLETED' -and $nativeProcess.kind -eq 'PROCESSES' -and
             @($nativeProcess.processes).Count -eq 1 -and $nativeProcess.processes[0].pid -eq $PID -and
+            $nativeProcess.processes[0].parent_pid -gt 0 -and
+            $nativeProcess.processes[0].thread_count -gt 0 -and
             $nativeProcess.processes[0].name -and -not $nativeProcess.Contains('services')) 'issue72.native_process_exact_pid_readonly'
         Send $p 45 'tools/call' @{name='windows.system_query';arguments=@{kind='PROCESSES';pid=-1};_meta=$meta}
         $invalidProcess=(Receive $p 45).structuredContent
@@ -170,6 +172,24 @@ try{
         Assert ($tcp.status -eq 'COMPLETED' -and $tcp.kind -eq 'TCP_CONNECTIONS' -and
             $tcp.Contains('tcp_connections') -and @($tcp.tcp_connections).Count -le 5 -and
             -not $tcp.Contains('processes') -and -not $tcp.Contains('events')) 'issue72.windows_tcp_ipv4_ipv6_pid_native_readonly'
+        Send $p 51 'tools/call' @{name='windows.system_query';arguments=@{kind='SERVICES';service_name='WindowsAdminMCP'};_meta=$meta}
+        $exactService=(Receive $p 51).structuredContent
+        Assert ($exactService.status -eq 'COMPLETED' -and $exactService.kind -eq 'SERVICES' -and
+            @($exactService.services).Count -eq 1 -and
+            $exactService.services[0].service_name -eq 'WindowsAdminMCP' -and
+            $exactService.services[0].start_mode -eq 'AUTOMATIC' -and
+            $exactService.services[0].Contains('depends_on') -and
+            -not $exactService.services[0].details_unavailable) 'issue72.native_exact_scm_config_bounded_dependencies'
+        Send $p 52 'tools/call' @{name='windows.system_query';arguments=@{kind='EVENT_LOG';event_log='APPLICATION';event_provider='WINDOWS_ERROR_REPORTING';page_size=5};_meta=$meta}
+        $wer=(Receive $p 52).structuredContent
+        Assert ($wer.status -eq 'COMPLETED' -and $wer.kind -eq 'EVENT_LOG' -and
+            @($wer.events).Count -le 5 -and
+            @($wer.events|Where-Object {$_.provider -ne 'Windows Error Reporting'}).Count -eq 0 -and
+            -not $wer.Contains('registry_entries')) 'issue72.windows_wer_provider_filtered_metadata'
+        Send $p 53 'tools/call' @{name='windows.system_query';arguments=@{kind='PROCESSES';event_provider='APPLICATION_ERROR'};_meta=$meta}
+        $invalidProvider=(Receive $p 53).structuredContent
+        Assert ($invalidProvider.status -eq 'INVALID_ARGUMENT' -and
+            -not $invalidProvider.Contains('processes')) 'issue72.event_provider_mixed_domain_rejected'
         Send $p 43 'tools/call' @{name='powershell_status';arguments=@{include_tunnel_metrics=$true};_meta=$meta}
         $vendor=(Receive $p 43).structuredContent
         Write-Host "ISSUE69_TUNNEL_METRICS_STATUS=$($vendor.tunnel_metrics.status)"
