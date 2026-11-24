@@ -653,12 +653,20 @@ try{
         $doctorExit=$doctorProc.ExitCode
     }finally{if(-not $doctorProc.HasExited){$doctorProc.Kill($true);$doctorProc.WaitForExit()};$doctorProc.Dispose()}
     $doctor=$rawDoctor|ConvertFrom-Json -AsHashtable
-    Assert ($doctor.schemaVersion -eq 1 -and $doctor.status -eq 'DEGRADED' -and $doctorExit -eq 1) 'r6.doctor_reports_isolated_install_degraded'
+    Assert ($doctor.schemaVersion -eq 2 -and $doctor.status -eq 'DEGRADED' -and $doctorExit -eq 1) 'r6.doctor_reports_isolated_install_degraded'
     Assert ($doctor.service.service_pid -eq (Get-CimInstance Win32_Service -Filter "Name='$name'").ProcessId -and $doctor.store.schemaVersion -eq 4) 'r6.doctor_authoritative_service_store'
     Assert ($doctor.store.total -gt 0 -and $doctor.store.waitingForReboot -eq 0 -and $doctor.store.needsReconciliation -ge 1) 'r6.doctor_total_state_counts'
     Assert ($doctor.localOperationalReady -and $doctor.reconciliationCount -ge 1 -and
         $doctor.externalAcceptanceStatus -eq 'NOT_TESTED') 'r6.doctor_operational_ready_despite_historical_reconciliation'
     Assert (@($doctor.checks|Where-Object {$_.component -eq 'Remote' -and $_.status -eq 'NOT_TESTED'}).Count -eq 1) 'r6.doctor_no_false_remote_acceptance'
+    Assert ($doctor.toolCatalog.source -eq 'SERVER_ASSEMBLY_METADATA' -and
+        $doctor.toolCatalog.tool_count -eq 22 -and $doctor.toolCatalog.structured_tool_count -eq 21 -and
+        $doctor.toolCatalog.native_dto_result_count -eq 20 -and
+        @($doctor.toolCatalog.tool_names|Where-Object {$_ -eq 'windows.tcp_connections'}).Count -eq 1) 'r6.doctor_v2_declared_native_tool_inventory'
+    Assert (@($doctor.checks|Where-Object {$_.component -eq 'ToolCatalog' -and $_.status -eq 'OK'}).Count -eq 1 -and
+        @($doctor.checks|Where-Object {$_.component -eq 'PublishedClientSchema' -and $_.status -eq 'NOT_TESTED'}).Count -eq 1 -and
+        @($doctor.checks|Where-Object {$_.component -eq 'Chrome' -and $_.status -eq 'NOT_TESTED'}).Count -eq 1 -and
+        @($doctor.checks|Where-Object {$_.component -eq 'UpdateAcceptance' -and $_.status -eq 'NOT_TESTED'}).Count -eq 1) 'r6.doctor_v2_does_not_fake_external_chrome_or_update_acceptance'
     if($Performance){
         # PowerShell is case-insensitive: never shadow the $Performance switch.
         $perfResult=& (Join-Path $PSScriptRoot 'Test-NativePerformance.ps1') -Exe $Exe -DurationSeconds 12 -ClientCount 10 -ExerciseJobs|ConvertFrom-Json

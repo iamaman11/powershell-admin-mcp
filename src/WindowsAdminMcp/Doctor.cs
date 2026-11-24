@@ -14,13 +14,17 @@ public enum DoctorReason
     OBSERVED, MISSING, ACCESS_OR_READBACK_FAILED, NOT_CANONICAL, HASH_MISMATCH,
     MULTIPLE_PROCESSES, SERVICE_NOT_CONFIRMED, STORE_NOT_CONFIRMED, STORE_AT_CAPACITY, STORE_CAPACITY_WARNING,
     RECONCILIATION_REQUIRED, NETWORK_NOT_READY, BOOT_UNPROVEN, REMOTE_NOT_TESTED,
-    STARTUP_NOT_TESTED, DESKTOP_NOT_TESTED, EXTERNAL_RECEIPT_MATCHED, EXTERNAL_RECEIPT_INVALID, MANIFEST_UNVERIFIED, STARTUP_NOT_READY, STARTUP_READBACK_FAILED
+    STARTUP_NOT_TESTED, DESKTOP_NOT_TESTED, EXTERNAL_RECEIPT_MATCHED, EXTERNAL_RECEIPT_INVALID, MANIFEST_UNVERIFIED, STARTUP_NOT_READY, STARTUP_READBACK_FAILED,
+    DECLARED_TOOL_CATALOG_VERIFIED, TOOL_CATALOG_INCOMPLETE, CHROME_NOT_PROBED, CLIENT_SCHEMA_NOT_VERIFIED,
+    UPDATE_TRIAL_PENDING, UPDATE_ACCEPTANCE_NOT_VERIFIED, UPDATE_READBACK_FAILED
 }
 [JsonConverter(typeof(JsonStringEnumConverter<DoctorComponent>))]
-public enum DoctorComponent { Native, Package, PowerShell, Service, Store, Boot, Tun, Vendor, Remote, Startup, Desktop }
+public enum DoctorComponent { Native, Package, PowerShell, Service, Store, Boot, Tun, Vendor, Remote, Startup, Desktop,
+    ToolCatalog, Chrome, PublishedClientSchema, UpdateAcceptance }
 [JsonConverter(typeof(JsonStringEnumConverter<DoctorAction>))]
 public enum DoctorAction { NONE, VERIFY_INSTALLATION, CHECK_SERVICE, INSPECT_JOBS, CHECK_BOOT_LOG, CHECK_INTERNET,
-    VERIFY_SUPPORTED_REMOTE_ACCESS, VERIFY_STARTUP, VERIFY_INTERACTIVE_DESKTOP }
+    VERIFY_SUPPORTED_REMOTE_ACCESS, VERIFY_STARTUP, VERIFY_INTERACTIVE_DESKTOP,
+    CHECK_LOCAL_MCP_TOOLS, CHECK_CHROME_CONNECTION, VERIFY_PUBLISHED_CLIENT_SCHEMA, VERIFY_UPDATE_ACCEPTANCE }
 public sealed record DoctorCheck(DoctorComponent Component,DoctorState Status,DoctorReason Reason,DoctorAction NextAction);
 public sealed record DoctorSnapshot(
     [property:JsonPropertyName("status")] DoctorState Status,
@@ -29,11 +33,13 @@ public sealed record DoctorSnapshot(
     [property:JsonPropertyName("user_worker_ready")] bool UserWorkerReady,
     [property:JsonPropertyName("reconciliation_count")] long? ReconciliationCount,
     [property:JsonPropertyName("installed_commit")] string? InstalledCommit,
-    [property:JsonPropertyName("elapsed_ms")] long ElapsedMs)
+    [property:JsonPropertyName("elapsed_ms")] long ElapsedMs,
+    [property:JsonPropertyName("tool_catalog")] DoctorToolCatalog? ToolCatalog = null,
+    [property:JsonPropertyName("rollback_pending")] bool? RollbackPending = null)
 {
     internal static DoctorSnapshot FromReport(DoctorReport report) => new(report.Status, report.Checks,
         report.LocalOperationalReady, report.UserWorkerReady, report.ReconciliationCount,
-        report.InstalledCommit, report.ElapsedMs);
+        report.InstalledCommit, report.ElapsedMs, report.ToolCatalog, report.RollbackPending);
 }
 internal sealed record DoctorReport(int SchemaVersion,DoctorState Status,string CorrelationId,DateTimeOffset ObservedAt,
     long ElapsedMs,DoctorCheck[] Checks,string RuntimeVersion,string? Executable,string PowerShellPath,
@@ -42,12 +48,14 @@ internal sealed record DoctorReport(int SchemaVersion,DoctorState Status,string 
     PackageObservation Package,StartupObservation? Startup,VersionIdentity Versions,string RequiredTunAdapter,string RequiredDataplanePath,
     EvidenceObservation RemoteEvidence,DateTimeOffset? TunnelStartedUtc,int? TunnelSessionId,
     bool LocalOperationalReady = false,bool UserWorkerReady = false,long? ReconciliationCount = null,
-    DoctorState ExternalAcceptanceStatus = DoctorState.NOT_TESTED,string? InstalledCommit = null);
+    DoctorState ExternalAcceptanceStatus = DoctorState.NOT_TESTED,string? InstalledCommit = null,
+    DoctorToolCatalog? ToolCatalog = null,bool? RollbackPending = null);
 
 internal static class Doctor
 {
-    // No process start, screenshots, credentials, external requests, scheduler
-    // changes or second SQLite connection. The service owns the store summary.
+    // No screenshots, credentials, external requests, scheduler changes or
+    // second SQLite connection. The existing startup check runs only a verified
+    // local PowerShell Status script. The service owns the store summary.
     internal static async Task<DoctorReport> ObserveAsync(string? evidencePath=null)
     {
         var clock=Stopwatch.StartNew();
@@ -67,6 +75,11 @@ internal static class Doctor
         bool pwsh=File.Exists(PowerShellRunner.Executable);
         Add(DoctorComponent.PowerShell,pwsh?DoctorState.OK:DoctorState.DEGRADED,pwsh?DoctorReason.OBSERVED:DoctorReason.MISSING,
             pwsh?DoctorAction.NONE:DoctorAction.VERIFY_INSTALLATION);
+        var toolCatalog=DoctorCatalog.Observe();
+        bool catalogComplete=DoctorCatalog.IsComplete(toolCatalog);
+        Add(DoctorComponent.ToolCatalog,catalogComplete?DoctorState.OK:DoctorState.DEGRADED,
+            catalogComplete?DoctorReason.DECLARED_TOOL_CATALOG_VERIFIED:DoctorReason.TOOL_CATALOG_INCOMPLETE,
+            catalogComplete?DoctorAction.NONE:DoctorAction.CHECK_LOCAL_MCP_TOOLS);
         var response=await AdminTools.Diagnostics(CancellationToken.None);
         bool service=response.Code==StatusCode.OK && response.Info is {Status:StatusCode.OK,ExecutionSid:"S-1-5-18",ServicePid:int};
         if(service)
@@ -142,6 +155,9 @@ internal static class Doctor
             evidence.RemoteReceiptMatched?DoctorReason.EXTERNAL_RECEIPT_MATCHED:
             evidence.Status==EvidenceCode.NOT_SUPPLIED?DoctorReason.REMOTE_NOT_TESTED:DoctorReason.EXTERNAL_RECEIPT_INVALID,
             evidence.RemoteReceiptMatched?DoctorAction.NONE:DoctorAction.VERIFY_SUPPORTED_REMOTE_ACCESS);
+        // Installed binary metadata cannot attest the published client schema.
+        Add(DoctorComponent.PublishedClientSchema,DoctorState.NOT_TESTED,DoctorReason.CLIENT_SCHEMA_NOT_VERIFIED,
+            DoctorAction.VERIFY_PUBLISHED_CLIENT_SCHEMA);
         // Reuse the owner of Task Scheduler definition validation. Never execute
         // the installed script unless its complete protected package verifies.
         var startup=package.Status==PackageCode.VERIFIED && canonical && pwsh
@@ -153,12 +169,22 @@ internal static class Doctor
         Add(DoctorComponent.Desktop,evidence.DesktopReceiptMatched?DoctorState.OK:DoctorState.NOT_TESTED,
             evidence.DesktopReceiptMatched?DoctorReason.EXTERNAL_RECEIPT_MATCHED:DoctorReason.DESKTOP_NOT_TESTED,
             evidence.DesktopReceiptMatched?DoctorAction.NONE:DoctorAction.VERIFY_INTERACTIVE_DESKTOP);
+        // Chrome consent is scoped to an exact window and profile. A generic
+        // Doctor run must never request consent or probe arbitrary browser tabs.
+        Add(DoctorComponent.Chrome,DoctorState.NOT_TESTED,DoctorReason.CHROME_NOT_PROBED,
+            DoctorAction.CHECK_CHROME_CONNECTION);
+        bool? rollbackPending=canonical && package.Status==PackageCode.VERIFIED
+            ?ReadRollbackPending(root):null;
+        Add(DoctorComponent.UpdateAcceptance,DoctorState.NOT_TESTED,
+            rollbackPending is true?DoctorReason.UPDATE_TRIAL_PENDING:
+            rollbackPending is false?DoctorReason.UPDATE_ACCEPTANCE_NOT_VERIFIED:DoctorReason.UPDATE_READBACK_FAILED,
+            DoctorAction.VERIFY_UPDATE_ACCEPTANCE);
         using var self=Process.GetCurrentProcess();
         // Historical reconciliation is still a DEGRADED store check, but
         // never conflated with current admission capacity or service liveness.
         bool localReady=service && response.Info?.AdmissionOpen==true && store is not null &&
             store.Detailed < store.TotalLimit;
-        return new(1,checks.Any(c=>c.Status==DoctorState.DEGRADED)?DoctorState.DEGRADED:
+        return new(2,checks.Any(c=>c.Status==DoctorState.DEGRADED)?DoctorState.DEGRADED:
             checks.Any(c=>c.Status==DoctorState.NOT_TESTED)?DoctorState.NOT_TESTED:DoctorState.OK,
             Guid.NewGuid().ToString("N"),DateTimeOffset.UtcNow,clock.ElapsedMilliseconds,checks.ToArray(),
             RuntimeInformation.FrameworkDescription,Environment.ProcessPath,PowerShellRunner.Executable,
@@ -166,7 +192,20 @@ internal static class Doctor
             BuildIdentity.Observe(),TunDependency.AdapterName,TunDependency.DataplanePath,evidence,tunnelStarted,tunnelSession,
             localReady,service && response.Info?.UserContextAvailable==true,store?.NeedsReconciliation,
             evidence.RemoteReceiptMatched?DoctorState.OK:DoctorState.NOT_TESTED,
-            package.Status==PackageCode.VERIFIED?package.Commit:null);
+            package.Status==PackageCode.VERIFIED?package.Commit:null,toolCatalog,rollbackPending);
+    }
+
+    internal static bool? ReadRollbackPending(string root)
+    {
+        try
+        {
+            var attributes=File.GetAttributes(Path.Combine(root,".rollback","journal.json"));
+            return (attributes & FileAttributes.Directory)==0?true:null;
+        }
+        catch(FileNotFoundException) { return false; }
+        catch(DirectoryNotFoundException) { return false; }
+        catch(Exception e) when(e is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        { return null; }
     }
 
     private static async Task<StartupObservation?> ReadStartupAsync(string root)
