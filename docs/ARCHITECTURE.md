@@ -7,10 +7,10 @@ acceptance matrix live in [Issue #56](https://github.com/iamaman11/powershell-ad
 
 | Owner | Responsibility | Implementation |
 | --- | --- | --- |
-| MCP frontend | Typed tool schemas, validation, dispatch and JSON results | `AdminTools`, `WindowTools`, `ChromeConnectionTools`, `FileTools`, `UpdateTools` |
+| MCP frontend | Typed tool schemas, validation, dispatch and JSON results | `AdminTools`, `WindowTools`, `ChromeConnectionTools`, `FileTools`, `SystemTools`, `TcpConnectionTools`, `ExpertDiagnosticsTools`, `NetworkProbeTools`, `NativeAdminTools`, `UpdateTools` |
 | SYSTEM service | SQLite admission, encrypted durable PowerShell queue, idempotency, cancellation and recovery | `AdminService`, `JobCoordinator`, `StoreSchema` |
 | USER worker | UIA, Win32, WGC, user desktop and session-bound operations | `UserWorker`, `WindowInspector`, `WindowAction`, `WindowCapture` |
-| Chrome child | Native consented CDP connection, browser context/window/profile binding and background tab actions | `WindowChromeBroker`, `WindowChromeCdp` |
+| Chrome child | Native consented CDP connection, browser context/window/profile binding and background tab actions | `WindowChromeBroker`, `WindowChromeCdp` and its partial-class modules |
 | Native file transaction | Exact USER/SYSTEM token, same-volume stage plus bounded journal, SHA-256 and atomic replacement | `NativeFileWriter`, `FileWriteContracts`, `FileTools` |
 | Native operator | Verified package/SCM/Task Scheduler maintenance, exact SHA, trial and rollback | `installer/*`, `PackageIntegrity`, `Doctor` |
 
@@ -21,6 +21,39 @@ health port, vendor Job Object and MCP stdio child; their SYSTEM job store is
 shared, without a second daemon or database. A disposable UIA
 worker isolates providers that can block. The CDP child is owned by the USER
 frontend, not a separate permanent browser manager. No extra HTTP API.
+
+## Code boundaries and public schemas
+
+The registered MCP surface lives only in `Program.cs` (`stdio`): **22 tools**.
+Each tool declares typed arguments and a result DTO. `powershell_screenshot`
+deliberately returns image content; the other 21 tools expose structured
+output schemas. CI reads the *actual* SDK-generated `tools/list` and checks
+the exact inventory, structured outputs and a bounded 80-KiB catalog.
+
+Keep these responsibilities separate when adding functionality:
+
+| Source module | Single responsibility |
+| --- | --- |
+| `SystemContracts.cs` | Native system-query enum and immutable public DTOs |
+| `SystemSnapshot.cs` | Argument gate and read-only OS-backed query dispatch |
+| `SystemProcessQueries.cs`, `SystemExtraQueries.cs`, `SystemTcpQueries.cs` | Subject-specific native API calls |
+| `SystemTools.cs` | Legacy `windows.system_query` MCP entry point |
+| `TcpConnectionTools.cs` | Narrow `windows.tcp_connections` contract and snapshot projection |
+| `WindowChromeConnection.cs` | One authorized socket owner, Chrome consent and profile/endpoint checks |
+| `WindowChromeTabMapping.cs` | Exact native window-to-CDP target association |
+| `WindowChromeTabInspection.cs` | Read-only accessible document/tab snapshots |
+| `WindowChromeTabActions.cs` | Pre-dispatch identity checks, one effectful input and postcondition observation |
+| `WindowChromeUiaBridge.cs` | Optional semantic UIA-to-background-CDP bridge |
+| `WindowChromeCdp.cs` | Shared WebSocket reader, pending command map, per-call deadlines and late-reply discard |
+
+`WindowChromeCdp` remains a *single partial class*, not multiple CDP owners.
+Splitting source files does not create another socket, process, state store or
+permission path. A timed-out individual `Page.getFrameTree` call cancels its
+waiter; the WebSocket reader stays alive for other tabs. The legacy
+`windows.system_query(kind=TCP_CONNECTIONS)` wire result is unchanged. The
+dedicated `windows.tcp_connections` result projects exactly seven fields and
+its `kind` enum admits only `TCP_CONNECTIONS`; adding unrelated fields to its
+output is a contract regression.
 
 ## Identity, effect and retry rules
 

@@ -49,9 +49,18 @@ try {
     Assert ($tcpProperties.Contains('pid') -and $tcpProperties.Contains('page_size') -and
         $tcpProperties.Contains('offset') -and -not $tcpProperties.Contains('kind') -and
         $tcp[0].Contains('outputSchema')) 'tcp_schema.dedicated_typed_contract_without_enum_requirement'
+    $tcpOutput=$tcp[0].outputSchema.properties
+    $fields=@('status','kind','observed_utc','tcp_connections','next_offset','native_error','elapsed_ms')
+    Assert ($tcpOutput.Count -eq $fields.Count -and
+        @($tcpOutput.Keys|Where-Object {$_ -notin $fields}).Count -eq 0 -and
+        @($fields|Where-Object {-not $tcpOutput.Contains($_)}).Count -eq 0) 'tcp_schema.output_has_exact_tcp_fields'
+    $kindSchema=$tcp[0].outputSchema|ConvertTo-Json -Depth 30 -Compress
+    Assert ($kindSchema.Contains('TCP_CONNECTIONS',[StringComparison]::Ordinal)) 'tcp_schema.output_discriminator_is_tcp_only'
     $bad=Rpc 3 'tools/call' @{name='windows.tcp_connections';arguments=@{page_size=0}}
     Assert ($bad.structuredContent.status -eq 'INVALID_ARGUMENT' -and
-        $bad.structuredContent.kind -eq 'TCP_CONNECTIONS') 'tcp_schema.invalid_early_reject_typed_result'
+        $bad.structuredContent.kind -eq 'TCP_CONNECTIONS' -and
+        -not $bad.structuredContent.Contains('services') -and
+        -not $bad.structuredContent.Contains('processes')) 'tcp_schema.invalid_early_reject_typed_result'
 } finally {
     try {$process.StandardInput.Close()} catch {}
     if(-not $process.HasExited){$process.Kill($true)}
