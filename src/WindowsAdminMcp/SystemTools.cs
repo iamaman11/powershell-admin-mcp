@@ -14,6 +14,9 @@ public enum SystemQueryKind { PROCESSES, SERVICES, NETWORK_INTERFACES, EVENT_LOG
 [JsonConverter(typeof(JsonStringEnumConverter<SystemQueryCode>))]
 public enum SystemQueryCode { COMPLETED, INVALID_ARGUMENT, NOT_FOUND, ACCESS_DENIED, QUERY_FAILED, TIMEOUT, UNSUPPORTED_PLATFORM, RESOURCE_LIMIT }
 
+[JsonConverter(typeof(JsonStringEnumConverter<SystemServiceStartMode>))]
+public enum SystemServiceStartMode { BOOT, SYSTEM, AUTOMATIC, MANUAL, DISABLED, UNKNOWN }
+
 public sealed record SystemProcessInfo(
     [property:JsonPropertyName("pid")] int Pid,
     [property:JsonPropertyName("name")] string Name,
@@ -23,7 +26,9 @@ public sealed record SystemProcessInfo(
     [property:JsonPropertyName("start_utc"),JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] DateTimeOffset? StartUtc = null,
     [property:JsonPropertyName("executable_path"),JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] string? ExecutablePath = null,
     [property:JsonPropertyName("cpu_total_ms"),JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] long? CpuTotalMs = null,
-    [property:JsonPropertyName("details_unavailable")] bool DetailsUnavailable = false);
+    [property:JsonPropertyName("details_unavailable")] bool DetailsUnavailable = false,
+    [property:JsonPropertyName("parent_pid"),JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] int? ParentPid = null,
+    [property:JsonPropertyName("thread_count"),JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] int? ThreadCount = null);
 
 public sealed record SystemServiceInfo(
     [property:JsonPropertyName("service_name")] string ServiceName,
@@ -32,7 +37,10 @@ public sealed record SystemServiceInfo(
     [property:JsonPropertyName("service_type")] string ServiceType,
     [property:JsonPropertyName("can_stop")] bool? CanStop,
     [property:JsonPropertyName("can_pause")] bool? CanPause,
-    [property:JsonPropertyName("details_unavailable")] bool DetailsUnavailable = false);
+    [property:JsonPropertyName("details_unavailable")] bool DetailsUnavailable = false,
+    [property:JsonPropertyName("start_mode"),JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] SystemServiceStartMode? StartMode = null,
+    [property:JsonPropertyName("depends_on"),JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)] string[]? DependsOn = null,
+    [property:JsonPropertyName("dependencies_truncated")] bool DependenciesTruncated = false);
 
 public sealed record SystemNetworkInterfaceInfo(
     [property:JsonPropertyName("id")] string Id,
@@ -67,33 +75,34 @@ internal static class SystemSnapshot
     internal static bool Valid(SystemQueryKind kind,int? pid,string? serviceName,int pageSize,int offset,
         SystemEventLogKind? eventLog=null,int? eventId=null,SystemRegistryHive? registryHive=null,
         string? registryPath=null,SystemRegistryView registryView=SystemRegistryView.DEFAULT,
-        bool includeValue=false,string? taskFolder=null) =>
+        bool includeValue=false,string? taskFolder=null,SystemEventProviderFilter? eventProvider=null) =>
         Enum.IsDefined(kind) && pageSize is >=1 and <=50 && offset is >=0 and <=100000 &&
         (kind switch
         {
             SystemQueryKind.PROCESSES => NoExtra(eventLog,eventId,registryHive,registryPath,registryView,
-                includeValue,taskFolder) && (pid is null or >0) && serviceName is null &&
+                includeValue,taskFolder,eventProvider) && (pid is null or >0) && serviceName is null &&
                 (pid is null || offset==0),
             SystemQueryKind.SERVICES => NoExtra(eventLog,eventId,registryHive,registryPath,registryView,
-                includeValue,taskFolder) && pid is null && (serviceName is null ||
+                includeValue,taskFolder,eventProvider) && pid is null && (serviceName is null ||
                 (serviceName.Length is >=1 and <=256 && !string.IsNullOrWhiteSpace(serviceName))) &&
                 (serviceName is null || offset==0),
             SystemQueryKind.NETWORK_INTERFACES => NoExtra(eventLog,eventId,registryHive,registryPath,registryView,
-                includeValue,taskFolder) && pid is null && serviceName is null,
+                includeValue,taskFolder,eventProvider) && pid is null && serviceName is null,
             SystemQueryKind.TCP_CONNECTIONS => NoExtra(eventLog,eventId,registryHive,registryPath,registryView,
-                includeValue,taskFolder) && (pid is null or >0) && serviceName is null,
+                includeValue,taskFolder,eventProvider) && (pid is null or >0) && serviceName is null,
             SystemQueryKind.EVENT_LOG => pid is null && serviceName is null && eventLog is not null &&
                 Enum.IsDefined(eventLog.Value) && (eventId is null or >=0 and <=65535) &&
                 registryHive is null && registryPath is null && registryView==SystemRegistryView.DEFAULT &&
-                !includeValue && taskFolder is null && offset<=200,
+                !includeValue && taskFolder is null && offset<=200 &&
+                (eventProvider is null || Enum.IsDefined(eventProvider.Value)),
             SystemQueryKind.REGISTRY => pid is null && serviceName is null && eventLog is null &&
                 eventId is null && registryHive is not null && Enum.IsDefined(registryHive.Value) &&
                 registryPath is { Length: >=1 and <=512 } && !registryPath.Contains('\0') &&
-                Enum.IsDefined(registryView) && taskFolder is null && offset<=1000,
+                Enum.IsDefined(registryView) && taskFolder is null && eventProvider is null && offset<=1000,
             SystemQueryKind.SCHEDULED_TASKS => pid is null && serviceName is null && eventLog is null &&
                 eventId is null && registryHive is null && registryPath is null &&
                 registryView==SystemRegistryView.DEFAULT && !includeValue &&
-                (taskFolder is null || SystemExtraQueries.ValidTaskFolder(taskFolder)) && offset<=1000,
+                eventProvider is null && (taskFolder is null || SystemExtraQueries.ValidTaskFolder(taskFolder)) && offset<=1000,
             _ => false
         });
 
@@ -101,22 +110,23 @@ internal static class SystemSnapshot
     // optional parameters belonging to a different subject domain.
     // Kept in a separate helper to make the old variants' gate legible.
     private static bool NoExtra(SystemEventLogKind? eventLog,int? eventId,
-        SystemRegistryHive? hive,string? path,SystemRegistryView view,bool includeValue,string? taskFolder) =>
+        SystemRegistryHive? hive,string? path,SystemRegistryView view,bool includeValue,string? taskFolder,
+        SystemEventProviderFilter? eventProvider) =>
         eventLog is null && eventId is null && hive is null && path is null &&
-        view==SystemRegistryView.DEFAULT && !includeValue && taskFolder is null;
+        view==SystemRegistryView.DEFAULT && !includeValue && taskFolder is null && eventProvider is null;
 
     internal static SystemQueryResult Observe(SystemQueryKind kind,int? pid,string? serviceName,
         int pageSize,int offset,CancellationToken ct,SystemEventLogKind? eventLog=null,int? eventId=null,
         SystemRegistryHive? registryHive=null,string? registryPath=null,
         SystemRegistryView registryView=SystemRegistryView.DEFAULT,bool includeValue=false,
-        string? taskFolder=null)
+        string? taskFolder=null,SystemEventProviderFilter? eventProvider=null)
     {
         var watch=Stopwatch.StartNew();
         var at=DateTimeOffset.UtcNow;
         SystemQueryResult Result(SystemQueryCode code,int? nativeError=null) =>
             new(code,kind,at,NativeError:nativeError,ElapsedMs:watch.ElapsedMilliseconds);
         if(!Valid(kind,pid,serviceName,pageSize,offset,eventLog,eventId,registryHive,registryPath,
-            registryView,includeValue,taskFolder))return Result(SystemQueryCode.INVALID_ARGUMENT);
+            registryView,includeValue,taskFolder,eventProvider))return Result(SystemQueryCode.INVALID_ARGUMENT);
         if(!OperatingSystem.IsWindows())return Result(SystemQueryCode.UNSUPPORTED_PLATFORM);
         ct.ThrowIfCancellationRequested();
         try
@@ -130,6 +140,7 @@ internal static class SystemSnapshot
                     var processes=Process.GetProcesses();
                     try
                     {
+                        var ancestry=SystemProcessQueries.Read(ct);
                         var ordered=processes.OrderBy(p=>p.Id).ToArray();
                         if(pid is not null)ordered=ordered.Where(p=>p.Id==pid).ToArray();
                         if(ordered.Length==0)return Result(SystemQueryCode.NOT_FOUND);
@@ -156,7 +167,10 @@ internal static class SystemSnapshot
                                 try { path=process.MainModule?.FileName; } catch(Exception e) when(e is Win32Exception or InvalidOperationException) { partial=true; }
                                 try { cpu=(long)process.TotalProcessorTime.TotalMilliseconds; } catch(Exception e) when(e is Win32Exception or InvalidOperationException) { partial=true; }
                             }
-                            entries.Add(new(process.Id,name,session,memory,handles,start,path,cpu,partial));
+                            var lineage=ancestry is not null && ancestry.TryGetValue(process.Id,out var observed)
+                                ? observed : null;
+                            entries.Add(new(process.Id,name,session,memory,handles,start,path,cpu,
+                                partial || lineage is null, lineage?.ParentPid,lineage?.ThreadCount));
                         }
                         int? next=offset+page.Length<ordered.Length?offset+page.Length:null;
                         return new(SystemQueryCode.COMPLETED,kind,at,Processes:[..entries],
@@ -180,6 +194,9 @@ internal static class SystemSnapshot
                             ct.ThrowIfCancellationRequested();
                             string status="UNKNOWN",type="UNKNOWN";
                             bool? stop=null,pause=null;
+                            SystemServiceStartMode? startMode=null;
+                            string[]? dependencies=null;
+                            bool truncated=false;
                             bool partial=false;
                             try
                             {
@@ -190,7 +207,33 @@ internal static class SystemSnapshot
                             }
                             catch(Exception e) when(e is Win32Exception or InvalidOperationException)
                             { partial=true; }
-                            entries.Add(new(service.ServiceName,service.DisplayName,status,type,stop,pause,partial));
+                            if(serviceName is not null)
+                            {
+                                try
+                                {
+                                    startMode=service.StartType switch
+                                    {
+                                        ServiceStartMode.Boot=>SystemServiceStartMode.BOOT,
+                                        ServiceStartMode.System=>SystemServiceStartMode.SYSTEM,
+                                        ServiceStartMode.Automatic=>SystemServiceStartMode.AUTOMATIC,
+                                        ServiceStartMode.Manual=>SystemServiceStartMode.MANUAL,
+                                        ServiceStartMode.Disabled=>SystemServiceStartMode.DISABLED,
+                                        _=>SystemServiceStartMode.UNKNOWN
+                                    };
+                                    var dependsOn=service.ServicesDependedOn;
+                                    try
+                                    {
+                                        truncated=dependsOn.Length>64;
+                                        dependencies=dependsOn.Take(64).Select(x=>x.ServiceName)
+                                            .Order(StringComparer.OrdinalIgnoreCase).ToArray();
+                                    }
+                                    finally {foreach(var dependency in dependsOn)dependency.Dispose();}
+                                }
+                                catch(Exception e) when(e is Win32Exception or InvalidOperationException)
+                                {partial=true;}
+                            }
+                            entries.Add(new(service.ServiceName,service.DisplayName,status,type,stop,pause,
+                                partial,startMode,dependencies,truncated));
                         }
                         int? next=offset+page.Length<ordered.Length?offset+page.Length:null;
                         return new(SystemQueryCode.COMPLETED,kind,at,Services:[..entries],
@@ -224,7 +267,8 @@ internal static class SystemSnapshot
                         NextOffset:next,ElapsedMs:watch.ElapsedMilliseconds);
                 }
                 case SystemQueryKind.EVENT_LOG:
-                    return SystemExtraQueries.Events(kind,at,watch,eventLog!.Value,eventId,pageSize,offset,ct);
+                    return SystemExtraQueries.Events(kind,at,watch,eventLog!.Value,eventId,
+                        eventProvider,pageSize,offset,ct);
                 case SystemQueryKind.REGISTRY:
                     return SystemExtraQueries.Registry(kind,at,watch,registryHive!.Value,registryPath!,
                         registryView,includeValue,pageSize,offset,ct);
@@ -252,14 +296,14 @@ internal static class SystemSnapshot
 public sealed class SystemTools
 {
     [McpServerTool(Name="windows.system_query",UseStructuredContent=true),
-     Description("Native bounded read-only Windows process, SCM service, network interfaces, TCP connections by PID, Event Log, registry and Task Scheduler queries. Exact target or paged list; no PowerShell or second service.")]
+     Description("Native bounded read-only Windows process ancestry, SCM service configuration, network interfaces, TCP connections by PID, Event Log (including WER provider filter), registry and Task Scheduler queries. Exact target or paged list; no PowerShell or second service.")]
     public static Task<SystemQueryResult> Query(SystemQueryKind kind,int? pid=null,
         string? service_name=null,int page_size=50,int offset=0,
         SystemEventLogKind? event_log=null,int? event_id=null,
         SystemRegistryHive? registry_hive=null,string? registry_path=null,
         SystemRegistryView registry_view=SystemRegistryView.DEFAULT,bool include_value=false,
-        string? task_folder=null,
+        string? task_folder=null,SystemEventProviderFilter? event_provider=null,
         CancellationToken cancellationToken=default) =>
         Task.FromResult(SystemSnapshot.Observe(kind,pid,service_name,page_size,offset,cancellationToken,
-            event_log,event_id,registry_hive,registry_path,registry_view,include_value,task_folder));
+            event_log,event_id,registry_hive,registry_path,registry_view,include_value,task_folder,event_provider));
 }

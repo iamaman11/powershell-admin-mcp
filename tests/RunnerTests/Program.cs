@@ -131,10 +131,18 @@ await ChromeAcceptanceFixture.RunAsync();
     var self=own.Processes?.SingleOrDefault();
     Check(own.Status==SystemQueryCode.COMPLETED && self is { Pid: >0, Name: not "" } &&
         self.Pid==Environment.ProcessId &&
+        self.ParentPid is >0 && self.ThreadCount is >0 &&
         services.Status==SystemQueryCode.COMPLETED && services.Services?.Length is >0 and <=5 &&
         network.Status==SystemQueryCode.COMPLETED && network.NetworkInterfaces?.Length is >0 and <=5 &&
         missing.Status==SystemQueryCode.NOT_FOUND && missing.Services is null,
         "issue72.native_process_service_network_query_read_only");
+    var eventLogService=SystemSnapshot.Observe(SystemQueryKind.SERVICES,null,"EventLog",5,0,
+        CancellationToken.None);
+    Check(eventLogService.Status==SystemQueryCode.COMPLETED &&
+        eventLogService.Services?.SingleOrDefault() is
+            { StartMode: not null, DependsOn: not null, DetailsUnavailable:false } &&
+        services.Services!.All(s=>s.DependsOn is null && s.StartMode is null),
+        "issue72.exact_native_scm_config_without_expensive_list_expansion");
     string wire=System.Text.Json.JsonSerializer.Serialize(own,PipeWire.Json);
     Check(wire.Contains("\"kind\":\"PROCESSES\"",StringComparison.Ordinal) &&
         wire.Contains("\"pid\":",StringComparison.Ordinal) &&
@@ -195,6 +203,9 @@ await ChromeAcceptanceFixture.RunAsync();
 {
     Check(SystemSnapshot.Valid(SystemQueryKind.EVENT_LOG,null,null,5,0,
             eventLog:SystemEventLogKind.APPLICATION,eventId:1000) &&
+        SystemSnapshot.Valid(SystemQueryKind.EVENT_LOG,null,null,5,0,
+            eventLog:SystemEventLogKind.APPLICATION,
+            eventProvider:SystemEventProviderFilter.WINDOWS_ERROR_REPORTING) &&
         SystemSnapshot.Valid(SystemQueryKind.REGISTRY,null,null,5,0,
             registryHive:SystemRegistryHive.LOCAL_MACHINE,
             registryPath:@"SOFTWARE\Microsoft\Windows NT\CurrentVersion",
@@ -212,17 +223,26 @@ await ChromeAcceptanceFixture.RunAsync();
             taskFolder:@"\..\Windows") &&
         !SystemSnapshot.Valid(SystemQueryKind.PROCESSES,null,null,5,0,
             includeValue:true) &&
+        !SystemSnapshot.Valid(SystemQueryKind.PROCESSES,null,null,5,0,
+            eventProvider:SystemEventProviderFilter.APPLICATION_ERROR) &&
+        !SystemSnapshot.Valid(SystemQueryKind.EVENT_LOG,null,null,5,0,
+            eventLog:SystemEventLogKind.APPLICATION,eventProvider:(SystemEventProviderFilter)999) &&
         !SystemSnapshot.Valid(SystemQueryKind.REGISTRY,null,null,5,1001,
             registryHive:SystemRegistryHive.LOCAL_MACHINE,registryPath:@"SOFTWARE"),
         "issue72.system_query_windows_diagnostic_variant_validation");
     var eventLog=SystemSnapshot.Observe(SystemQueryKind.EVENT_LOG,null,null,5,0,
         CancellationToken.None,eventLog:SystemEventLogKind.APPLICATION);
+    var wer=SystemSnapshot.Observe(SystemQueryKind.EVENT_LOG,null,null,5,0,
+        CancellationToken.None,eventLog:SystemEventLogKind.APPLICATION,
+        eventProvider:SystemEventProviderFilter.WINDOWS_ERROR_REPORTING);
     var registry=SystemSnapshot.Observe(SystemQueryKind.REGISTRY,null,null,5,0,
         CancellationToken.None,registryHive:SystemRegistryHive.LOCAL_MACHINE,
         registryPath:@"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
     var tasks=SystemSnapshot.Observe(SystemQueryKind.SCHEDULED_TASKS,null,null,5,0,
         CancellationToken.None,taskFolder:@"\");
     Check(eventLog.Status==SystemQueryCode.COMPLETED && eventLog.Events is { Length: <=5 } &&
+        wer.Status==SystemQueryCode.COMPLETED && wer.Events is { Length: <=5 } &&
+        wer.Events.All(e=>e.Provider=="Windows Error Reporting") &&
         registry.Status==SystemQueryCode.COMPLETED && registry.RegistryEntries is { Length: >0 and <=5 } &&
         tasks.Status==SystemQueryCode.COMPLETED && tasks.ScheduledTasks is { Length: <=5 },
         "issue72.native_event_registry_scheduler_queries_read_only");

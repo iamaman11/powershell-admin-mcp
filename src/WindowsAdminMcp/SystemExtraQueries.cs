@@ -8,6 +8,11 @@ using Microsoft.Win32;
 [JsonConverter(typeof(JsonStringEnumConverter<SystemEventLogKind>))]
 public enum SystemEventLogKind { APPLICATION, SYSTEM, SECURITY }
 
+// Exact, known Windows provider names: no user-supplied XPath fragments or
+// event payloads need to cross the MCP boundary for crash/WER diagnosis.
+[JsonConverter(typeof(JsonStringEnumConverter<SystemEventProviderFilter>))]
+public enum SystemEventProviderFilter { APPLICATION_ERROR, WINDOWS_ERROR_REPORTING }
+
 [JsonConverter(typeof(JsonStringEnumConverter<SystemRegistryHive>))]
 public enum SystemRegistryHive { LOCAL_MACHINE, CURRENT_USER, USERS, CLASSES_ROOT, CURRENT_CONFIG }
 
@@ -52,14 +57,25 @@ internal static class SystemExtraQueries
         !path.Split('\\').Any(part=>part is "." or "..");
 
     internal static SystemQueryResult Events(SystemQueryKind kind,DateTimeOffset at,Stopwatch watch,
-        SystemEventLogKind log,int? eventId,int pageSize,int offset,CancellationToken ct)
+        SystemEventLogKind log,int? eventId,SystemEventProviderFilter? provider,
+        int pageSize,int offset,CancellationToken ct)
     {
         string logName=log switch {
             SystemEventLogKind.APPLICATION=>"Application",
             SystemEventLogKind.SYSTEM=>"System",
             SystemEventLogKind.SECURITY=>"Security",
             _=>throw new ArgumentOutOfRangeException(nameof(log))};
-        string? xpath=eventId is null?null:$"*[System[(EventID={eventId.Value})]]";
+        string? providerName=provider switch
+        {
+            SystemEventProviderFilter.APPLICATION_ERROR=>"Application Error",
+            SystemEventProviderFilter.WINDOWS_ERROR_REPORTING=>"Windows Error Reporting",
+            null=>null,
+            _=>throw new ArgumentOutOfRangeException(nameof(provider))
+        };
+        var filters=new List<string>(2);
+        if(providerName is not null)filters.Add($"Provider[@Name='{providerName}']");
+        if(eventId is not null)filters.Add($"EventID={eventId.Value}");
+        string? xpath=filters.Count==0?null:$"*[System[{string.Join(" and ",filters)}]]";
         var query=new EventLogQuery(logName,PathType.LogName,xpath) {ReverseDirection=true};
         using var reader=new EventLogReader(query);
         var records=new List<SystemEventInfo>(pageSize);
