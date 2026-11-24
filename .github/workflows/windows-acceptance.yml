@@ -127,11 +127,12 @@ jobs:
           $plan=./installer/NativeStartup.ps1 -Action Plan | ConvertFrom-Json
           if($plan.mutated -or $plan.service_start -ne 'Automatic' -or $plan.trigger -ne 'MSFT_TaskLogonTrigger' -or $plan.logon -ne 'Interactive' -or $plan.run_level -ne 'Highest' -or $plan.arguments -ne 'tunnel' -or $plan.multiple_instances -ne 'IgnoreNew' -or $plan.restart_count -ne 3){throw 'NATIVE_STARTUP_PLAN_INVALID'}
           Write-Host 'R6_STARTUP_DEFINITION=PASS (plan only; no task registered)'
-      # This is a fixed historical upgrade fixture. Cache its tested ZIP,
-      # not mutable compiler outputs or the current commit's release binary.
-      # Main never needs the historical candidate again after PR acceptance.
+      # Only full offline acceptance needs the fixed historical upgrade ZIP.
+      # That now runs on exact main, not PR: restore the historical cache on
+      # main and scheduled/manual runs to avoid rebuilding an unchanged commit.
+      # Never cache the current commit's release binary.
       - uses: actions/cache@v6
-        if: github.event_name != 'push' || steps.provenance.outputs.full == 'true'
+        if: github.event_name != 'pull_request'
         with:
           path: |
             ${{ runner.temp }}/wmcp-legacy-fed40dc07d9a6f6651430e54b0c48529b80f0327.zip
