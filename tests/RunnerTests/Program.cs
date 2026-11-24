@@ -1297,7 +1297,7 @@ Check(WindowChromeCdp.MissingConnectionState(false) == ChromeConnectionState.NOT
         ChromeConnectionFailureReason.SOCKET_CLOSED,
     "chrome.lost_approved_connection_has_typed_reason_not_not_requested");
 Check(WindowChromeCdp.CdpTransportFailure(new IOException("CDP_SOCKET_CLOSED")) &&
-    WindowChromeCdp.CdpTransportFailure(new OperationCanceledException()) &&
+    !WindowChromeCdp.CdpTransportFailure(new OperationCanceledException()) &&
     WindowChromeCdp.CdpTransportFailure(new System.Text.Json.JsonException("bad payload")) &&
     !WindowChromeCdp.CdpTransportFailure(new InvalidOperationException("CDP_COMMAND_REJECTED")) &&
     !WindowChromeCdp.CdpTransportFailure(new InvalidOperationException("CDP_TARGET_DETACHED")) &&
