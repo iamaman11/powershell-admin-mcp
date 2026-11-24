@@ -105,6 +105,7 @@ try{
             @(@('status','state','next_action','profile','profiles')|Where-Object {-not $chromeTool[0].outputSchema.properties.Contains($_)}).Count -eq 0) 'chrome.typed_multi_profile_and_consent_lifecycle'
         Assert ($inspectTool.Count -eq 1 -and $actionTool.Count -eq 1 -and
             @(@('window_id','max_depth','max_elements','start_path','start_element_id','offset','include_details','name_contains','role_filter','wait_ms','scope','tab_id','expected_profile','expected_origin','expected_url')|Where-Object {-not $inspectTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
+            @(@('cdp_mapping_failure','cdp_title_candidates','cdp_fingerprint_candidates')|Where-Object {-not $inspectTool[0].outputSchema.properties.Contains($_)}).Count -eq 0 -and
             @(@('window_id','element_id','action','value','confirm','element_path','expected_name','expected_change','key','expected_kind','expected_value','expected_profile','expected_origin','expected_url','observation_timeout_ms')|Where-Object {-not $actionTool[0].inputSchema.properties.Contains($_)}).Count -eq 0) 'r5.actual_tools_list_exposes_typed_semantic_uia_contract'
         $updateTool=@($list.tools|Where-Object name -eq 'powershell_update')
         Assert ($updateTool.Count -eq 1 -and $updateTool[0].inputSchema.properties.Contains('action') -and

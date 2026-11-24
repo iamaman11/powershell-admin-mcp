@@ -27,6 +27,13 @@ public enum WindowRoleFilter
 [JsonConverter(typeof(JsonStringEnumConverter<WindowInspectScope>))]
 public enum WindowInspectScope { WINDOW, TABS, TAB }
 
+[JsonConverter(typeof(JsonStringEnumConverter<WindowCdpMappingFailure>))]
+public enum WindowCdpMappingFailure
+{
+    TITLE_NOT_FOUND, BOUNDS_MISMATCH, TAB_STRIP_UNAVAILABLE,
+    FINGERPRINT_NOT_FOUND, FINGERPRINT_AMBIGUOUS, FINGERPRINT_LIMIT
+}
+
 public sealed record WindowTab(
     [property: JsonPropertyName("tab_id")] string TabId,
     [property: JsonPropertyName("title")] string Title,
@@ -64,7 +71,10 @@ public sealed record WindowInspectResult(
     [property: JsonPropertyName("tabs"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] WindowTab[]? Tabs = null,
     [property: JsonPropertyName("broker_owner_pid"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? BrokerOwnerPid = null,
     [property: JsonPropertyName("trace_id"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? TraceId = null,
-    [property: JsonPropertyName("session_generation"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? SessionGeneration = null);
+    [property: JsonPropertyName("session_generation"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? SessionGeneration = null,
+    [property: JsonPropertyName("cdp_mapping_failure"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] WindowCdpMappingFailure? CdpMappingFailure = null,
+    [property: JsonPropertyName("cdp_title_candidates"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? CdpTitleCandidates = null,
+    [property: JsonPropertyName("cdp_fingerprint_candidates"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? CdpFingerprintCandidates = null);
 
 internal sealed record WindowInspectRequest(
     string WindowId, int MaxDepth, int MaxElements,
