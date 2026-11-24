@@ -1,8 +1,10 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Channels;
 
 internal static class ChromeAcceptanceFixture
 {
@@ -12,6 +14,8 @@ internal static class ChromeAcceptanceFixture
     {
         if (Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true" ||
             Environment.GetEnvironmentVariable("RUNNER_OS") != "Windows") return;
+
+        await VerifyReceivePumpAsync();
 
         string? chrome = new[]
         {
@@ -404,6 +408,193 @@ internal static class ChromeAcceptanceFixture
 
     private static void Blocked(string reason) =>
         Console.WriteLine($"NOT_TESTED / EXTERNAL_BLOCKER chrome_ci.100_cycles reason={reason}");
+
+    private static async Task VerifyReceivePumpAsync()
+    {
+        using var wire = new ScriptedWebSocket();
+        using var session = new WindowChromeCdp.Session(wire);
+        using var testDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var slowDeadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+        session.SetDeadline(slowDeadline.Token);
+        Task<JsonElement> slow = session.Call("Test.slow", new { });
+        var sentSlow = await wire.NextCommandAsync(testDeadline.Token);
+        int slowId = sentSlow.GetProperty("id").GetInt32();
+        if (sentSlow.GetProperty("method").GetString() != "Test.slow")
+            throw new InvalidOperationException("CI_CDP_SLOW_COMMAND_MISMATCH");
+        try
+        {
+            _ = await slow.WaitAsync(testDeadline.Token);
+            throw new InvalidOperationException("CI_CDP_TIMEOUT_NOT_REPORTED");
+        }
+        catch (OperationCanceledException e) when (e.Data["cdp_method"] is "Test.slow") { }
+        if (wire.Aborted)
+            throw new InvalidOperationException("CI_CDP_COMMAND_TIMEOUT_CLOSED_SOCKET");
+
+        session.SetDeadline(testDeadline.Token);
+        Task<JsonElement> fast = session.Call("Test.fast", new { });
+        var sentFast = await wire.NextCommandAsync(testDeadline.Token);
+        int fastId = sentFast.GetProperty("id").GetInt32();
+        if (fastId == slowId) throw new InvalidOperationException("CI_CDP_ID_REUSED");
+        wire.Reply($$"""{"id":{{slowId}},"result":{"name":"late"}}""");
+        wire.Reply("""{"method":"Page.frameNavigated","params":{}}""");
+        wire.Reply($$"""{"id":{{fastId}},"result":{"name":"fast"}}""");
+        if ((await fast.WaitAsync(testDeadline.Token)).GetProperty("name").GetString() != "fast")
+            throw new InvalidOperationException("CI_CDP_LATE_RESPONSE_CROSSED_ID");
+
+        Task<JsonElement> first = session.Call("Test.first", new { });
+        Task<JsonElement> second = session.Call("Test.second", new { });
+        var commandOne = await wire.NextCommandAsync(testDeadline.Token);
+        var commandTwo = await wire.NextCommandAsync(testDeadline.Token);
+        int idOne = commandOne.GetProperty("id").GetInt32();
+        int idTwo = commandTwo.GetProperty("id").GetInt32();
+        wire.Reply($$"""{"id":{{idTwo}},"result":{"name":"two"}}""");
+        wire.Reply($$"""{"id":{{idOne}},"result":{"name":"one"}}""");
+        if ((await first.WaitAsync(testDeadline.Token)).GetProperty("name").GetString() != "one" ||
+            (await second.WaitAsync(testDeadline.Token)).GetProperty("name").GetString() != "two")
+            throw new InvalidOperationException("CI_CDP_OUT_OF_ORDER_RESPONSE_MISMATCH");
+
+        Task<JsonElement> rejected = session.Call("Test.reject", new { });
+        int rejectId = (await wire.NextCommandAsync(testDeadline.Token)).GetProperty("id").GetInt32();
+        wire.Reply($$"""{"id":{{rejectId}},"error":{"code":-32601,"message":"test"}}""");
+        try
+        {
+            _ = await rejected.WaitAsync(testDeadline.Token);
+            throw new InvalidOperationException("CI_CDP_REJECTION_NOT_REPORTED");
+        }
+        catch (InvalidOperationException e) when (e.Message == "CDP_COMMAND_REJECTED") { }
+
+        Task<JsonElement> detached = session.Call("Test.detached", new { }, "s-test");
+        _ = await wire.NextCommandAsync(testDeadline.Token);
+        wire.Reply("""{"method":"Inspector.detached","sessionId":"s-test","params":{}}""");
+        try
+        {
+            _ = await detached.WaitAsync(testDeadline.Token);
+            throw new InvalidOperationException("CI_CDP_DETACH_NOT_REPORTED");
+        }
+        catch (InvalidOperationException e) when (e.Message == "CDP_TARGET_DETACHED") { }
+        try
+        {
+            _ = await session.Call("Test.detachedAgain", new { }, "s-test");
+            throw new InvalidOperationException("CI_CDP_DETACHED_SESSION_REUSED");
+        }
+        catch (InvalidOperationException e) when (e.Message == "CDP_TARGET_DETACHED") { }
+
+        Task<JsonElement> fragmented = session.Call("Test.fragment", new { });
+        int fragmentId = (await wire.NextCommandAsync(testDeadline.Token)).GetProperty("id").GetInt32();
+        wire.ReplyFragmented($$"""{"id":{{fragmentId}},"result":{"name":"fragmented"}}""");
+        if ((await fragmented.WaitAsync(testDeadline.Token)).GetProperty("name").GetString() !=
+            "fragmented" || wire.Aborted || wire.MaxConcurrentReads != 1 || wire.SentCount != 7)
+            throw new InvalidOperationException("CI_CDP_RECEIVE_PUMP_SINGLE_OWNER_FAILURE");
+        Console.WriteLine("PASS chrome_ci.timeout_late_response_id_dispatch_detach_fragmentation " +
+            "single_socket_no_replay");
+
+        using var brokenWire = new ScriptedWebSocket();
+        using var brokenSession = new WindowChromeCdp.Session(brokenWire);
+        brokenSession.SetDeadline(testDeadline.Token);
+        Task<JsonElement> broken = brokenSession.Call("Test.protocol", new { });
+        _ = await brokenWire.NextCommandAsync(testDeadline.Token);
+        brokenWire.Reply("""{"id":"wrong","result":{}}""");
+        try
+        {
+            _ = await broken.WaitAsync(testDeadline.Token);
+            throw new InvalidOperationException("CI_CDP_PROTOCOL_ERROR_NOT_REPORTED");
+        }
+        catch (JsonException) { }
+        if (!brokenWire.Aborted)
+            throw new InvalidOperationException("CI_CDP_PROTOCOL_FAILURE_NOT_CLOSED");
+        Console.WriteLine("PASS chrome_ci.malformed_protocol_fails_closed");
+    }
+
+    private sealed class ScriptedWebSocket : WebSocket
+    {
+        private sealed record Frame(byte[] Payload, bool Last);
+        private readonly Channel<Frame> _inbox = Channel.CreateUnbounded<Frame>();
+        private readonly Channel<string> _sent = Channel.CreateUnbounded<string>();
+        private int _activeReads;
+        private int _maxReads;
+        private int _sentCount;
+        private int _aborted;
+
+        internal bool Aborted => Volatile.Read(ref _aborted) != 0;
+        internal int MaxConcurrentReads => Volatile.Read(ref _maxReads);
+        internal int SentCount => Volatile.Read(ref _sentCount);
+        public override WebSocketCloseStatus? CloseStatus => null;
+        public override string? CloseStatusDescription => null;
+        public override WebSocketState State => Aborted ? WebSocketState.Aborted : WebSocketState.Open;
+        public override string? SubProtocol => null;
+
+        internal async Task<JsonElement> NextCommandAsync(CancellationToken cancel)
+        {
+            string json = await _sent.Reader.ReadAsync(cancel);
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.Clone();
+        }
+
+        internal void Reply(string json) =>
+            _inbox.Writer.TryWrite(new Frame(Encoding.UTF8.GetBytes(json), true));
+
+        internal void ReplyFragmented(string json)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(json);
+            int midpoint = bytes.Length / 2;
+            _inbox.Writer.TryWrite(new Frame(bytes[..midpoint], false));
+            _inbox.Writer.TryWrite(new Frame(bytes[midpoint..], true));
+        }
+
+        public override async Task<WebSocketReceiveResult> ReceiveAsync(ArraySegment<byte> buffer,
+            CancellationToken cancellationToken)
+        {
+            int active = Interlocked.Increment(ref _activeReads);
+            InterlockedExtensionsMax(ref _maxReads, active);
+            try
+            {
+                var frame = await _inbox.Reader.ReadAsync(cancellationToken);
+                if (frame.Payload.Length > buffer.Count)
+                    throw new InvalidOperationException("CI_CDP_FAKE_FRAME_TOO_LONG");
+                frame.Payload.CopyTo(buffer.AsSpan());
+                return new WebSocketReceiveResult(frame.Payload.Length,
+                    WebSocketMessageType.Text, frame.Last);
+            }
+            finally { Interlocked.Decrement(ref _activeReads); }
+        }
+
+        private static void InterlockedExtensionsMax(ref int target, int value)
+        {
+            int observed;
+            do
+            {
+                observed = Volatile.Read(ref target);
+                if (observed >= value) return;
+            } while (Interlocked.CompareExchange(ref target, value, observed) != observed);
+        }
+
+        public override Task SendAsync(ArraySegment<byte> buffer, WebSocketMessageType messageType,
+            bool endOfMessage, CancellationToken cancellationToken)
+        {
+            if (messageType != WebSocketMessageType.Text || !endOfMessage || Aborted)
+                throw new InvalidOperationException("CI_CDP_FAKE_SEND_INVALID");
+            Interlocked.Increment(ref _sentCount);
+            _sent.Writer.TryWrite(Encoding.UTF8.GetString(buffer));
+            return Task.CompletedTask;
+        }
+
+        public override void Abort()
+        {
+            Interlocked.Exchange(ref _aborted, 1);
+            _inbox.Writer.TryComplete(new IOException("CDP_SOCKET_CLOSED"));
+            _sent.Writer.TryComplete();
+        }
+
+        public override Task CloseAsync(WebSocketCloseStatus closeStatus,
+            string? statusDescription, CancellationToken cancellationToken)
+        { Abort(); return Task.CompletedTask; }
+
+        public override Task CloseOutputAsync(WebSocketCloseStatus closeStatus,
+            string? statusDescription, CancellationToken cancellationToken)
+        { Abort(); return Task.CompletedTask; }
+
+        public override void Dispose() => Abort();
+    }
 
     private sealed record PipeClientReport(int OwnerPid, string Generation, bool Verified);
 

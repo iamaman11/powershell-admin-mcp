@@ -19,7 +19,7 @@ internal static partial class WindowChromeCdp
         string Digest);
 
     // A single-threaded USER broker owns these across requests. Each request
-    // replaces the deadline, not the consented socket or tab attachment.
+    // replaces only its command deadline, not the socket reader or attachment.
     private static ClientWebSocket? _tabSocket;
     private static Session? _tabSession;
     private static Uri? _tabEndpoint;
@@ -56,7 +56,7 @@ internal static partial class WindowChromeCdp
         };
 
     internal static bool CdpTransportFailure(Exception e) => e is
-        WebSocketException or IOException or OperationCanceledException or JsonException ||
+        WebSocketException or IOException or JsonException ||
         e is InvalidOperationException { Message: "CDP_SOCKET_CLOSED" };
 
     private static void ObserveCdpFailure(Exception e)
@@ -66,7 +66,6 @@ internal static partial class WindowChromeCdp
         if (!CdpTransportFailure(e)) return;
         _lastFailure = e switch
         {
-            OperationCanceledException => ChromeConnectionFailureReason.TIMEOUT,
             JsonException => ChromeConnectionFailureReason.PROTOCOL_ERROR,
             IOException { Message: "CDP_SOCKET_CLOSED" } or
                 InvalidOperationException { Message: "CDP_SOCKET_CLOSED" } =>
@@ -93,6 +92,7 @@ internal static partial class WindowChromeCdp
     {
         CancelPendingConnection();
         AttachedTabs.Clear();
+        _tabSession?.Dispose();
         _tabSession = null;
         _tabEndpoint = null;
         _tabSocket?.Dispose();
@@ -203,7 +203,7 @@ internal static partial class WindowChromeCdp
                 CloseTabConnection();
                 _tabSocket = socket;
                 _tabEndpoint = endpoint;
-                _tabSession = new Session(socket, CancellationToken.None);
+                _tabSession = new Session(socket);
                 _sessionGeneration = Guid.NewGuid().ToString("N");
                 _hadConnection = true;
                 _lastFailure = null;
