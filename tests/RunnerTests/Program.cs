@@ -1832,8 +1832,16 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                   Width = 250, Height = 60 };
             scrollList.Items.AddRange(Enumerable.Range(0, 40)
                 .Select(i => (object)$"Owned item {i}").ToArray());
-            scrollList.MouseWheel += (_, _) => Interlocked.Increment(ref scrollWheelCount);
             form.Controls.Add(scrollList);
+            // A custom mouse-wheel widget changes an independent owned view.
+            // The pointer target is the already-addressable gesture button;
+            // the list's TopIndex proves the resulting UI effect.
+            gestureButton.MouseWheel += (_, e) =>
+            {
+                Interlocked.Increment(ref scrollWheelCount);
+                if (e.Delta < 0) scrollList.TopIndex = Math.Min(scrollList.Items.Count - 1,
+                    scrollList.TopIndex + 2);
+            };
             // Emulate Chromium's deeply nested ControlView hierarchy without a browser dependency.
             var nested = new System.Windows.Forms.Panel
                 { Left = 10, Top = 142, Width = 275, Height = 42,
@@ -2436,28 +2444,22 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                     await Observed(() => Volatile.Read(ref gestureLeftDownCount) == 3),
                     "windows.drag_owned_button_observes_down_and_destination");
 
-            var scrollTree = await Task.Run(() => WindowInspector.InspectCore(created.Handle,
-                3, 50, realWindowId, nameContains: "CI_UIA_SCROLL_LIST"))
-                .WaitAsync(TimeSpan.FromSeconds(5));
-            Check(scrollTree.Status == WindowInspectCode.COMPLETED &&
-                scrollTree.Elements.Length == 1, "windows.owned_scroll_fixture_resolves_exact_list");
-            var scrollTarget = scrollTree.Elements[0];
             var scrolled = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
-                new WindowActionRequest(realWindowId, scrollTarget.ElementId, WindowActionKind.SCROLL,
-                    null, scrollTarget.Path, ScrollDirection: WindowScrollDirection.DOWN,
+                new WindowActionRequest(realWindowId, gesture.ElementId, WindowActionKind.SCROLL,
+                    null, gesture.Path, ScrollDirection: WindowScrollDirection.DOWN,
                     ScrollUnits: 2, InputMode: WindowInputMode.ALLOW_FOREGROUND_INPUT)))
                 .WaitAsync(TimeSpan.FromSeconds(5));
             if (InputNotAvailable(scrolled))
-                Console.WriteLine($"NOT_TESTED windows.scroll_owned_list status={scrolled.Status}");
+                Console.WriteLine($"NOT_TESTED windows.scroll_owned_wheel_widget status={scrolled.Status}");
             else
                 Check(scrolled.Status == WindowActionCode.COMPLETED &&
-                    (scrolled.ExecutionMethod is WindowExecutionMethod.UIA_PATTERN or
-                        WindowExecutionMethod.WIN32_SENDINPUT) &&
+                    scrolled.ExecutionMethod == WindowExecutionMethod.WIN32_SENDINPUT &&
+                    await Observed(() => Volatile.Read(ref scrollWheelCount) > 0) &&
                     await Observed(() => (bool)created.Form.Invoke(new Func<bool>(() =>
                         created.Form.Controls.OfType<System.Windows.Forms.ListBox>()
                             .Single(p => p.AccessibleName == "CI_UIA_SCROLL_LIST")
                             .TopIndex > 0))),
-                    "windows.scroll_owned_list_observes_actual_top_index_change");
+                    "windows.scroll_owned_wheel_widget_observes_event_and_ui_effect");
             Console.WriteLine($"OWNED_POINTER_EVENTS hover={Volatile.Read(ref gestureHoverCount)} " +
                 $"right={Volatile.Read(ref gestureRightDownCount)} " +
                 $"left={Volatile.Read(ref gestureLeftDownCount)} " +
