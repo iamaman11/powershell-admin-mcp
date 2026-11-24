@@ -902,15 +902,50 @@ Check(UpdateTools.ValidArguments(UpdateToolAction.FORGET_LEGACY,false,new string
 var doctorSnapshot = new DoctorSnapshot(DoctorState.DEGRADED,
     [new DoctorCheck(DoctorComponent.Store, DoctorState.DEGRADED,
         DoctorReason.RECONCILIATION_REQUIRED, DoctorAction.INSPECT_JOBS)],
-    true, true, 17, "candidate", 42);
+    true, true, 17, "candidate", 42, DoctorCatalog.Observe(), true);
 var doctorStatus = new AdminStatus(StatusCode.OK, "ci", Diagnostics: doctorSnapshot);
 var doctorWire = System.Text.Json.JsonSerializer.Serialize(doctorStatus, PipeWire.Json);
 Check(System.Text.Json.JsonSerializer.Deserialize<AdminStatus>(doctorWire, PipeWire.Json)?.Diagnostics is
     { Status: DoctorState.DEGRADED, ReconciliationCount: 17, LocalOperationalReady: true,
+      RollbackPending: true, ToolCatalog: { ToolCount: 22, StructuredToolCount: 21,
+          NativeDtoResultCount: 20 },
       Checks: [{ Reason: DoctorReason.RECONCILIATION_REQUIRED }] } &&
     !System.Text.Json.JsonSerializer.Serialize(new AdminStatus(StatusCode.OK, "ci"), PipeWire.Json)
         .Contains("diagnostics", StringComparison.Ordinal),
     "status.optional_typed_doctor_without_changing_default_status");
+var doctorCatalog = DoctorCatalog.Observe();
+Check(DoctorCatalog.IsComplete(doctorCatalog) && doctorCatalog.ToolCount == 22 &&
+    doctorCatalog.ToolNames.Contains("windows.tcp_connections") &&
+    doctorCatalog.ToolNames.Contains("windows.file_acl") &&
+    doctorCatalog.ToolNames.Contains("windows.process_wait_chain") &&
+    doctorCatalog.ToolNames.Contains("windows.network_probe") &&
+    doctorCatalog.ToolNames.Contains("windows.admin_action") &&
+    doctorCatalog.ToolNames.Contains("windows.chrome_connection") &&
+    doctorCatalog.Source == DoctorCatalogSource.SERVER_ASSEMBLY_METADATA,
+    "doctor.v2_declared_typed_catalog_without_claiming_published_client_schema");
+string doctorCatalogJson=System.Text.Json.JsonSerializer.Serialize(doctorCatalog,PipeWire.Json);
+Check(doctorCatalogJson.Contains("\"tool_count\":22", StringComparison.Ordinal) &&
+    doctorCatalogJson.Contains("\"native_dto_result_count\":20", StringComparison.Ordinal) &&
+    doctorWire.Contains("\"rollback_pending\":true", StringComparison.Ordinal),
+    "doctor.v2_strict_catalog_and_update_trial_wire");
+string missingRollbackRoot=Path.Combine(Path.GetTempPath(), "wmcp-doctor-test-" + Guid.NewGuid().ToString("N"));
+Check(Doctor.ReadRollbackPending(missingRollbackRoot) == false,
+    "doctor.v2_absent_rollback_journal_is_not_a_pending_trial");
+Check(Doctor.OverallStatus([
+        new(DoctorComponent.Service,DoctorState.OK,DoctorReason.OBSERVED,DoctorAction.NONE),
+        new(DoctorComponent.Chrome,DoctorState.NOT_TESTED,DoctorReason.CHROME_NOT_PROBED,DoctorAction.CHECK_CHROME_CONNECTION),
+        new(DoctorComponent.PublishedClientSchema,DoctorState.NOT_TESTED,DoctorReason.CLIENT_SCHEMA_NOT_VERIFIED,
+            DoctorAction.VERIFY_PUBLISHED_CLIENT_SCHEMA),
+        new(DoctorComponent.UpdateAcceptance,DoctorState.NOT_TESTED,DoctorReason.UPDATE_TRIAL_PENDING,
+            DoctorAction.VERIFY_UPDATE_ACCEPTANCE)]) == DoctorState.OK &&
+    Doctor.OverallStatus([
+        new(DoctorComponent.Store,DoctorState.DEGRADED,DoctorReason.RECONCILIATION_REQUIRED,DoctorAction.INSPECT_JOBS),
+        new(DoctorComponent.Chrome,DoctorState.NOT_TESTED,DoctorReason.CHROME_NOT_PROBED,DoctorAction.CHECK_CHROME_CONNECTION)])
+        == DoctorState.DEGRADED &&
+    Doctor.OverallStatus([
+        new(DoctorComponent.Remote,DoctorState.NOT_TESTED,DoctorReason.REMOTE_NOT_TESTED,
+            DoctorAction.VERIFY_SUPPORTED_REMOTE_ACCESS)]) == DoctorState.NOT_TESTED,
+    "doctor.v2_optional_checks_do_not_mask_baseline_health");
 var historicTrial=UpdateTools.WithCurrentReadiness(new(UpdateToolCode.COMPLETED,
     Stage:"trial_not_ready",RollbackPending:true),doctorStatus);
 Check(historicTrial is {Stage:"trial_not_ready",RollbackPending:true,
