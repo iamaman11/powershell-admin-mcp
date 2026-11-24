@@ -435,9 +435,9 @@ internal static class ChromeAcceptanceFixture
         var sentFast = await wire.NextCommandAsync(testDeadline.Token);
         int fastId = sentFast.GetProperty("id").GetInt32();
         if (fastId == slowId) throw new InvalidOperationException("CI_CDP_ID_REUSED");
-        wire.Reply($$"""{"id":{{slowId}},"result":{"name":"late"}}""");
+        wire.Reply(JsonSerializer.Serialize(new { id = slowId, result = new { name = "late" } }));
         wire.Reply("""{"method":"Page.frameNavigated","params":{}}""");
-        wire.Reply($$"""{"id":{{fastId}},"result":{"name":"fast"}}""");
+        wire.Reply(JsonSerializer.Serialize(new { id = fastId, result = new { name = "fast" } }));
         if ((await fast.WaitAsync(testDeadline.Token)).GetProperty("name").GetString() != "fast")
             throw new InvalidOperationException("CI_CDP_LATE_RESPONSE_CROSSED_ID");
 
@@ -447,15 +447,16 @@ internal static class ChromeAcceptanceFixture
         var commandTwo = await wire.NextCommandAsync(testDeadline.Token);
         int idOne = commandOne.GetProperty("id").GetInt32();
         int idTwo = commandTwo.GetProperty("id").GetInt32();
-        wire.Reply($$"""{"id":{{idTwo}},"result":{"name":"two"}}""");
-        wire.Reply($$"""{"id":{{idOne}},"result":{"name":"one"}}""");
+        wire.Reply(JsonSerializer.Serialize(new { id = idTwo, result = new { name = "two" } }));
+        wire.Reply(JsonSerializer.Serialize(new { id = idOne, result = new { name = "one" } }));
         if ((await first.WaitAsync(testDeadline.Token)).GetProperty("name").GetString() != "one" ||
             (await second.WaitAsync(testDeadline.Token)).GetProperty("name").GetString() != "two")
             throw new InvalidOperationException("CI_CDP_OUT_OF_ORDER_RESPONSE_MISMATCH");
 
         Task<JsonElement> rejected = session.Call("Test.reject", new { });
         int rejectId = (await wire.NextCommandAsync(testDeadline.Token)).GetProperty("id").GetInt32();
-        wire.Reply($$"""{"id":{{rejectId}},"error":{"code":-32601,"message":"test"}}""");
+        wire.Reply(JsonSerializer.Serialize(new
+            { id = rejectId, error = new { code = -32601, message = "test" } }));
         try
         {
             _ = await rejected.WaitAsync(testDeadline.Token);
@@ -481,7 +482,8 @@ internal static class ChromeAcceptanceFixture
 
         Task<JsonElement> fragmented = session.Call("Test.fragment", new { });
         int fragmentId = (await wire.NextCommandAsync(testDeadline.Token)).GetProperty("id").GetInt32();
-        wire.ReplyFragmented($$"""{"id":{{fragmentId}},"result":{"name":"fragmented"}}""");
+        wire.ReplyFragmented(JsonSerializer.Serialize(new
+            { id = fragmentId, result = new { name = "fragmented" } }));
         if ((await fragmented.WaitAsync(testDeadline.Token)).GetProperty("name").GetString() !=
             "fragmented" || wire.Aborted || wire.MaxConcurrentReads != 1 || wire.SentCount != 7)
             throw new InvalidOperationException("CI_CDP_RECEIVE_PUMP_SINGLE_OWNER_FAILURE");
