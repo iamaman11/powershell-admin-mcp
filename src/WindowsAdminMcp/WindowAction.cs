@@ -329,7 +329,11 @@ internal static class WindowAction
             WindowActionResult ActOnMatch(AutomationElement element, int[] path)
             {
                 var current = element.Current;
-                if (!current.IsEnabled) return new(WindowActionCode.DISABLED, EnabledBefore: false);
+                if (!current.IsEnabled)
+                    return new(WindowActionCode.DISABLED, EnabledBefore: false,
+                        TargetVerified: true, TargetIdentity: request.ElementId,
+                        FailureStage: WindowFailureStage.PREPARE_UIA,
+                        ElapsedMs: clock.ElapsedMilliseconds);
                 // Creation checks compare identities, not a boolean "process exists":
                 // another Camoufox instance may already be running.
                 WindowEffectBaseline baseline;
@@ -519,7 +523,9 @@ internal static class WindowAction
                 if (selected is null || !string.Equals(
                     WindowInspector.ElementRef(selected, request.WindowId, snapshotMs),
                     request.ElementId, StringComparison.Ordinal))
-                    return new(WindowActionCode.STALE_ELEMENT, ElapsedMs: clock.ElapsedMilliseconds);
+                    return new(WindowActionCode.STALE_ELEMENT,
+                        FailureStage: WindowFailureStage.RESOLVE_ELEMENT,
+                        ElapsedMs: clock.ElapsedMilliseconds);
                 return ActOnMatch(selected, path);
             }
             var stack = new Stack<(AutomationElement Element, int Depth, int[] Path)>();
@@ -555,9 +561,15 @@ internal static class WindowAction
                 for (int i = children.Count - 1; i >= 0; i--)
                     stack.Push((children[i], depth + 1, [.. path, i]));
             }
-            return new(WindowActionCode.STALE_ELEMENT, ElapsedMs: clock.ElapsedMilliseconds);
+            return new(WindowActionCode.STALE_ELEMENT,
+                FailureStage: WindowFailureStage.RESOLVE_ELEMENT,
+                ElapsedMs: clock.ElapsedMilliseconds);
         }
-        catch (ElementNotAvailableException) { return new(WindowActionCode.STALE_ELEMENT); }
+        catch (ElementNotAvailableException)
+        {
+            return new(WindowActionCode.STALE_ELEMENT,
+                FailureStage: WindowFailureStage.RESOLVE_ELEMENT);
+        }
         catch (COMException e) { return new(WindowActionCode.UIA_UNAVAILABLE, Detail: e.HResult.ToString("X8"),
             FailureStage: WindowFailureStage.RESOLVE_ELEMENT, ExceptionType: e.GetType().Name,
             HResult: e.HResult.ToString("X8")); }
