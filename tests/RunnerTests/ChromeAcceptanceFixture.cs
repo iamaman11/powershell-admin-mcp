@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -51,7 +50,6 @@ internal static class ChromeAcceptanceFixture
         using var serverStop = new CancellationTokenSource();
         Task accepting = ServeAsync(server, nonce, state, serverStop.Token);
         Process? browser = null;
-        Process? worker = null;
         bool endpointCreated = false;
         try
         {
@@ -127,34 +125,25 @@ internal static class ChromeAcceptanceFixture
                 return;
             }
 
-            var workerStart = new ProcessStartInfo("dotnet")
-            {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-            workerStart.ArgumentList.Add(typeof(WindowChromeBroker).Assembly.Location);
-            workerStart.ArgumentList.Add("window-cdp-worker");
-            workerStart.ArgumentList.Add(self.Id.ToString(CultureInfo.InvariantCulture));
-            var cdpWorker = Process.Start(workerStart) ??
-                throw new InvalidOperationException("CDP_WORKER_NOT_STARTED");
-            worker = cdpWorker;
             // The throwaway CI profile has no stable account metadata. Its
             // verified native avatar display name is the binding selector.
             string selector = profile!.DisplayName;
 
+            // Use the real USER owner from the first request onward. The 100
+            // cycles and the 2/4/8 independent clients must share its single
+            // worker and its consented WebSocket, without a second connection.
+            using var brokerStop = new CancellationTokenSource();
+            Task owner = ChromeBrokerPipe.RunOwnerAsync(brokerStop.Token);
+            try
+            {
+                if (!ChromeBrokerPipe.IsOwner)
+                throw new InvalidOperationException("CI_CDP_PIPE_OWNER_NOT_STARTED");
             async Task<ChromeBrokerReply> ExchangeAsync(ChromeBrokerRequest request)
             {
                 string trace = Guid.NewGuid().ToString("N");
                 request = request with { TraceId = trace };
-                await cdpWorker.StandardInput.WriteLineAsync(JsonSerializer.Serialize(request, PipeWire.Json));
-                await cdpWorker.StandardInput.FlushAsync();
-                string? replyLine = await cdpWorker.StandardOutput.ReadLineAsync()
-                    .WaitAsync(TimeSpan.FromSeconds(35));
-                var reply = replyLine is null ? null :
-                    JsonSerializer.Deserialize<ChromeBrokerReply>(replyLine, PipeWire.Json);
+                using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+                var reply = await ChromeBrokerPipe.ExchangeAsync(request, deadline.Token);
                 if (!WindowChromeBroker.ReplyMatches(request, reply) || reply!.TraceId != trace)
                     throw new InvalidOperationException("CI_CDP_BROKER_WIRE_IDENTITY_MISMATCH");
                 return reply!;
@@ -179,7 +168,7 @@ internal static class ChromeAcceptanceFixture
             }
             string? generation = connected.Connection.SessionGeneration;
             if (generation is null) throw new InvalidOperationException("CI_CDP_GENERATION_MISSING");
-            Console.WriteLine($"PASS chrome_ci.authorized_worker_connected owner={cdpWorker.Id} generation={generation}");
+            Console.WriteLine($"PASS chrome_ci.authorized_shared_owner_connected owner={self.Id} generation={generation}");
 
             // Chrome's first native window can be visible before the page
             // target and its window geometry settle. Only retry the *read-only*
@@ -247,112 +236,59 @@ internal static class ChromeAcceptanceFixture
             if (state.Clicks != Cycles / 2 || state.Inputs < Cycles / 2)
                 throw new InvalidOperationException("CI_CDP_FINAL_EFFECT_COUNT_MISMATCH");
             Console.WriteLine($"PASS chrome_ci.100_status_inspect_action_verify_cycles " +
-                $"clicks={state.Clicks} inputs={state.Inputs} owner={cdpWorker.Id} generation={generation}");
+                $"clicks={state.Clicks} inputs={state.Inputs} owner={self.Id} generation={generation}");
 
-            // The direct worker has finished its 100 verified effects. Close
-            // its socket *before* starting the real USER pipe ownership path.
-            cdpWorker.StandardInput.Close();
-            await cdpWorker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
-            cdpWorker.Dispose();
-            worker = null;
-
-            using (var brokerStop = new CancellationTokenSource())
+            int expected = state.Clicks;
+            foreach (int concurrency in new[] { 2, 4, 8 })
             {
-                Task owner = ChromeBrokerPipe.RunOwnerAsync(brokerStop.Token);
-                try
-                {
-                    if (!ChromeBrokerPipe.IsOwner)
-                        throw new InvalidOperationException("CI_CDP_PIPE_OWNER_NOT_STARTED");
-                    async Task<ChromeBrokerReply?> PipeAsync(ChromeConnectionAction action)
-                    {
-                        return await ChromeBrokerPipe.ExchangeAsync(new(Connection:
-                            new ChromeConnectionRequest(windowId!, selector, action),
-                            TraceId: Guid.NewGuid().ToString("N")), CancellationToken.None);
-                    }
-                    var shared = await PipeAsync(ChromeConnectionAction.REQUEST);
-                    Console.WriteLine($"CHROME_CI_SHARED_REQUEST status={shared?.Connection?.Status} " +
-                        $"state={shared?.Connection?.State} next={shared?.Connection?.NextAction} " +
-                        $"failure={shared?.Connection?.FailureReason} detail={shared?.Connection?.Detail}");
-                    for (int attempt = 0; attempt < 15 && shared?.Connection?.State ==
-                         ChromeConnectionState.CONSENT_PENDING; attempt++)
-                    {
-                        await Task.Delay(300);
-                        shared = await PipeAsync(ChromeConnectionAction.STATUS);
-                    }
-                    if (shared?.Connection?.State != ChromeConnectionState.CONNECTED)
-                    {
-                        if (shared?.Connection?.State is ChromeConnectionState.CONSENT_PENDING or
-                            ChromeConnectionState.CONSENT_WINDOW_UNAVAILABLE or
-                            ChromeConnectionState.CONSENT_TIMED_OUT)
-                            Console.WriteLine("NOT_TESTED / EXTERNAL_BLOCKER " +
-                                $"chrome_ci.multi_mcp_clients reason=CONSENT_{shared.Connection.State}");
-                        else throw new InvalidOperationException(
-                            $"CI_CDP_SHARED_OWNER_CONNECT_FAILED status={shared?.Connection?.Status} " +
-                            $"state={shared?.Connection?.State} detail={shared?.Connection?.Detail}");
-                    }
-                    else
-                    {
-                        string sharedGeneration = shared!.Connection!.SessionGeneration ??
-                            throw new InvalidOperationException("CI_CDP_PIPE_GENERATION_MISSING");
-                        int expected = state.Clicks;
-                        foreach (int concurrency in new[] { 2, 4, 8 })
-                        {
-                            var reports = await Task.WhenAll(Enumerable.Range(0, concurrency)
-                                .Select(_ => RunPipeClientAsync(windowId!, selector, url)));
-                            if (!reports.All(r => r.OwnerPid == self.Id &&
-                                r.Generation == sharedGeneration && r.Verified))
-                                throw new InvalidOperationException(
-                                    $"CI_CDP_MULTICLIENT_REPLY_FAILURE clients={concurrency}");
-                            expected += concurrency;
-                            if (!await UntilAsync(() => state.Clicks == expected,
-                                TimeSpan.FromSeconds(3)))
-                                throw new InvalidOperationException(
-                                    $"CI_CDP_MULTICLIENT_EFFECT_COUNT clients={concurrency} " +
-                                    $"expected={expected} actual={state.Clicks}");
-                            Console.WriteLine($"PASS chrome_ci.shared_owner_clients_{concurrency} " +
-                                $"clicks={expected} generation={sharedGeneration}");
-                        }
-                        var processes = Process.GetProcessesByName("RunnerTests");
-                        int[] children;
-                        try
-                        {
-                            children = processes.Where(p => p.Id != self.Id &&
-                                p.SessionId == self.SessionId).Select(p => p.Id).ToArray();
-                        }
-                        finally { foreach (var p in processes) p.Dispose(); }
-                        if (children.Length != 1)
-                            throw new InvalidOperationException(
-                                $"CI_CDP_EXPECT_ONE_WORKER found={children.Length}");
-                        var sockets = SystemSnapshot.Observe(SystemQueryKind.TCP_CONNECTIONS,
-                            children[0], null, 50, 0, CancellationToken.None);
-                        int established = sockets.TcpConnections?.Count(t =>
-                            t.State == SystemTcpState.ESTABLISHED &&
-                            t.RemotePort == endpoint!.Port &&
-                            t.RemoteAddress == "127.0.0.1") ?? 0;
-                        if (sockets.Status != SystemQueryCode.COMPLETED || established != 1)
-                            throw new InvalidOperationException($"CI_CDP_EXPECT_ONE_SOCKET " +
-                                $"query={sockets.Status} established={established}");
-                        Console.WriteLine($"PASS chrome_ci.one_shared_cdp_worker_and_websocket " +
-                            $"worker_pid={children[0]} owner_pid={self.Id} socket_count={established}");
-                    }
-                }
-                finally
-                {
-                    await brokerStop.CancelAsync();
-                    await owner;
-                }
+                var reports = await Task.WhenAll(Enumerable.Range(0, concurrency)
+                    .Select(_ => RunPipeClientAsync(windowId!, selector, url)));
+                if (!reports.All(r => r.OwnerPid == self.Id &&
+                    r.Generation == generation && r.Verified))
+                    throw new InvalidOperationException(
+                        $"CI_CDP_MULTICLIENT_REPLY_FAILURE clients={concurrency}");
+                expected += concurrency;
+                if (!await UntilAsync(() => state.Clicks == expected,
+                    TimeSpan.FromSeconds(3)))
+                    throw new InvalidOperationException(
+                        $"CI_CDP_MULTICLIENT_EFFECT_COUNT clients={concurrency} " +
+                        $"expected={expected} actual={state.Clicks}");
+                Console.WriteLine($"PASS chrome_ci.shared_owner_clients_{concurrency} " +
+                    $"clicks={expected} generation={generation}");
+            }
+            var processes = Process.GetProcessesByName("RunnerTests");
+            int[] children;
+            try
+            {
+                children = processes.Where(p => p.Id != self.Id &&
+                    p.SessionId == self.SessionId).Select(p => p.Id).ToArray();
+            }
+            finally { foreach (var p in processes) p.Dispose(); }
+            if (children.Length != 1)
+                throw new InvalidOperationException(
+                    $"CI_CDP_EXPECT_ONE_WORKER found={children.Length}");
+            var sockets = SystemSnapshot.Observe(SystemQueryKind.TCP_CONNECTIONS,
+                children[0], null, 50, 0, CancellationToken.None);
+            int established = sockets.TcpConnections?.Count(t =>
+                t.State == SystemTcpState.ESTABLISHED &&
+                t.RemotePort == endpoint!.Port &&
+                t.RemoteAddress == "127.0.0.1") ?? 0;
+            if (sockets.Status != SystemQueryCode.COMPLETED || established != 1)
+                throw new InvalidOperationException($"CI_CDP_EXPECT_ONE_SOCKET " +
+                    $"query={sockets.Status} established={established}");
+            Console.WriteLine($"PASS chrome_ci.one_shared_cdp_worker_and_websocket " +
+                $"worker_pid={children[0]} owner_pid={self.Id} socket_count={established}");
+            }
+            finally
+            {
+                await brokerStop.CancelAsync();
+                await owner;
             }
             Console.WriteLine("NOT_TESTED / EXTERNAL_BLOCKER chrome_ci.uia_locator " +
                 "(CDP element reference, not UIA locator)");
         }
         finally
         {
-            if (worker is not null)
-            {
-                try { worker.StandardInput.Close(); } catch (IOException) { }
-                if (!worker.HasExited && !worker.WaitForExit(1500)) worker.Kill(entireProcessTree: true);
-                worker.Dispose();
-            }
             if (browser is not null)
             {
                 if (!browser.HasExited) browser.Kill(entireProcessTree: true);

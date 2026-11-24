@@ -106,6 +106,10 @@ static void Check(bool ok, string label)
     if (!ok) throw new InvalidOperationException("FAIL " + label);
     Console.WriteLine("PASS " + label);
 }
+
+// Exercise the owned, throwaway Chrome browser before the remaining native
+// window tests, so their accessibility activity cannot disturb its toolbar.
+await ChromeAcceptanceFixture.RunAsync();
 {
     Check(SystemSnapshot.Valid(SystemQueryKind.PROCESSES,Environment.ProcessId,null,50,0) &&
         SystemSnapshot.Valid(SystemQueryKind.SERVICES,null,"WindowsAdminMCP",20,0) &&
@@ -1142,6 +1146,16 @@ Check(WindowChromeCdp.ProfileLabelMatches("Valer", "Valer") &&
     !WindowChromeCdp.ProfileLabelMatches("Another Valer", "Valer") &&
     !WindowChromeCdp.ProfileLabelMatches("Valer test profile", "Valer"),
     "chrome.profile_delimiters_are_unambiguous");
+using (var self = Process.GetCurrentProcess())
+{
+    var absent = ChromeProfileCatalog.ReadWindowProfile("invalid_window", self.SessionId,
+        out var absence);
+    bool verified = WindowChromeCdp.VerifiedChromeProfile(IntPtr.Zero, "CI_PROFILE",
+        out var invalidWindow);
+    Check(absent is null && absence == ChromeProfileCatalog.ChromeProfileReadCode.STALE_WINDOW &&
+        !verified && invalidWindow == ChromeProfileCatalog.ChromeProfileReadCode.STALE_WINDOW,
+        "chrome.native_profile_probe_reports_typed_pre_dispatch_failure");
+}
 var plainAvatar = ChromeProfileCatalog.ParseAvatar("Valer");
 var emailAvatar = ChromeProfileCatalog.ParseAvatar("Васил (vasilinn9@gmail.com)");
 Check(plainAvatar is { Name: "Valer", Account: null } &&
@@ -3508,7 +3522,6 @@ Check(lateHeartbeat==1 && lateResult is {Status:ExecutionState.CANCELLED_UNKNOWN
 
 // An isolated, debugging-enabled Chrome profile on the Windows CI machine;
 // never attach to or manipulate a user's Chrome profile or desktop.
-await ChromeAcceptanceFixture.RunAsync();
 
 internal sealed class CancelOnFirstReadStream(byte[] bytes,CancellationTokenSource cancellation)
     :MemoryStream(bytes,false)
