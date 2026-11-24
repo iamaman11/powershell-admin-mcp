@@ -13,6 +13,11 @@ using System.Windows.Automation;
 // Match a specific native Chrome window to its CDP tabs.
 internal static partial class WindowChromeCdp
 {
+    private const int BoundsTolerance = 40;
+
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hwnd);
+
     private static bool MatchesBounds(WindowBounds native, WindowBounds chrome, double dpi)
     {
         static bool Close(int a, double b) => Math.Abs(a - b) <= BoundsTolerance;

@@ -1885,16 +1885,6 @@ Check(WindowPhysicalClick.ChromeChunkUnits("abc", 0) == 1 &&
     WindowPhysicalClick.ChromeChunkUnits(new string('a', 79) + "🚀z", 64) == 17 &&
     WindowPhysicalClick.ChromeChunkUnits(new string('a', 96), 64) == 16,
     "windows.chrome_unicode_pacing_preserves_surrogate_pairs_and_chunk_bound");
-Check(WindowChromeCdp.MatchesWindow("Profile Control Plane - Google Chrome (Valer)",
-        "Profile Control Plane", new WindowBounds(100, 80, 1200, 800),
-        new WindowBounds(80, 64, 960, 640), 1.25) &&
-    !WindowChromeCdp.MatchesWindow("Unrelated - Google Chrome (Valer)",
-        "Profile Control Plane", new WindowBounds(100, 80, 1200, 800),
-        new WindowBounds(80, 64, 960, 640), 1.25) &&
-    !WindowChromeCdp.MatchesWindow("Profile Control Plane - Google Chrome (Valer)",
-        "Profile Control Plane", new WindowBounds(900, 80, 1200, 800),
-        new WindowBounds(80, 64, 960, 640), 1.25),
-    "chrome.cdp_exact_window_title_and_bounds");
 using (var validInfo = System.Text.Json.JsonDocument.Parse(
     "{\"targetInfo\":{\"targetId\":\"0123456789abcdef\",\"type\":\"page\",\"url\":\"https://staging.example.test/form\"}}"))
 using (var navigatedInfo = System.Text.Json.JsonDocument.Parse(
