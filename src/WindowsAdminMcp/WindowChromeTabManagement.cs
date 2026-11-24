@@ -146,6 +146,7 @@ internal static partial class WindowChromeCdp
         bool dispatched = false;
         int? expectedHistoryIndex = null;
         string? historySessionId = null;
+        string stage = "PRE_DISPATCH";
         try
         {
             if (request.Action == ChromeTabAction.OPEN)
@@ -159,6 +160,7 @@ internal static partial class WindowChromeCdp
                     return new(ChromeTabCode.TARGET_AMBIGUOUS, request.Action,
                         Detail: "OPEN_REQUIRES_ONE_CHROME_WINDOW");
                 dispatched = true;
+                stage = "CREATE_TARGET";
                 var opened = await cdp.Call("Target.createTarget", new
                     {url = request.Url, background = request.Background});
                 targetId = opened.GetProperty("targetId").GetString() ?? "";
@@ -167,6 +169,7 @@ internal static partial class WindowChromeCdp
             else if (request.Action == ChromeTabAction.CLOSE)
             {
                 dispatched = true;
+                stage = "CLOSE_TARGET";
                 _ = await cdp.Call("Target.closeTarget", new {targetId});
                 AttachedTabs.Remove(targetId);
             }
@@ -177,12 +180,14 @@ internal static partial class WindowChromeCdp
                 if (request.Action == ChromeTabAction.NAVIGATE)
                 {
                     dispatched = true;
+                    stage = "NAVIGATE";
                     _ = await cdp.Call("Page.navigate", new {url = request.Url}, sessionId);
                 }
                 else if (request.Action == ChromeTabAction.RELOAD)
                 {
                     string oldLoader = await ReadFrameLoaderAsync(cdp, sessionId, deadline.Token);
                     dispatched = true;
+                    stage = "RELOAD";
                     _ = await cdp.Call("Page.reload", new {ignoreCache = false}, sessionId);
                     while (!deadline.IsCancellationRequested)
                     {
@@ -203,16 +208,19 @@ internal static partial class WindowChromeCdp
                     int entryId = entries[index].GetProperty("id").GetInt32();
                     expectedHistoryIndex = index;
                     dispatched = true;
+                    stage = "NAVIGATE_HISTORY_ENTRY";
                     _ = await cdp.Call("Page.navigateToHistoryEntry", new {entryId}, sessionId);
                     request = request with {Url = entries[index].GetProperty("url").GetString()};
                 }
             }
 
             // An ACK is not proof of navigation. Check target state independently.
+            stage = "VERIFY_POSTCONDITION";
             while (!deadline.IsCancellationRequested)
             {
                 if (expectedHistoryIndex is { } desiredIndex)
                 {
+                    stage = "VERIFY_HISTORY_INDEX";
                     var history = await cdp.Call("Page.getNavigationHistory", new {}, historySessionId);
                     if (history.GetProperty("currentIndex").GetInt32() == desiredIndex)
                     {
@@ -224,6 +232,7 @@ internal static partial class WindowChromeCdp
                     await Task.Delay(150, deadline.Token);
                     continue;
                 }
+                stage = "VERIFY_TARGET_URL";
                 var listed = await cdp.Call("Target.getTargets", new {});
                 var entry = listed.GetProperty("targetInfos").EnumerateArray()
                     .FirstOrDefault(t => t.TryGetProperty("targetId", out var id) &&
@@ -238,9 +247,28 @@ internal static partial class WindowChromeCdp
                         StringComparison.Ordinal))
                 {
                     if (request.Action != ChromeTabAction.OPEN)
+                    {
+                        // Target.url can update before the navigation commits a
+                        // history entry. BACK immediately after a URL-only ACK
+                        // would then race the still-pending navigation.
+                        stage = "VERIFY_COMMITTED_NAVIGATION";
+                        var history = await cdp.Call("Page.getNavigationHistory", new {},
+                            historySessionId);
+                        int index = history.GetProperty("currentIndex").GetInt32();
+                        var entries = history.GetProperty("entries");
+                        if (index < 0 || index >= entries.GetArrayLength() ||
+                            !Uri.TryCreate(entries[index].GetProperty("url").GetString(),
+                                UriKind.Absolute, out var committed) ||
+                            !string.Equals(committed.AbsoluteUri, new Uri(request.Url!).AbsoluteUri,
+                                StringComparison.Ordinal))
+                        {
+                            await Task.Delay(150, deadline.Token);
+                            continue;
+                        }
                         return new(ChromeTabCode.COMPLETED, request.Action, targetId,
                             new(targetId, entry.GetProperty("title").GetString() ?? "",
                                 request.Url!, new Uri(request.Url!).GetLeftPart(UriPartial.Authority)));
+                    }
                     var owner = await cdp.Call("Browser.getWindowForTarget", new {targetId});
                     var firstOwner = await cdp.Call("Browser.getWindowForTarget", new
                         {targetId = tabs[0].Id});
@@ -263,7 +291,9 @@ internal static partial class WindowChromeCdp
             ObserveCdpFailure(e);
             return new(dispatched ? ChromeTabCode.EFFECT_UNKNOWN : ChromeTabCode.CDP_UNAVAILABLE,
                 request.Action, targetId.Length == 0 ? null : targetId,
-                Detail: e is OperationCanceledException ? "CDP_TIMEOUT" : e.GetType().Name);
+                Detail: stage + ":" + (e is OperationCanceledException ? "CDP_TIMEOUT" :
+                    e is InvalidOperationException && e.Message.StartsWith("CDP_",
+                        StringComparison.Ordinal) ? e.Message : e.GetType().Name));
         }
     }
 }
