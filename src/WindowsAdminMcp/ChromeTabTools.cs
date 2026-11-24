@@ -9,14 +9,16 @@ using ModelContextProtocol.Server;
 public sealed class ChromeTabTools
 {
     [McpServerTool(Name = "windows.chrome_tab", UseStructuredContent = true),
-     Description("Manage an exact consented Chrome tab through the existing single CDP broker: LIST, OPEN, NAVIGATE, BACK, FORWARD, RELOAD, CLOSE. No UIA/OS mouse or keyboard input. Supply window_id and expected_profile; use a fresh tab_id from LIST for targeted actions. All mutating actions require confirm=true. VERIFIED means postcondition readback; EFFECT_UNKNOWN forbids replay. OPEN is restricted to one Chrome window and defaults to background=true.")]
+     Description("Manage Chrome tabs using one consented CDP broker: LIST, OPEN, NAVIGATE, BACK, FORWARD, RELOAD, CLOSE. Default scope=WINDOW matches the verified native HWND/profile. If windows overlap and cannot be mapped, scope=BROWSER lists every tab of the consented browser with an exact browser_window_id; subsequent targeted actions may use that ID and a fresh tab_id without HWND geometry. BROWSER scope is explicitly browser-wide, including other profiles; it never silently claims native-window identity. In BROWSER scope OPEN creates a background tab in Chrome's chosen window and returns its actual browser_window_id; exact-window actions use the IDs from LIST. No OS mouse/keyboard input. All effects need confirm=true and postcondition readback; never retry EFFECT_UNKNOWN.")]
     public static async Task<ChromeTabResult> ChromeTab(string window_id, string expected_profile,
         ChromeTabAction action, string? tab_id = null, string? url = null,
         bool background = true, bool confirm = true,
+        ChromeTabScope scope = ChromeTabScope.WINDOW, int? browser_window_id = null,
+        int offset = 0, int page_size = 100,
         CancellationToken cancellationToken = default)
     {
         var request = new ChromeTabRequest(window_id, expected_profile, action,
-            tab_id, url, background);
+            tab_id, url, background, scope, browser_window_id, offset, page_size);
         if (!WindowChromeCdp.ValidTabRequest(request))
             return new(ChromeTabCode.INVALID_ARGUMENT, action);
         if (!confirm && action != ChromeTabAction.LIST)
@@ -57,7 +59,8 @@ public sealed class ChromeTabTools
             {
                 component = "WindowsAdminMCP.chrome_tab", audit_id = id, phase,
                 window_hash = windowHash, action = request.Action.ToString(),
-                tab_id = request.TabId, result = result?.Status.ToString(),
+                tab_id = request.TabId, browser_window_id = request.BrowserWindowId,
+                scope = request.Scope.ToString(), result = result?.Status.ToString(),
                 effect_state = result?.EffectState.ToString(),
                 safe_to_retry = result?.SafeToRetry, utc = DateTimeOffset.UtcNow
             }, PipeWire.Json);

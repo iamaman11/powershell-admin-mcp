@@ -11,8 +11,6 @@ using System.Windows.Automation;
 // effect guards live here; the CDP socket belongs to the worker transport.
 internal static partial class WindowChromeCdp
 {
-    private const int BoundsTolerance = 40;
-
     internal static bool TryReadEndpoint(string? contents, out Uri? endpoint)
     {
         endpoint = null;
@@ -27,21 +25,6 @@ internal static partial class WindowChromeCdp
             return false;
         endpoint = new Uri($"ws://127.0.0.1:{port}{lines[1]}");
         return true;
-    }
-
-    internal static bool MatchesWindow(string nativeTitle, string targetTitle,
-        WindowBounds native, WindowBounds chrome, double dpiScale)
-    {
-        const string suffix = " - Google Chrome";
-        int marker = nativeTitle.LastIndexOf(suffix, StringComparison.Ordinal);
-        if (marker <= 0 || !string.Equals(nativeTitle[..marker], targetTitle, StringComparison.Ordinal) ||
-            chrome.Width <= 0 || chrome.Height <= 0 || native.Width <= 0 || native.Height <= 0)
-            return false;
-        static bool Close(int a, double b) => Math.Abs(a - b) <= BoundsTolerance;
-        bool MatchesAt(double scale) =>
-            Close(native.X, chrome.X * scale) && Close(native.Y, chrome.Y * scale) &&
-            Close(native.Width, chrome.Width * scale) && Close(native.Height, chrome.Height * scale);
-        return MatchesAt(1) || dpiScale is >= 1 and <= 4 && MatchesAt(dpiScale);
     }
 
     internal static bool TryPoint(JsonElement content, JsonElement viewport, out double x, out double y)
@@ -87,7 +70,7 @@ internal static partial class WindowChromeCdp
             WindowActionKind.HOVER or WindowActionKind.SCROLL) ||
             request.Action==WindowActionKind.KEY_PRESS && request.VirtualKey is not null ||
             !TryWebRole(target, out string? role, out string? name) ||
-            !GetWindowRect(hwnd, out var rect)) return null;
+            !GetWindowRect(hwnd, out _)) return null;
         WindowCatalog.TryParseId(request.WindowId, out var identity);
         try
         {
@@ -116,8 +99,7 @@ internal static partial class WindowChromeCdp
                 ElapsedMs: clock.ElapsedMilliseconds);
         try
         {
-            var bounds = new WindowBounds(rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top);
-            return DispatchAsync(endpoint!, hwnd, target, bounds, name!, role!, request, clock)
+            return DispatchAsync(endpoint!, hwnd, target, name!, role!, request, clock)
                 .GetAwaiter().GetResult();
         }
         catch (Exception e) when (e is WebSocketException or IOException or JsonException or
@@ -165,7 +147,7 @@ internal static partial class WindowChromeCdp
     }
 
     private static async Task<WindowActionResult> DispatchAsync(Uri endpoint, IntPtr hwnd,
-        AutomationElement element, WindowBounds nativeBounds, string name, string? role,
+        AutomationElement element, string name, string? role,
         WindowActionRequest request, Stopwatch clock)
     {
         bool dispatched = false;
@@ -175,38 +157,21 @@ internal static partial class WindowChromeCdp
         try
         {
             var cdp = await TabSessionAsync(endpoint, deadline.Token);
-            var targets = await cdp.Call("Target.getTargets", new { });
             string title = GetTitle(hwnd);
             if (string.IsNullOrWhiteSpace(title))
                 return Rejected(WindowActionCode.CDP_TARGET_AMBIGUOUS);
-            var candidates = new List<(string TargetId, string Url, int WindowId)>();
-            foreach (var info in targets.GetProperty("targetInfos").EnumerateArray())
-            {
-                if (info.GetProperty("type").GetString() != "page" ||
-                    !info.TryGetProperty("url", out var url) ||
-                    !Uri.TryCreate(url.GetString(), UriKind.Absolute, out var address) ||
-                    address.Scheme is not ("https" or "http")) continue;
-                string? targetTitle = info.GetProperty("title").GetString();
-                if (targetTitle is null || !title.StartsWith(targetTitle + " - Google Chrome",
-                    StringComparison.Ordinal)) continue;
-                string targetId = info.GetProperty("targetId").GetString()!;
-                var window = await cdp.Call("Browser.getWindowForTarget", new { targetId });
-                int windowId = window.GetProperty("windowId").GetInt32();
-                var bound = await cdp.Call("Browser.getWindowBounds", new { windowId });
-                var b = bound.GetProperty("bounds");
-                if (!b.TryGetProperty("left", out var left) ||
-                    !b.TryGetProperty("top", out var top) ||
-                    !b.TryGetProperty("width", out var width) ||
-                    !b.TryGetProperty("height", out var height)) continue;
-                uint dpi = GetDpiForWindow(hwnd);
-                if (MatchesWindow(title, targetTitle,
-                    nativeBounds, new(left.GetInt32(), top.GetInt32(), width.GetInt32(), height.GetInt32()),
-                    dpi == 0 ? 1 : dpi / 96.0))
-                    candidates.Add((targetId, url.GetString()!, windowId));
-            }
-            if (candidates.Count != 1) return Rejected(WindowActionCode.CDP_TARGET_AMBIGUOUS);
+            // The tab tools and element actions must resolve the same native
+            // Chrome HWND through one broker. Do not independently guess an
+            // HWND from tab titles and browser bounds here.
+            var tabs = await TargetsForWindow(cdp, hwnd, request.WindowId, deadline.Token,
+                allowFallback: true);
+            var candidates = tabs.Where(t => title.StartsWith(t.Title + " - Google Chrome",
+                StringComparison.Ordinal)).Take(2).ToArray();
+            if (candidates.Length != 1) return Rejected(WindowActionCode.CDP_TARGET_AMBIGUOUS);
             var selected = candidates[0];
-            string sessionId = await Attach(cdp, selected.TargetId);
+            if (!MatchesContext(selected.Url, request.ExpectedOrigin, request.ExpectedUrl))
+                return Rejected(WindowActionCode.CDP_CONTEXT_MISMATCH, "TAB_URL_MISMATCH");
+            string sessionId = await Attach(cdp, selected.Id);
             string loaderId = await ReadFrameLoaderAsync(cdp, sessionId, deadline.Token);
             var document = await cdp.Call("DOM.getDocument", new { depth = 0 }, sessionId);
             int nodeId = document.GetProperty("root").GetProperty("nodeId").GetInt32();
@@ -264,7 +229,7 @@ internal static partial class WindowChromeCdp
                 if (pointerHitsTarget)
                 {
                     var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
-                        selected.TargetId, selected.Url, selected.WindowId, loaderId,
+                        selected.Id, selected.Url, selected.BrowserWindowId, loaderId,
                         deadline.Token);
                     if (checkpoint.Code is not null)
                         return Rejected(checkpoint.Code.Value, checkpoint.Detail);
@@ -278,7 +243,7 @@ internal static partial class WindowChromeCdp
                 if (!await EditableDomNode(cdp, sessionId, backendNodeId))
                     return Rejected(WindowActionCode.UNSUPPORTED_ACTION);
                 var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
-                    selected.TargetId, selected.Url, selected.WindowId, loaderId,
+                    selected.Id, selected.Url, selected.BrowserWindowId, loaderId,
                     deadline.Token);
                 if (checkpoint.Code is not null)
                     return Rejected(checkpoint.Code.Value, checkpoint.Detail);
@@ -298,7 +263,7 @@ internal static partial class WindowChromeCdp
                     _ => throw new InvalidOperationException("INVALID_KEY")
                 };
                 var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
-                    selected.TargetId, selected.Url, selected.WindowId, loaderId,
+                    selected.Id, selected.Url, selected.BrowserWindowId, loaderId,
                     deadline.Token);
                 if (checkpoint.Code is not null)
                     return Rejected(checkpoint.Code.Value, checkpoint.Detail);
@@ -318,6 +283,10 @@ internal static partial class WindowChromeCdp
                     request.ExpectedName is null
                     ? await ReadTextValue(cdp, sessionId, backendNodeId, request.Value!) : null,
                 ExecutionMethod: WindowExecutionMethod.CHROME_CDP);
+        }
+        catch (CdpWindowMappingException e)
+        {
+            return Rejected(WindowActionCode.CDP_TARGET_AMBIGUOUS, e.Message);
         }
         catch (Exception e) when (e is WebSocketException or IOException or JsonException or
                                    OperationCanceledException or InvalidOperationException or KeyNotFoundException)
@@ -350,8 +319,6 @@ internal static partial class WindowChromeCdp
     private static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetWindowTextW(IntPtr hwnd, StringBuilder text, int length);
-    [DllImport("user32.dll")]
-    private static extern uint GetDpiForWindow(IntPtr hwnd);
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 }

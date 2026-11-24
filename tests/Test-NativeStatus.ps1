@@ -115,8 +115,8 @@ try{
             $chromeTool[0].inputSchema.properties.Contains('managed_profile_id') -and
             @(@('status','state','next_action','profile','profiles')|Where-Object {-not $chromeTool[0].outputSchema.properties.Contains($_)}).Count -eq 0) 'chrome.typed_multi_profile_and_consent_lifecycle'
         Assert ($chromeTabs.Count -eq 1 -and
-            @(@('window_id','expected_profile','action','tab_id','url','background','confirm')|Where-Object {-not $chromeTabs[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
-            @(@('status','action','tabs','tab','effect_state','safe_to_retry','next_step')|Where-Object {-not $chromeTabs[0].outputSchema.properties.Contains($_)}).Count -eq 0) 'chrome.typed_native_tab_lifecycle_contract'
+            @(@('window_id','expected_profile','action','tab_id','url','background','confirm','scope','browser_window_id','offset','page_size')|Where-Object {-not $chromeTabs[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
+            @(@('status','action','tabs','tab','effect_state','safe_to_retry','next_step','next_offset','cdp_mapping_failure')|Where-Object {-not $chromeTabs[0].outputSchema.properties.Contains($_)}).Count -eq 0) 'chrome.typed_native_tab_lifecycle_contract'
         Assert ($inspectTool.Count -eq 1 -and $actionTool.Count -eq 1 -and
             @(@('window_id','max_depth','max_elements','start_path','start_element_id','offset','include_details','name_contains','role_filter','wait_ms','scope','tab_id','expected_profile','expected_origin','expected_url')|Where-Object {-not $inspectTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
             @(@('cdp_mapping_failure','cdp_title_candidates','cdp_fingerprint_candidates')|Where-Object {-not $inspectTool[0].outputSchema.properties.Contains($_)}).Count -eq 0 -and

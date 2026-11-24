@@ -1355,6 +1355,8 @@ var sampleTabId = "0123456789abcdef0123456789abcdef";
 var chromeTabRequest = new ChromeTabRequest(testWindowId, "Valer", ChromeTabAction.NAVIGATE,
     sampleTabId, "https://example.com/");
 var chromeTabWire = System.Text.Json.JsonSerializer.Serialize(chromeTabRequest, PipeWire.Json);
+var browserScopedTabRequest = chromeTabRequest with
+    { Scope = ChromeTabScope.BROWSER, BrowserWindowId = 12 };
 Check(WindowChromeCdp.ValidTabRequest(chromeTabRequest) &&
     WindowChromeCdp.ValidTabRequest(chromeTabRequest with { Action = ChromeTabAction.LIST,
         TabId = null, Url = null }) &&
@@ -1362,14 +1364,37 @@ Check(WindowChromeCdp.ValidTabRequest(chromeTabRequest) &&
     !WindowChromeCdp.ValidTabRequest(chromeTabRequest with { TabId = "bad" }) &&
     !WindowChromeCdp.ValidTabRequest(chromeTabRequest with { Action = ChromeTabAction.CLOSE,
         Url = "https://example.com/" }) &&
+    WindowChromeCdp.ValidTabRequest(browserScopedTabRequest) &&
+    WindowChromeCdp.ValidTabRequest(browserScopedTabRequest with
+        { Action = ChromeTabAction.LIST, TabId = null, Url = null, BrowserWindowId = null }) &&
+    WindowChromeCdp.ValidTabRequest(browserScopedTabRequest with
+        { Action = ChromeTabAction.OPEN, TabId = null, BrowserWindowId = null }) &&
+    !WindowChromeCdp.ValidTabRequest(browserScopedTabRequest with { BrowserWindowId = null }) &&
+    !WindowChromeCdp.ValidTabRequest(browserScopedTabRequest with { BrowserWindowId = -1 }) &&
+    !WindowChromeCdp.ValidTabRequest(browserScopedTabRequest with
+        { Action = ChromeTabAction.OPEN, TabId = null }) &&
+    !WindowChromeCdp.ValidTabRequest(chromeTabRequest with { BrowserWindowId = 12 }) &&
+    !WindowChromeCdp.ValidTabRequest(chromeTabRequest with
+        { Scope = ChromeTabScope.BROWSER, PageSize = 101 }) &&
+    WindowChromeCdp.ValidBrowserTargetUrl("about:blank") &&
+    WindowChromeCdp.ValidBrowserTargetUrl("chrome://newtab/") &&
+    !WindowChromeCdp.ValidBrowserTargetUrl("relative/path") &&
+    !WindowChromeCdp.ValidBrowserTargetUrl("https://example.com/\ncontrol") &&
     chromeTabWire.Contains("\"action\":\"NAVIGATE\"", StringComparison.Ordinal) &&
+    System.Text.Json.JsonSerializer.Serialize(browserScopedTabRequest, PipeWire.Json)
+        .Contains("\"browser_window_id\":12", StringComparison.Ordinal) &&
+    System.Text.Json.JsonSerializer.Serialize(new WindowTab(sampleTabId, "Test",
+        "https://example.com/", "https://example.com", 12), PipeWire.Json)
+        .Contains("\"browser_window_id\":12", StringComparison.Ordinal) &&
     new ChromeTabResult(ChromeTabCode.COMPLETED, ChromeTabAction.NAVIGATE).EffectState ==
         WindowEffectState.EFFECT_VERIFIED &&
     new ChromeTabResult(ChromeTabCode.COMPLETED, ChromeTabAction.LIST).EffectState ==
         WindowEffectState.NO_EFFECT &&
     !new ChromeTabResult(ChromeTabCode.EFFECT_UNKNOWN, ChromeTabAction.NAVIGATE).SafeToRetry &&
     new ChromeTabResult(ChromeTabCode.EFFECT_UNKNOWN, ChromeTabAction.NAVIGATE).NextStep ==
-        ChromeTabNextStep.INSPECT_STATE_DO_NOT_RETRY,
+        ChromeTabNextStep.INSPECT_STATE_DO_NOT_RETRY &&
+    new ChromeTabResult(ChromeTabCode.TARGET_AMBIGUOUS, ChromeTabAction.LIST).NextStep ==
+        ChromeTabNextStep.LIST_BROWSER_TABS,
     "chrome.typed_tab_lifecycle_requires_exact_target_url_and_never_retries_unknown_effect");
 var invalidTabCall = await ChromeTabTools.ChromeTab("bad", "Valer", ChromeTabAction.LIST);
 var unconfirmedTabCall = await ChromeTabTools.ChromeTab(testWindowId, "Valer",
@@ -1731,6 +1756,21 @@ Check(WindowChromeCdp.UniqueStrongTabFingerprintWindow(new[] { 12,13 },fallbackP
     WindowChromeCdp.UniqueStrongTabFingerprintWindow(new[] { 12,13 },fallbackPages,
         new[] { "Stale Active Title","Shared" }) is null,
     "chrome.cdp_missing_active_title_requires_multiple_exclusive_near_complete_tab_matches");
+var maximizedSameTitlePages = new (int WindowId, string Title)[]
+{
+    (12,"All workflows"),(12,"Profile Control Plane"),(12,"Unique Test Tab"),
+    (13,"All workflows"),(13,"Other Profile Tab")
+};
+Check(WindowChromeCdp.UniqueStrongTabFingerprintWindow(new[] { 12,13 },
+        maximizedSameTitlePages,
+        new[] { "All workflows", "Profile Control Plane", "Unique Test Tab" }) == 12 &&
+    WindowChromeCdp.UniqueStrongTabFingerprintWindow(new[] { 12,13 },
+        maximizedSameTitlePages,
+        new[] { "All workflows", "Profile Control Plane" }) is null &&
+    WindowChromeCdp.UniqueStrongTabFingerprintWindow(new[] { 12,13 },
+        maximizedSameTitlePages,
+        new[] { "All workflows", "Profile Control Plane", "Other Profile Tab" }) is null,
+    "chrome.maximized_windows_with_mismatched_bounds_require_two_exclusive_native_tab_titles");
 string mappingWire=System.Text.Json.JsonSerializer.Serialize(new WindowInspectResult(
     WindowInspectCode.CDP_TARGET_NOT_FOUND,[],Detail:"CDP_WINDOW_NO_MATCH",
     CdpMappingFailure:WindowCdpMappingFailure.FINGERPRINT_AMBIGUOUS,
@@ -1741,6 +1781,16 @@ Check(mappingWire.Contains("\"cdp_mapping_failure\":\"FINGERPRINT_AMBIGUOUS\"",
     mappingWire.Contains("\"cdp_fingerprint_candidates\":9",StringComparison.Ordinal) &&
     !mappingWire.Contains("targetIds",StringComparison.OrdinalIgnoreCase),
     "chrome.cdp_window_mapping_failure_typed_bounded_metadata_without_target_leak");
+string tabMappingWire=System.Text.Json.JsonSerializer.Serialize(new ChromeTabResult(
+    ChromeTabCode.TARGET_NOT_FOUND, ChromeTabAction.LIST,
+    Detail:"CDP_WINDOW_NO_MATCH", CdpMappingFailure:WindowCdpMappingFailure.BOUNDS_MISMATCH,
+    CdpTitleCandidates:5, CdpFingerprintCandidates:26),PipeWire.Json);
+Check(tabMappingWire.Contains("\"cdp_mapping_failure\":\"BOUNDS_MISMATCH\"",
+        StringComparison.Ordinal) &&
+    tabMappingWire.Contains("\"cdp_title_candidates\":5",StringComparison.Ordinal) &&
+    tabMappingWire.Contains("\"cdp_fingerprint_candidates\":26",StringComparison.Ordinal) &&
+    !tabMappingWire.Contains("targetIds",StringComparison.OrdinalIgnoreCase),
+    "chrome.tab_management_mapping_failure_reports_typed_candidates_without_target_leak");
 Check(WindowPhysicalClick.CanUseNativeFallback(null) &&
     WindowPhysicalClick.CanUseNativeFallback(new(WindowActionCode.CDP_UNAVAILABLE,
         FailureStage: WindowFailureStage.CDP_CONNECT)) &&
@@ -1860,16 +1910,6 @@ Check(WindowPhysicalClick.ChromeChunkUnits("abc", 0) == 1 &&
     WindowPhysicalClick.ChromeChunkUnits(new string('a', 79) + "🚀z", 64) == 17 &&
     WindowPhysicalClick.ChromeChunkUnits(new string('a', 96), 64) == 16,
     "windows.chrome_unicode_pacing_preserves_surrogate_pairs_and_chunk_bound");
-Check(WindowChromeCdp.MatchesWindow("Profile Control Plane - Google Chrome (Valer)",
-        "Profile Control Plane", new WindowBounds(100, 80, 1200, 800),
-        new WindowBounds(80, 64, 960, 640), 1.25) &&
-    !WindowChromeCdp.MatchesWindow("Unrelated - Google Chrome (Valer)",
-        "Profile Control Plane", new WindowBounds(100, 80, 1200, 800),
-        new WindowBounds(80, 64, 960, 640), 1.25) &&
-    !WindowChromeCdp.MatchesWindow("Profile Control Plane - Google Chrome (Valer)",
-        "Profile Control Plane", new WindowBounds(900, 80, 1200, 800),
-        new WindowBounds(80, 64, 960, 640), 1.25),
-    "chrome.cdp_exact_window_title_and_bounds");
 using (var validInfo = System.Text.Json.JsonDocument.Parse(
     "{\"targetInfo\":{\"targetId\":\"0123456789abcdef\",\"type\":\"page\",\"url\":\"https://staging.example.test/form\"}}"))
 using (var navigatedInfo = System.Text.Json.JsonDocument.Parse(

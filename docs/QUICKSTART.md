@@ -220,12 +220,36 @@ The separate managed profile needs no native consent prompt on every connection.
 
 After connecting either mode, use `windows.chrome_tab`:
 
-1. `LIST` is read-only and returns each exact `tab_id` and URL.
-2. `OPEN` requires an HTTP(S) URL and one matching native Chrome window;
-   `background=true` is the default.
-3. `NAVIGATE`, `BACK`, `FORWARD`, `RELOAD` and `CLOSE` require that `tab_id`.
-4. Only independently observed outcomes return `effect_state=EFFECT_VERIFIED`.
-   `EFFECT_UNKNOWN` means read-only inspection, never an automatic replay.
+1. `scope=WINDOW` (default) restricts `LIST` and operations to the verified
+   native `window_id` and `expected_profile`. A mapping problem returns typed
+   `cdp_mapping_failure`, `cdp_title_candidates`,
+   `cdp_fingerprint_candidates` and `next_step=LIST_BROWSER_TABS`.
+2. If native Chrome windows overlap or have incomparable bounds, call
+   `action=LIST, scope=BROWSER` using the same consented connection. This lists
+   tabs in **all profiles of that CDP browser** with their exact `tab_id`,
+   `browser_window_id`, URL and `next_offset` for pagination. `BROWSER` is an
+   explicit browser-wide authority, **not** a claim that CDP identity matches
+   the originally selected native window. `browser_window_id` optionally
+   filters `LIST` to one CDP window.
+3. For `scope=BROWSER`, pass the exact `browser_window_id` and `tab_id` from
+   `LIST` to `NAVIGATE`, `BACK`, `FORWARD`, `RELOAD` or `CLOSE`. `scope=WINDOW`
+   accepts an exact `tab_id` without the CDP window ID.
+4. `OPEN` takes an HTTP(S) URL and defaults to `background=true`. The default
+   `WINDOW` mode requires one matching native Chrome window; explicit
+   `BROWSER` mode allows Chrome itself to select the destination and reports
+   the actual `browser_window_id` in the verified result. Use `LIST` if you
+   need to inspect that destination before further actions.
+5. Only independently observed outcomes return `effect_state=EFFECT_VERIFIED`.
+   `EFFECT_UNKNOWN` means inspect current state using a read-only `LIST`,
+   never automatically replay the effectful command. Transient readback
+   rejection after navigation retries the read-only observation, not the action.
+
+For example, if `scope=WINDOW, action=LIST` reports `TARGET_AMBIGUOUS`, do
+`scope=BROWSER, action=LIST, offset=0, page_size=100`; choose the exact tab
+and its `browser_window_id`, then call `scope=BROWSER, action=NAVIGATE,
+tab_id=<listed tab>, browser_window_id=<listed window>, url=https://example.com/,
+confirm=true`. The tool always validates the target's current CDP window
+before dispatch. `next_offset` means another read-only page is available.
 
 Internal Chrome pages, OS file pickers and privileged prompts may still require
 the existing native UIA/foreground consent policy rather than a CDP action.

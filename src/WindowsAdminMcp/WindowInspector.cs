@@ -38,7 +38,9 @@ public sealed record WindowTab(
     [property: JsonPropertyName("tab_id")] string TabId,
     [property: JsonPropertyName("title")] string Title,
     [property: JsonPropertyName("url")] string Url,
-    [property: JsonPropertyName("origin")] string Origin);
+    [property: JsonPropertyName("origin")] string Origin,
+    [property: JsonPropertyName("browser_window_id"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        int? BrowserWindowId = null);
 
 public sealed record WindowElement(
     [property: JsonPropertyName("path")] string Path,
