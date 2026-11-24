@@ -46,7 +46,21 @@ function Get-BackupPlan([string]$root,[string]$expected){
     }|Sort-Object Name)
     if($candidates.Count -gt 512){throw 'BACKUP_COUNT_LIMIT'}
     $protected=@{}
-    if($rollbackCommit){$protected['.trial-backup-'+$rollbackCommit]=$true}
+    if($rollbackCommit){
+        # Keep two historical trial generations so the immediate rollback is
+        # not the only recovery point. Archive names identify the release
+        # being replaced; the manifest records its predecessor.
+        $firstTrialName='.trial-backup-'+$rollbackCommit
+        $protected[$firstTrialName]=$true
+        $firstTrial=Join-Path $root $firstTrialName
+        if(Test-Path -LiteralPath $firstTrial -PathType Container){
+            $firstManifest=Join-Path $firstTrial 'manifest.json'
+            if(Test-Path -LiteralPath $firstManifest -PathType Leaf){
+                $olderCommit=Read-BackupCommit $firstTrial
+                $protected['.trial-backup-'+$olderCommit]=$true
+            }
+        }
+    }
     $accepted=@($candidates|Where-Object Name -CLike '.accepted-backup-*'|
         Sort-Object LastWriteTimeUtc -Descending)
     if($accepted.Count -gt 0){$protected[$accepted[0].Name]=$true}
