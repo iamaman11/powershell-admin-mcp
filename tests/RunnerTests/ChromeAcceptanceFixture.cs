@@ -221,15 +221,28 @@ internal static class ChromeAcceptanceFixture
                 throw new InvalidOperationException($"CI_CDP_READ_ONLY_PREFLIGHT " +
                     $"status={preflight?.Status} detail={preflight?.Detail}");
 
+            int rejectedBeforeDispatch = 0;
             for (int iteration = 0; iteration < Cycles; iteration++)
             {
+                for (int planningAttempt = 0; ; planningAttempt++)
+                {
                 RefreshOwnedProfile();
                 var status = (await ExchangeAsync(Connection(ChromeConnectionAction.STATUS))).Connection;
                 if (status?.State != ChromeConnectionState.CONNECTED ||
                     status.SessionGeneration != generation)
+                {
+                    // A native toolbar label can change between our last
+                    // read and STATUS. This rejected operation had no effect.
+                    if (planningAttempt < 3 && status?.Status == ChromeConnectionCode.PROFILE_MISMATCH &&
+                        status.Detail?.StartsWith("PROFILE_", StringComparison.Ordinal) == true)
+                    {
+                        rejectedBeforeDispatch++;
+                        continue;
+                    }
                     throw new InvalidOperationException($"CI_CDP_STATUS_LOST cycle={iteration} " +
                         $"code={status?.Status} state={status?.State} detail={status?.Detail} " +
                         $"failure={status?.FailureReason} {ProfileEvidence()}");
+                }
 
                 bool setText = iteration % 2 == 0;
                 string label = setText ? "CI_CDP_VALUE" : "CI_CDP_BUTTON";
@@ -242,9 +255,17 @@ internal static class ChromeAcceptanceFixture
                 if (inspect?.Status != WindowInspectCode.COMPLETED || targets.Length != 1 ||
                     inspect.SessionGeneration != generation || inspect.Tabs?.Length != 1 ||
                     inspect.Tabs[0].Url != url)
+                {
+                    if (planningAttempt < 3 && inspect?.Status == WindowInspectCode.CDP_CONTEXT_MISMATCH &&
+                        inspect.Detail?.StartsWith("PROFILE_", StringComparison.Ordinal) == true)
+                    {
+                        rejectedBeforeDispatch++;
+                        continue;
+                    }
                     throw new InvalidOperationException($"CI_CDP_INSPECT cycle={iteration} " +
                         $"status={inspect?.Status} detail={inspect?.Detail} count={inspect?.Elements.Length} " +
                         $"candidates={targets.Length} {ProfileEvidence()}");
+                }
 
                 string value = $"CI_CDP_CYCLE_{iteration:D3}";
                 var action = (await ExchangeAsync(new(Action: new WindowActionRequest(
@@ -256,9 +277,23 @@ internal static class ChromeAcceptanceFixture
                     action.SessionGeneration != generation ||
                     action.ExecutionMethod != WindowExecutionMethod.CHROME_CDP ||
                     setText && action.ExpectedStateObserved != true)
+                {
+                    // A *proven* NOT_DISPATCHED profile rejection is the only
+                    // effectful-call response that permits new planning here.
+                    // Re-resolve the element; never replay an unknown effect.
+                    if (planningAttempt < 3 && action?.Status == WindowActionCode.CDP_CONTEXT_MISMATCH &&
+                        action.Detail?.StartsWith("PROFILE_", StringComparison.Ordinal) == true &&
+                        action.EffectState == WindowEffectState.NO_EFFECT &&
+                        action.ProviderOutcome == WindowProviderOutcome.NOT_DISPATCHED &&
+                        action.FailureStage == WindowFailureStage.CDP_TARGET)
+                    {
+                        rejectedBeforeDispatch++;
+                        continue;
+                    }
                     throw new InvalidOperationException($"CI_CDP_ACTION cycle={iteration} " +
                         $"status={action?.Status} detail={action?.Detail} unknown={action?.EffectUnknown} " +
                         ProfileEvidence());
+                }
 
                 int expectedClicks = (iteration + 1) / 2;
                 bool observed = await UntilAsync(() => setText
@@ -267,12 +302,15 @@ internal static class ChromeAcceptanceFixture
                 if (!observed)
                     throw new InvalidOperationException($"CI_CDP_EFFECT cycle={iteration} " +
                         $"clicks={state.Clicks} text={state.LastText}");
+                break;
+                }
             }
 
             if (state.Clicks != Cycles / 2 || state.Inputs < Cycles / 2)
                 throw new InvalidOperationException("CI_CDP_FINAL_EFFECT_COUNT_MISMATCH");
             Console.WriteLine($"PASS chrome_ci.100_status_inspect_action_verify_cycles " +
-                $"clicks={state.Clicks} inputs={state.Inputs} owner={self.Id} generation={generation}");
+                $"clicks={state.Clicks} inputs={state.Inputs} owner={self.Id} generation={generation} " +
+                $"no_effect_profile_rejections={rejectedBeforeDispatch}");
 
             int expected = state.Clicks;
             foreach (int concurrency in new[] { 2, 4, 8 })
