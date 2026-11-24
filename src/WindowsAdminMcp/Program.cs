@@ -187,7 +187,8 @@ else if (args is ["stdio"])
     {
         options.ServerInfo = new() { Name = "windows-admin-mcp", Version = BuildIdentity.McpVersion };
     }).WithStdioServerTransport().WithTools<AdminTools>().WithTools<WindowTools>()
-      .WithTools<ChromeConnectionTools>().WithTools<UpdateTools>().WithTools<FileTools>()
+      .WithTools<ChromeConnectionTools>().WithTools<ChromeTabTools>()
+      .WithTools<UpdateTools>().WithTools<FileTools>()
       .WithTools<SystemTools>().WithTools<TcpConnectionTools>()
       .WithTools<ExpertDiagnosticsTools>().WithTools<NetworkProbeTools>()
       .WithTools<NativeAdminTools>();

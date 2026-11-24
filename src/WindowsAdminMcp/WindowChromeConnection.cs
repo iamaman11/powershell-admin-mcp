@@ -35,6 +35,8 @@ internal static partial class WindowChromeCdp
     internal static string? CurrentGeneration => _sessionGeneration;
     private static ChromeConnectionFailureReason? _lastFailure;
     private static ChromeConnectionFailureReason? _lastLossReason;
+    private static ChromeConnectionMode _sourceMode = ChromeConnectionMode.USER_BROWSER;
+    private static string? _managedProfileId;
 
     internal static ChromeConnectionState MissingConnectionState(bool hadConnection) =>
         hadConnection ? ChromeConnectionState.CONNECTION_LOST : ChromeConnectionState.NOT_REQUESTED;
@@ -217,7 +219,9 @@ internal static partial class WindowChromeCdp
             if (!retry) return failure;
         }
         if (!request) return MissingConnectionState(_hadConnection);
-        if (!PrepareConsentWindow(consentWindow, activateWindowForConsent, out var activationFailure))
+        ChromeConnectionFailureReason activationFailure = ChromeConnectionFailureReason.FOREGROUND_DENIED;
+        if (_sourceMode == ChromeConnectionMode.USER_BROWSER &&
+            !PrepareConsentWindow(consentWindow, activateWindowForConsent, out activationFailure))
         {
             _lastFailure = activationFailure;
             return ChromeConnectionState.CONSENT_WINDOW_UNAVAILABLE;
@@ -252,6 +256,26 @@ internal static partial class WindowChromeCdp
                 Detail: $"PROFILE_{(profile is null ? profileRead :
                     ChromeProfileCatalog.ChromeProfileReadCode.PROFILE_MISMATCH)}");
 
+        if (!Enum.IsDefined(request.Mode) || request.Mode == ChromeConnectionMode.MANAGED_BROWSER &&
+            !ChromeManagedProfile.ValidId(request.ManagedProfileId) ||
+            request.Mode == ChromeConnectionMode.USER_BROWSER && request.ManagedProfileId is not null)
+            return new(ChromeConnectionCode.INVALID_ARGUMENT, ChromeConnectionState.NOT_REQUESTED);
+        if (request.Action == ChromeConnectionAction.REQUEST)
+        {
+            if (TabConnected && (_sourceMode != request.Mode ||
+                _managedProfileId != request.ManagedProfileId))
+                return new(ChromeConnectionCode.PROFILE_MISMATCH, ChromeConnectionState.CONNECTED,
+                    ChromeConnectionNextAction.SELECT_PROFILE,
+                    Detail: "DISCONNECT_BEFORE_SWITCHING_BROWSER_MODE");
+            _sourceMode = request.Mode;
+            _managedProfileId = request.ManagedProfileId;
+        }
+        else if (_sourceMode != request.Mode || _managedProfileId != request.ManagedProfileId)
+            return new(ChromeConnectionCode.OK, ChromeConnectionState.NOT_REQUESTED,
+                ChromeConnectionNextAction.RETRY_CONNECTION, profile,
+                Detail: "BROWSER_MODE_NOT_SELECTED", Mode: request.Mode,
+                ManagedProfileId: request.ManagedProfileId);
+
         if (request.Action == ChromeConnectionAction.STATUS)
         {
             ProbeTabConnection();
@@ -268,17 +292,27 @@ internal static partial class WindowChromeCdp
         }
         if (!TryEndpoint(out var endpoint, out string failure))
             return new(ChromeConnectionCode.OK, ChromeConnectionState.DEBUGGING_UNAVAILABLE,
-                ChromeConnectionNextAction.ENABLE_CHROME_DEBUGGING, profile, Detail: failure);
+                request.Mode == ChromeConnectionMode.MANAGED_BROWSER
+                    ? ChromeConnectionNextAction.START_MANAGED_BROWSER
+                    : ChromeConnectionNextAction.ENABLE_CHROME_DEBUGGING,
+                profile, Detail: failure, Mode: request.Mode,
+                ManagedProfileId: request.ManagedProfileId);
         if (WindowCatalog.ResolveId(request.WindowId, self.SessionId, out var hwnd) != WindowResolveCode.OK)
             return new(ChromeConnectionCode.STALE_WINDOW, ChromeConnectionState.NOT_REQUESTED);
         var state = ConnectionState(endpoint!, request.Action == ChromeConnectionAction.REQUEST,
             hwnd, retry: request.Action == ChromeConnectionAction.REQUEST,
             activateWindowForConsent: request.ActivateWindowForConsent);
-        var next = ConnectionNextAction(state, _lastFailure);
-        return new(ChromeConnectionCode.OK, state, next, profile,
-            FailureReason: state == ChromeConnectionState.CONNECTED ? null : _lastFailure,
+        var reportedState = request.Mode == ChromeConnectionMode.MANAGED_BROWSER &&
+            state == ChromeConnectionState.CONSENT_PENDING ? ChromeConnectionState.CONNECTING : state;
+        var next = request.Mode == ChromeConnectionMode.MANAGED_BROWSER &&
+            reportedState == ChromeConnectionState.CONNECTING
+                ? ChromeConnectionNextAction.WAIT_FOR_CONNECTION
+                : ConnectionNextAction(reportedState, _lastFailure);
+        return new(ChromeConnectionCode.OK, reportedState, next, profile,
+            FailureReason: reportedState == ChromeConnectionState.CONNECTED ? null : _lastFailure,
             LastLossReason: _lastLossReason,
-            SessionGeneration: state == ChromeConnectionState.CONNECTED ? _sessionGeneration : null);
+            SessionGeneration: reportedState == ChromeConnectionState.CONNECTED ? _sessionGeneration : null,
+            Mode: request.Mode, ManagedProfileId: request.ManagedProfileId);
     }
 
     internal static bool ValidTargetId(string? id) => id is { Length: >= 16 and <= 64 } &&
@@ -471,8 +505,11 @@ internal static partial class WindowChromeCdp
         if (string.IsNullOrWhiteSpace(data)) return false;
         try
         {
-            if (!TryReadEndpoint(File.ReadAllText(Path.Combine(data, "Google", "Chrome",
-                "User Data", "DevToolsActivePort")), out endpoint))
+            string profileRoot = _sourceMode == ChromeConnectionMode.USER_BROWSER
+                ? Path.Combine(data, "Google", "Chrome", "User Data")
+                : ChromeManagedProfile.DataDirectory(_managedProfileId) ?? "";
+            if (!TryReadEndpoint(File.ReadAllText(Path.Combine(profileRoot,
+                "DevToolsActivePort")), out endpoint))
             {
                 failure = "CHROME_DEBUG_ENDPOINT_INVALID";
                 return false;
