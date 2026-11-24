@@ -29,10 +29,10 @@ All 17 methods are present in the source tool catalog. Unless specified,
 | `powershell_update` | **PASS** read-only STATUS returned the exact pending trial and rollback | New verified install, acceptance and physical rollback **NOT_TESTED**; do not start while trial pending |
 | `powershell_job` | **PASS** read-only LIST/STATUS identified both unknown-effect jobs | USER/SYSTEM submission, cancellation, interrupted-job recovery and multi-client fairness **NOT_TESTED** in this trial |
 | `powershell_exec` | **PASS** bounded read-only `Get-Date` and temp-root query under USER | Timeout/lost-response, SYSTEM effect, cancellation and no-replay physical tests **NOT_TESTED** |
-| `powershell_screenshot` | **NOT_TESTED** image acquisition on this desktop | Privacy-safe isolated visual capture still required |
+| `powershell_screenshot` | **PASS** actual one-pixel PNG capture, without revealing desktop content | Full-frame capture and multi-monitor/error cases **NOT_TESTED** |
 | `windows.list_windows` | **PASS** bounded native USER window enumeration without activation | Multi-session and stale identity matrix **NOT_TESTED** |
 | `windows.inspect_window` | **PASS** bounded real UIA inspection of a native utility window | Chrome per-tab targeting, stale tab and ambiguous profile matrix **NOT_TESTED** |
-| `windows.capture_window` | **PASS** invalid ID rejected without capture | Successful capture/occluded window test **NOT_TESTED** in this trial |
+| `windows.capture_window` | **PASS** typed invalid-ID rejection and `WINDOW_MINIMIZED` from a real utility window | Successful capture/occluded window test **NOT_TESTED** in this trial |
 | `windows.manage_window` | **PASS** invalid ID rejected before effect | MOVE/RESIZE/CLOSE native readback **NOT_TESTED** on this desktop |
 | `windows.invoke_element` | **PASS** invalid ID rejected before effect; #89 CI verified disabled/stale UIA safety | Live enabled UIA/CDP effects on installed package **NOT_TESTED** |
 | `windows.invoke_locator` | **PASS** invalid locator window rejected; #88 CI exercised single-owner CDP | Independent live multi-client action routing **NOT_TESTED** |
