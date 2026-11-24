@@ -17,14 +17,16 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   windows:
-    # Full PR acceptance is not repeated after merge. Main still builds an
-    # exact-commit package and checks a real offline install and rollback.
+    # PR: runner contract + live service + offline package smoke.
+    # Exact main: full offline install/recovery/rollback once, after merge.
+    # This keeps the expensive physical upgrade matrix off every PR without
+    # skipping it or compiling the exact-main application a second time.
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: windows-2025
     timeout-minutes: 18
     steps:
       - uses: actions/checkout@v7
-      - name: Require full acceptance for unreviewed direct main pushes
+      - name: Require full runner checks for unreviewed direct main pushes
         id: provenance
         if: github.event_name == 'push'
         shell: pwsh
@@ -32,8 +34,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference='Stop'
-          # Fail closed: uncertainty about the PR/CI association means full
-          # tests, never shortened main acceptance. No extra publish.
+          # This gate controls runner/service-depth tests only. Exact-main
+          # package installation and rollback are always exercised below.
+          # Uncertain PR provenance must not skip the runner tests.
           $full=$true
           try {
             $prs=@(gh api "repos/$env:GITHUB_REPOSITORY/commits/$env:GITHUB_SHA/pulls" | ConvertFrom-Json)
@@ -59,7 +62,7 @@ jobs:
             }
           }catch{Write-Warning 'PR acceptance could not be proved; running full main tests'}
           "full=$($full.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
-          Write-Host "MAIN_PUSH_FULL_ACCEPTANCE=$full"
+          Write-Host "MAIN_PUSH_FULL_RUNNER=$full"
       - name: Parse PowerShell sources before expensive tests
         shell: pwsh
         run: |
@@ -90,14 +93,16 @@ jobs:
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('global.json', 'Directory.Build.props', 'Directory.Packages.props', '**/*.csproj', '**/packages.lock.json') }}
-      - name: Restore all project graphs with committed lock files
+      - name: Restore only project graphs used by this run
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
           $projects=@('tests/RunnerTests/RunnerTests.csproj',
-                      'src/WindowsAdminMcp/WindowsAdminMcp.csproj',
-                      'research/R0SdkProbe/R0SdkProbe.csproj',
-                      'research/R0NativeProbe/R0NativeProbe.csproj')
+                      'src/WindowsAdminMcp/WindowsAdminMcp.csproj')
+          if($env:GITHUB_EVENT_NAME -in @('schedule','workflow_dispatch')){
+            $projects+=@('research/R0SdkProbe/R0SdkProbe.csproj',
+                         'research/R0NativeProbe/R0NativeProbe.csproj')
+          }
           foreach($project in $projects){
             $root=Split-Path -Parent $project
             $lock=Join-Path $root 'packages.lock.json'
@@ -156,7 +161,7 @@ jobs:
           $package=Join-Path "${{ runner.temp }}" 'WindowsAdminMCP-win-x64.zip'
           $receipt=./installer/New-NativePackage.ps1 -PublishDirectory "${{ runner.temp }}/WindowsAdminMcpCandidate" -Output $package -Commit $env:GITHUB_SHA | ConvertFrom-Json
           Write-Host ("NATIVE_PACKAGE_SHA256="+$receipt.sha256)
-          if($env:GITHUB_EVENT_NAME -eq 'push' -and '${{ steps.provenance.outputs.full }}' -ne 'true'){
+          if($env:GITHUB_EVENT_NAME -eq 'pull_request'){
             ./tests/Test-NativePackage.ps1 -Package $package -Sha256 $receipt.sha256 -SmokeOnly
           }else{
             ./tests/Test-NativePackage.ps1 -Package $package -Sha256 $receipt.sha256

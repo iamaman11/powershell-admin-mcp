@@ -89,10 +89,33 @@ internal static class ChromeAcceptanceFixture
                 Blocked("CI_CHROME_DEBUG_ENDPOINT_UNAVAILABLE");
                 return;
             }
-            // Validate actual loopback endpoint syntax before presenting it to
-            // the unmodified real worker. Never overwrite an existing file.
-            string text = await File.ReadAllTextAsync(ownedEndpoint);
-            if (!WindowChromeCdp.TryReadEndpoint(text, out var endpoint) || File.Exists(endpointFile))
+            // Chrome creates this file before its final write is necessarily
+            // visible or its writer handle is released. The existence check
+            // above proves only that startup began, not that it finished.
+            // Retry *only* this read of our own disposable CI profile; a
+            // partial/locked endpoint must never be passed to the broker.
+            string? text = null;
+            Uri? endpoint = null;
+            bool endpointReady = await UntilAsync(() =>
+            {
+                try
+                {
+                    using var stream = new FileStream(ownedEndpoint, FileMode.Open,
+                        FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    if (stream.Length is < 1 or > 256) return false;
+                    using var reader = new StreamReader(stream, Encoding.UTF8);
+                    string candidate = reader.ReadToEnd();
+                    if (!WindowChromeCdp.TryReadEndpoint(candidate, out var parsed))
+                        return false;
+                    text = candidate;
+                    endpoint = parsed;
+                    return true;
+                }
+                catch (IOException) { return false; } // Chrome still owns the file.
+            }, TimeSpan.FromSeconds(10));
+            if (!endpointReady)
+                throw new InvalidOperationException("CI_CHROME_OWNED_ENDPOINT_READ_TIMEOUT");
+            if (File.Exists(endpointFile))
             {
                 Blocked("CI_CHROME_ENDPOINT_NOT_EXCLUSIVE");
                 return;
@@ -101,7 +124,7 @@ internal static class ChromeAcceptanceFixture
             using (var target = new FileStream(endpointFile, FileMode.CreateNew, FileAccess.Write,
                 FileShare.Read))
             {
-                byte[] bytes = Encoding.UTF8.GetBytes(text);
+                byte[] bytes = Encoding.UTF8.GetBytes(text!);
                 await target.WriteAsync(bytes);
                 endpointCreated = true;
             }
