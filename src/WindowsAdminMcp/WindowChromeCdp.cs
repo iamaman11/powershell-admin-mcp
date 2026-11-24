@@ -211,7 +211,7 @@ internal static partial class WindowChromeCdp
             if (candidates.Count != 1) return Rejected(WindowActionCode.CDP_TARGET_AMBIGUOUS);
             var selected = candidates[0];
             string sessionId = await Attach(cdp, selected.TargetId);
-            string loaderId = await Loader(cdp, sessionId);
+            string loaderId = await ReadFrameLoaderAsync(cdp, sessionId, deadline.Token);
             var document = await cdp.Call("DOM.getDocument", new { depth = 0 }, sessionId);
             int nodeId = document.GetProperty("root").GetProperty("nodeId").GetInt32();
             var matches = role is null
@@ -268,7 +268,8 @@ internal static partial class WindowChromeCdp
                 if (pointerHitsTarget)
                 {
                     var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
-                        selected.TargetId, selected.Url, selected.WindowId, loaderId);
+                        selected.TargetId, selected.Url, selected.WindowId, loaderId,
+                        deadline.Token);
                     if (checkpoint.Code is not null)
                         return Rejected(checkpoint.Code.Value, checkpoint.Detail);
                     dispatched = true;
@@ -281,7 +282,8 @@ internal static partial class WindowChromeCdp
                 if (!await EditableDomNode(cdp, sessionId, backendNodeId))
                     return Rejected(WindowActionCode.UNSUPPORTED_ACTION);
                 var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
-                    selected.TargetId, selected.Url, selected.WindowId, loaderId);
+                    selected.TargetId, selected.Url, selected.WindowId, loaderId,
+                    deadline.Token);
                 if (checkpoint.Code is not null)
                     return Rejected(checkpoint.Code.Value, checkpoint.Detail);
                 // Focus may itself fire a page event, so it is not a safe
@@ -300,7 +302,8 @@ internal static partial class WindowChromeCdp
                     _ => throw new InvalidOperationException("INVALID_KEY")
                 };
                 var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
-                    selected.TargetId, selected.Url, selected.WindowId, loaderId);
+                    selected.TargetId, selected.Url, selected.WindowId, loaderId,
+                    deadline.Token);
                 if (checkpoint.Code is not null)
                     return Rejected(checkpoint.Code.Value, checkpoint.Detail);
                 dispatched = true;

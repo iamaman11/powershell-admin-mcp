@@ -90,3 +90,51 @@ fully accepted merely because one browser timeout was isolated. In particular:
    evidence. Do not silently replay them or mistake them for code regressions.
 4. Do not invoke updater `ACCEPT` until the exact installed commit has passed
    the agreed live acceptance and the rollback decision is explicit.
+
+## Recovery matrix for the unified completion slice
+
+The new isolated [lost-acknowledgement fixture](../tests/Test-LostAcknowledgement.ps1)
+is scheduled after the existing real-service acceptance suite on full Windows
+CI runs. Its expected assertions are listed here as **planned**, not as
+observed passes until that specific SHA's CI finishes successfully. The
+fixture runs on a clean disposable GitHub Windows runner only; it must never
+be used against a user's installed service or historical jobs.
+
+| Failure / recovery boundary | Executable evidence | Remaining limitation |
+| --- | --- | --- |
+| Frontend disconnect while an operation runs | Existing `Test-NativeStatus.ps1` three-client fixture kills one frontend and checks independent completion | No remote vendor network partition yet |
+| Reply lost after durable job admission | New `Test-LostAcknowledgement.ps1` waits until a second client independently sees the admitted key, kills the first frontend *without reading its reply*, resubmits the identical key, checks single append + conflicting payload refusal, and repeats after SCM restart | Initial CI execution pending; local transport loss is not an Internet outage |
+| Process/service crash with unknown effect | Existing `Test-NativeStatus.ps1` kills the real SCM worker after a physical append, verifies `NEEDS_RECONCILIATION`, and denies same-key replay/resume | Does not identify or resolve two historical USER jobs |
+| Reboot-gated plan | Existing `Test-NativeStatus.ps1` commits a checkpoint, restarts SCM, proves `SAME_BOOT` cannot release the next step; `RunnerTests` tests full-boot event classification | Genuine *new* kernel boot is **NOT_TESTED** |
+| Two interactive Windows users | Native service authorizes local pipe tokens and durable USER jobs are SID/logon-scoped in code | Real distinct-token, simultaneous-session refusal and ownership transition are **NOT_TESTED** |
+| Exact installed rollback and recovery | Offline package fixtures test file swap, crash window, SCM policies, durable results, incompatible schema downgrade refusal | Physical rollback and post-reboot remote/desktop recovery on the user's installed computer are **NOT_TESTED** |
+
+### Safe outstanding physical acceptance
+
+Perform this on a separately provisioned, recoverable Windows test machine
+with an operator controlling the console. Before any physical reboot or
+connectivity disruption, record the exact installed commit, the rollback
+receipt, a fresh doctor report, actual Windows session/user IDs, kernel boot
+event IDs and a uniquely named test job/marker. Only isolated, newly created
+fixtures may be executed. The two historical USER
+`NEEDS_RECONCILIATION` entries must be left unchanged.
+
+1. Establish two real interactive Windows sessions with different SIDs. Verify
+   both can independently query their authorized data and that USER jobs and
+   window/browser session handles cannot cross session boundaries. Probe
+   negative cases; do not perform administrator actions on unrelated sessions.
+2. For a deliberately created reboot-gated SYSTEM plan, verify the first
+   checkpoint is durable, perform a real **full** reboot under the operator's
+   control, independently read the old and new kernel event records, and
+   verify the postcondition before allowing the next step. Hybrid shutdown,
+   cleared/rotated logs or unverifiable boot history must remain blocked.
+3. Drop and restore the *test machine's* remote tunnel while a disposable
+   idempotency-keyed job runs; compare the durable server receipt and an
+   independent marker after reconnect. Unknown-effect jobs must remain frozen.
+4. Verify the exact installed rollback path only after authorized maintenance
+   and captured recovery evidence. Recheck boot, startup, USER context, remote
+   routing and desktop session after the transition.
+
+Until these tests have observed outputs, the verdict remains **NO FULL GO**;
+neither a clean CI result nor successful local failover alone substitutes for
+physical reboot, distinct-user and remote recovery evidence.
