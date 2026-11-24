@@ -109,8 +109,10 @@ function Invoke-BackupCleanup([string]$root,[string]$expected,[string]$digest){
 }
 if($MyInvocation.InvocationName -eq '.'){return}
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
-if($identity.IsSystem -or -not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole(
-        [Security.Principal.WindowsBuiltInRole]::Administrator))){throw 'BACKUP_INTERACTIVE_ADMIN_REQUIRED'}
+$principal=[Security.Principal.WindowsPrincipal]::new($identity)
+if($identity.IsSystem -or -not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
+    throw 'BACKUP_INTERACTIVE_ADMIN_REQUIRED'
+}
 if($Action -eq 'Apply' -and -not $ExpectedPlanSha256){throw 'BACKUP_PLAN_REQUIRED'}
 if($Action -eq 'Plan' -and $ExpectedPlanSha256){throw 'BACKUP_UNEXPECTED_PLAN'}
 $root=Join-Path $env:ProgramFiles 'WindowsAdminMCP'
