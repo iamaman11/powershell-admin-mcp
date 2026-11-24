@@ -268,7 +268,8 @@ internal static partial class WindowChromeCdp
                 {
                     var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
                         selected.TargetId, selected.Url, selected.WindowId, loaderId);
-                    if (checkpoint is not null) return Rejected(checkpoint.Value);
+                    if (checkpoint.Code is not null)
+                        return Rejected(checkpoint.Code.Value, checkpoint.Detail);
                     dispatched = true;
                     await DispatchPointer(cdp, sessionId, request, x, y);
                 }
@@ -280,7 +281,8 @@ internal static partial class WindowChromeCdp
                     return Rejected(WindowActionCode.UNSUPPORTED_ACTION);
                 var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
                     selected.TargetId, selected.Url, selected.WindowId, loaderId);
-                if (checkpoint is not null) return Rejected(checkpoint.Value);
+                if (checkpoint.Code is not null)
+                    return Rejected(checkpoint.Code.Value, checkpoint.Detail);
                 // Focus may itself fire a page event, so it is not a safe
                 // pre-dispatch probe and must not be replayed on timeout.
                 dispatched = true;
@@ -298,7 +300,8 @@ internal static partial class WindowChromeCdp
                 };
                 var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
                     selected.TargetId, selected.Url, selected.WindowId, loaderId);
-                if (checkpoint is not null) return Rejected(checkpoint.Value);
+                if (checkpoint.Code is not null)
+                    return Rejected(checkpoint.Code.Value, checkpoint.Detail);
                 dispatched = true;
                 await cdp.Call("DOM.focus", new { backendNodeId }, sessionId);
                 await cdp.Call("Input.dispatchKeyEvent", new { type = "keyDown", key, code,
@@ -327,8 +330,9 @@ internal static partial class WindowChromeCdp
                 ExecutionMethod: dispatched ? WindowExecutionMethod.CHROME_CDP : null);
         }
 
-        WindowActionResult Rejected(WindowActionCode code) => new(code,
-            FailureStage: WindowFailureStage.CDP_TARGET, ElapsedMs: clock.ElapsedMilliseconds);
+        WindowActionResult Rejected(WindowActionCode code, string? detail = null) => new(code,
+            FailureStage: WindowFailureStage.CDP_TARGET, Detail: detail,
+            ElapsedMs: clock.ElapsedMilliseconds);
     }
 
     private sealed class Session(ClientWebSocket socket, CancellationToken cancellationToken)

@@ -4,6 +4,62 @@ using System.IO.Pipes;
 using System.Net;
 using System.Net.Sockets;
 
+if (args is ["window-cdp-worker", var cdpParent] &&
+    int.TryParse(cdpParent, out int cdpParentId) && cdpParentId > 0)
+{
+    // The production owner spawns its own executable. Give this CI-only
+    // frontend the identical worker entry point for genuine pipe tests.
+    await WindowChromeBroker.RunWorkerAsync(cdpParentId);
+    return;
+}
+
+if (args is ["--chrome-pipe-live-action", var liveWindow, var liveProfile, var liveUrl])
+{
+    using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+    ChromeBrokerRequest Status() => new(Connection: new(liveWindow, liveProfile,
+        ChromeConnectionAction.STATUS), TraceId: Guid.NewGuid().ToString("N"));
+    var statusRequest = Status();
+    var status = await ChromeBrokerPipe.ExchangeAsync(statusRequest, limit.Token);
+    var inspectRequest = new ChromeBrokerRequest(Inspect: new WindowInspectRequest(
+        liveWindow, 4, 20, null, null, 0, false, "CI_CDP_BUTTON",
+        WindowRoleFilter.BUTTON, 0, WindowInspectScope.TAB,
+        ExpectedProfile: liveProfile, ExpectedUrl: liveUrl),
+        TraceId: Guid.NewGuid().ToString("N"));
+    var inspect = await ChromeBrokerPipe.ExchangeAsync(inspectRequest, limit.Token);
+    var elements = inspect?.Inspect?.Elements.Where(e => e.ElementId.StartsWith("c1:",
+        StringComparison.Ordinal)).ToArray() ?? [];
+    ChromeBrokerReply? action = null;
+    ChromeBrokerRequest? actionRequest = null;
+    if (elements.Length == 1)
+    {
+        actionRequest = new(Action: new WindowActionRequest(liveWindow, elements[0].ElementId,
+            WindowActionKind.CLICK, null, ExpectedProfile: liveProfile, ExpectedUrl: liveUrl,
+            ObservationTimeoutMs: 1500), TraceId: Guid.NewGuid().ToString("N"));
+        action = await ChromeBrokerPipe.ExchangeAsync(actionRequest, limit.Token);
+    }
+    bool valid = status?.OwnerPid is > 0 &&
+        status.Connection?.State == ChromeConnectionState.CONNECTED &&
+        status.TraceId == statusRequest.TraceId &&
+        inspect?.OwnerPid == status.OwnerPid &&
+        inspect?.TraceId == inspectRequest.TraceId &&
+        inspect?.Inspect?.Status == WindowInspectCode.COMPLETED &&
+        inspect.Inspect.SessionGeneration == status.Connection.SessionGeneration &&
+        action?.OwnerPid == status.OwnerPid &&
+        action?.TraceId == actionRequest?.TraceId &&
+        action?.Action is { Status: WindowActionCode.COMPLETED, EffectUnknown: false,
+            ExecutionMethod: WindowExecutionMethod.CHROME_CDP } &&
+        action?.Action?.SessionGeneration == status?.Connection?.SessionGeneration;
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
+    {
+        owner_pid = status?.OwnerPid,
+        session_generation = status?.Connection?.SessionGeneration,
+        status = action?.Action?.Status.ToString(),
+        verified = valid
+    }, PipeWire.Json));
+    Environment.ExitCode = valid ? 0 : 1;
+    return;
+}
+
 if (args is ["--chrome-pipe-invalid-frame"])
 {
     // A separate elevated, same-executable frontend sends one oversized frame
@@ -50,6 +106,10 @@ static void Check(bool ok, string label)
     if (!ok) throw new InvalidOperationException("FAIL " + label);
     Console.WriteLine("PASS " + label);
 }
+
+// Exercise the owned, throwaway Chrome browser before the remaining native
+// window tests, so their accessibility activity cannot disturb its toolbar.
+await ChromeAcceptanceFixture.RunAsync();
 {
     Check(SystemSnapshot.Valid(SystemQueryKind.PROCESSES,Environment.ProcessId,null,50,0) &&
         SystemSnapshot.Valid(SystemQueryKind.SERVICES,null,"WindowsAdminMCP",20,0) &&
@@ -1086,6 +1146,16 @@ Check(WindowChromeCdp.ProfileLabelMatches("Valer", "Valer") &&
     !WindowChromeCdp.ProfileLabelMatches("Another Valer", "Valer") &&
     !WindowChromeCdp.ProfileLabelMatches("Valer test profile", "Valer"),
     "chrome.profile_delimiters_are_unambiguous");
+using (var self = Process.GetCurrentProcess())
+{
+    var absent = ChromeProfileCatalog.ReadWindowProfile("invalid_window", self.SessionId,
+        out var absence);
+    bool verified = WindowChromeCdp.VerifiedChromeProfile(IntPtr.Zero, "CI_PROFILE",
+        out var invalidWindow);
+    Check(absent is null && absence == ChromeProfileCatalog.ChromeProfileReadCode.STALE_WINDOW &&
+        !verified && invalidWindow == ChromeProfileCatalog.ChromeProfileReadCode.STALE_WINDOW,
+        "chrome.native_profile_probe_reports_typed_pre_dispatch_failure");
+}
 var plainAvatar = ChromeProfileCatalog.ParseAvatar("Valer");
 var emailAvatar = ChromeProfileCatalog.ParseAvatar("Васил (vasilinn9@gmail.com)");
 Check(plainAvatar is { Name: "Valer", Account: null } &&
@@ -3452,7 +3522,6 @@ Check(lateHeartbeat==1 && lateResult is {Status:ExecutionState.CANCELLED_UNKNOWN
 
 // An isolated, debugging-enabled Chrome profile on the Windows CI machine;
 // never attach to or manipulate a user's Chrome profile or desktop.
-await ChromeAcceptanceFixture.RunAsync();
 
 internal sealed class CancelOnFirstReadStream(byte[] bytes,CancellationTokenSource cancellation)
     :MemoryStream(bytes,false)

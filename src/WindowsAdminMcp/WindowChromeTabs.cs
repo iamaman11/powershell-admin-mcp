@@ -245,10 +245,13 @@ internal static partial class WindowChromeCdp
     internal static ChromeConnectionResult ConnectInWorker(ChromeConnectionRequest request)
     {
         using var self = Process.GetCurrentProcess();
-        var profile = ChromeProfileCatalog.ReadWindowProfile(request.WindowId, self.SessionId);
+        var profile = ChromeProfileCatalog.ReadWindowProfileStable(request.WindowId,
+            self.SessionId, out var profileRead);
         if (profile is null || !ChromeProfileCatalog.MatchesSelector(profile, request.ExpectedProfile))
             return new(ChromeConnectionCode.PROFILE_MISMATCH,
-                ChromeConnectionState.NOT_REQUESTED, ChromeConnectionNextAction.SELECT_PROFILE);
+                ChromeConnectionState.NOT_REQUESTED, ChromeConnectionNextAction.SELECT_PROFILE,
+                Detail: $"PROFILE_{(profile is null ? profileRead :
+                    ChromeProfileCatalog.ChromeProfileReadCode.PROFILE_MISMATCH)}");
 
         if (request.Action == ChromeConnectionAction.STATUS)
         {
@@ -372,8 +375,13 @@ internal static partial class WindowChromeCdp
         return false;
     }
 
-    internal static bool VerifiedChromeProfile(IntPtr hwnd, string expected)
+    internal static bool VerifiedChromeProfile(IntPtr hwnd, string expected) =>
+        VerifiedChromeProfile(hwnd, expected, out _);
+
+    internal static bool VerifiedChromeProfile(IntPtr hwnd, string expected,
+        out ChromeProfileCatalog.ChromeProfileReadCode reason)
     {
+        reason = ChromeProfileCatalog.ChromeProfileReadCode.STALE_WINDOW;
         try
         {
             if (!GetWindowRect(hwnd, out _)) return false;
@@ -384,11 +392,19 @@ internal static partial class WindowChromeCdp
             using var self = Process.GetCurrentProcess();
             var id = WindowCatalog.FormatId(new WindowIdentity(hwnd.ToInt64(), owner.Id,
                 owner.StartTime.ToFileTimeUtc(), self.SessionId));
-            var profile = ChromeProfileCatalog.ReadWindowProfile(id, self.SessionId);
-            return profile is not null && ChromeProfileCatalog.MatchesSelector(profile, expected);
+            var profile = ChromeProfileCatalog.ReadWindowProfileStable(id, self.SessionId,
+                out reason);
+            if (profile is null) return false;
+            bool matches = ChromeProfileCatalog.MatchesSelector(profile, expected);
+            if (!matches) reason = ChromeProfileCatalog.ChromeProfileReadCode.PROFILE_MISMATCH;
+            return matches;
         }
         catch (Exception e) when (e is COMException or ElementNotAvailableException or
-            InvalidOperationException or ArgumentException or Win32Exception or OverflowException) { return false; }
+            InvalidOperationException or ArgumentException or Win32Exception or OverflowException)
+        {
+            reason = ChromeProfileCatalog.ChromeProfileReadCode.PROVIDER_ERROR;
+            return false;
+        }
     }
 
     [DllImport("user32.dll")]
@@ -715,8 +731,10 @@ internal static partial class WindowChromeCdp
             using var owner = Process.GetProcessById(identity.ProcessId);
             if (!owner.ProcessName.Equals("chrome", StringComparison.OrdinalIgnoreCase))
                 return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: "NOT_CHROME");
-            if (expectedProfile is not null && !VerifiedChromeProfile(hwnd, expectedProfile))
-                return new(WindowInspectCode.CDP_CONTEXT_MISMATCH, [], Detail: "PROFILE_NOT_VERIFIED");
+            if (expectedProfile is not null &&
+                !VerifiedChromeProfile(hwnd, expectedProfile, out var profileFailure))
+                return new(WindowInspectCode.CDP_CONTEXT_MISMATCH, [],
+                    Detail: $"PROFILE_{profileFailure}");
             var connection = ConnectionState(endpoint!, request: false, hwnd);
             if (connection == ChromeConnectionState.CONSENT_PENDING)
                 return new(WindowInspectCode.CDP_CONSENT_PENDING, [], Detail: "ALLOW_CHROME_PROMPT");
@@ -1119,29 +1137,30 @@ internal static partial class WindowChromeCdp
     // This cannot make a remote navigation atomic with dispatch, but it
     // rejects a tab move, URL change, new loader, or replaced native window
     // that occurs during earlier, potentially slow DOM/AX preparation.
-    private static async Task<WindowActionCode?> DispatchCheckpoint(Session cdp,
+    private static async Task<(WindowActionCode? Code, string? Detail)> DispatchCheckpoint(Session cdp,
         string sessionId, IntPtr hwnd, WindowActionRequest request, string targetId,
         string snapshotUrl, int browserWindowId, string loaderId)
     {
         using var self = Process.GetCurrentProcess();
         if (WindowCatalog.ResolveId(request.WindowId, self.SessionId, out var current) !=
             WindowResolveCode.OK || current != hwnd)
-            return WindowActionCode.STALE_WINDOW;
-        if (request.ExpectedProfile is null ||
-            !VerifiedChromeProfile(hwnd, request.ExpectedProfile))
-            return WindowActionCode.CDP_CONTEXT_MISMATCH;
+            return (WindowActionCode.STALE_WINDOW, "STALE_WINDOW");
+        if (request.ExpectedProfile is null)
+            return (WindowActionCode.CDP_CONTEXT_MISMATCH, "PROFILE_REQUIRED");
+        if (!VerifiedChromeProfile(hwnd, request.ExpectedProfile, out var profileFailure))
+            return (WindowActionCode.CDP_CONTEXT_MISMATCH, $"PROFILE_{profileFailure}");
         var info = await cdp.Call("Target.getTargetInfo", new { targetId });
         if (!MatchesDispatchTarget(info, targetId, snapshotUrl,
             request.ExpectedOrigin, request.ExpectedUrl))
-            return WindowActionCode.CDP_CONTEXT_MISMATCH;
+            return (WindowActionCode.CDP_CONTEXT_MISMATCH, "TAB_TARGET_CHANGED");
         var owner = await cdp.Call("Browser.getWindowForTarget", new { targetId });
         if (!owner.TryGetProperty("windowId", out var windowId) ||
             windowId.ValueKind != JsonValueKind.Number ||
             !windowId.TryGetInt32(out int actualWindowId) ||
             actualWindowId != browserWindowId)
-            return WindowActionCode.CDP_CONTEXT_MISMATCH;
+            return (WindowActionCode.CDP_CONTEXT_MISMATCH, "TAB_WINDOW_CHANGED");
         return await Loader(cdp, sessionId) == loaderId
-            ? null : WindowActionCode.STALE_ELEMENT;
+            ? (null, null) : (WindowActionCode.STALE_ELEMENT, "TAB_LOADER_CHANGED");
     }
 
     private static async Task<WindowActionResult> InvokeTabAsync(Uri endpoint, IntPtr hwnd,
@@ -1157,9 +1176,11 @@ internal static partial class WindowChromeCdp
                 request.ExpectedOrigin, request.ExpectedUrl, target.TargetId);
             var selected = tabs.SingleOrDefault(t => t.Id == target.TargetId);
             if (selected is null) return Rejected(WindowActionCode.CDP_TARGET_AMBIGUOUS);
-            if (!MatchesContext(selected.Url, request.ExpectedOrigin, request.ExpectedUrl) ||
-                request.ExpectedProfile is not null && !VerifiedChromeProfile(hwnd, request.ExpectedProfile))
-                return Rejected(WindowActionCode.CDP_CONTEXT_MISMATCH);
+            if (!MatchesContext(selected.Url, request.ExpectedOrigin, request.ExpectedUrl))
+                return Rejected(WindowActionCode.CDP_CONTEXT_MISMATCH, "TAB_URL_MISMATCH");
+            if (request.ExpectedProfile is not null &&
+                !VerifiedChromeProfile(hwnd, request.ExpectedProfile, out var profileFailure))
+                return Rejected(WindowActionCode.CDP_CONTEXT_MISMATCH, $"PROFILE_{profileFailure}");
             string sessionId = await Attach(cdp, selected.Id);
             string loader = await Loader(cdp, sessionId);
             if (loader != target.LoaderId) return Rejected(WindowActionCode.STALE_ELEMENT);
@@ -1219,7 +1240,8 @@ internal static partial class WindowChromeCdp
                     ok.ValueKind != JsonValueKind.True) return Rejected(WindowActionCode.TARGET_OCCLUDED);
                 var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
                     target.TargetId, selected.Url, selected.BrowserWindowId, target.LoaderId);
-                if (checkpoint is not null) return Rejected(checkpoint.Value);
+                if (checkpoint.Code is not null) return Rejected(checkpoint.Code.Value,
+                    checkpoint.Detail);
                 dispatched = true;
                 await DispatchPointer(cdp, sessionId, request, x, y);
             }
@@ -1231,7 +1253,8 @@ internal static partial class WindowChromeCdp
                     return Rejected(WindowActionCode.UNSUPPORTED_ACTION);
                 var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
                     target.TargetId, selected.Url, selected.BrowserWindowId, target.LoaderId);
-                if (checkpoint is not null) return Rejected(checkpoint.Value);
+                if (checkpoint.Code is not null) return Rejected(checkpoint.Code.Value,
+                    checkpoint.Detail);
                 // DOM.focus itself can fire web events. Once requested, any
                 // transport failure has an unknown effect, even if no key or
                 // text command has been issued yet; never retry it blindly.
@@ -1321,9 +1344,10 @@ internal static partial class WindowChromeCdp
                 ElapsedMs: clock.ElapsedMilliseconds,
                 ExecutionMethod: dispatched ? WindowExecutionMethod.CHROME_CDP : null);
         }
-        WindowActionResult Rejected(WindowActionCode status) => new(status,
+        WindowActionResult Rejected(WindowActionCode status, string? detail = null) => new(status,
             TargetVerified: status == WindowActionCode.EXPECTED_STATE_ALREADY_TRUE,
-            FailureStage: WindowFailureStage.CDP_TARGET, ElapsedMs: clock.ElapsedMilliseconds);
+            FailureStage: WindowFailureStage.CDP_TARGET, Detail: detail,
+            ElapsedMs: clock.ElapsedMilliseconds);
     }
 
     [DllImport("user32.dll")]

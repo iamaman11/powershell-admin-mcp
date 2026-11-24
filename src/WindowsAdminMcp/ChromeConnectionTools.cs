@@ -241,24 +241,75 @@ internal static class ChromeProfileCatalog
         return name.Length is >= 1 and <= 100 ? (name, account) : null;
     }
 
-    internal static ChromeProfileInfo? ReadWindowProfile(string windowId, int session,
-        IReadOnlyList<ChromeProfileMetadata>? known = null)
+    internal enum ChromeProfileReadCode
     {
+        VERIFIED, STALE_WINDOW, NOT_CHROME, ROOT_UNAVAILABLE, AVATAR_MISSING,
+        AVATAR_AMBIGUOUS, AVATAR_INSIDE_DOCUMENT, AVATAR_LABEL_INVALID, PROVIDER_ERROR,
+        PROFILE_MISMATCH
+    }
+
+    internal static ChromeProfileInfo? ReadWindowProfile(string windowId, int session,
+        IReadOnlyList<ChromeProfileMetadata>? known = null) =>
+        ReadWindowProfile(windowId, session, out _, known);
+
+    // Chrome can temporarily hide the native avatar while rebuilding its UIA
+    // toolbar. Retry only this read-only identity probe, never a CDP action.
+    internal static ChromeProfileInfo? ReadWindowProfileStable(string windowId, int session,
+        out ChromeProfileReadCode code)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            var profile = ReadWindowProfile(windowId, session, out code);
+            if (profile is not null || attempt == 3 || code is not (
+                ChromeProfileReadCode.AVATAR_MISSING or
+                ChromeProfileReadCode.ROOT_UNAVAILABLE or
+                ChromeProfileReadCode.PROVIDER_ERROR)) return profile;
+            Thread.Sleep(125);
+        }
+    }
+
+    internal static ChromeProfileInfo? ReadWindowProfile(string windowId, int session,
+        out ChromeProfileReadCode code, IReadOnlyList<ChromeProfileMetadata>? known = null)
+    {
+        code = ChromeProfileReadCode.STALE_WINDOW;
         if (WindowCatalog.ResolveId(windowId, session, out var hwnd) != WindowResolveCode.OK ||
             !WindowCatalog.TryParseId(windowId, out var identity)) return null;
         try
         {
             using var owner = Process.GetProcessById(identity.ProcessId);
-            if (!owner.ProcessName.Equals("chrome", StringComparison.OrdinalIgnoreCase)) return null;
+            if (!owner.ProcessName.Equals("chrome", StringComparison.OrdinalIgnoreCase))
+            {
+                code = ChromeProfileReadCode.NOT_CHROME;
+                return null;
+            }
             var root = AutomationElement.FromHandle(hwnd);
-            if (root is null) return null;
+            if (root is null)
+            {
+                code = ChromeProfileReadCode.ROOT_UNAVAILABLE;
+                return null;
+            }
             var avatars = root.FindAll(TreeScope.Descendants, new AndCondition(
                 new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
                 new PropertyCondition(AutomationElement.AutomationIdProperty, AvatarAutomationId)));
-            if (avatars.Count != 1 || WindowChromeCdp.IsInsideDocument(avatars[0])) return null;
+            if (avatars.Count != 1)
+            {
+                code = avatars.Count == 0 ? ChromeProfileReadCode.AVATAR_MISSING :
+                    ChromeProfileReadCode.AVATAR_AMBIGUOUS;
+                return null;
+            }
+            if (WindowChromeCdp.IsInsideDocument(avatars[0]))
+            {
+                code = ChromeProfileReadCode.AVATAR_INSIDE_DOCUMENT;
+                return null;
+            }
             var parsed = ParseAvatar(avatars[0].Current.Name);
-            if (parsed is not { } profile) return null;
+            if (parsed is not { } profile)
+            {
+                code = ChromeProfileReadCode.AVATAR_LABEL_INVALID;
+                return null;
+            }
             var match = ResolveMetadata(profile.Name, profile.Account, known ?? ReadKnownProfiles());
+            code = ChromeProfileReadCode.VERIFIED;
             return new(windowId, match?.Id, profile.Name,
                 match?.Email ?? profile.Account,
                 match?.Source ?? (profile.Account is null ? ChromeProfileEmailSource.NOT_AVAILABLE :
@@ -266,7 +317,11 @@ internal static class ChromeProfileCatalog
         }
         catch (Exception e) when (e is COMException or ElementNotAvailableException or
             InvalidOperationException or ArgumentException or Win32Exception or OverflowException ||
-            e is System.Security.SecurityException) { return null; }
+            e is System.Security.SecurityException)
+        {
+            code = ChromeProfileReadCode.PROVIDER_ERROR;
+            return null;
+        }
     }
 
     internal static bool MatchesSelector(ChromeProfileInfo profile, string selector) =>

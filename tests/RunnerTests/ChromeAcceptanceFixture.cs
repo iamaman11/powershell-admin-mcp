@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -51,7 +50,6 @@ internal static class ChromeAcceptanceFixture
         using var serverStop = new CancellationTokenSource();
         Task accepting = ServeAsync(server, nonce, state, serverStop.Token);
         Process? browser = null;
-        Process? worker = null;
         bool endpointCreated = false;
         try
         {
@@ -76,15 +74,25 @@ internal static class ChromeAcceptanceFixture
             int browserPid = browser.Id;
 
             string ownedEndpoint = Path.Combine(profileDir, "DevToolsActivePort");
-            if (!await UntilAsync(() => File.Exists(ownedEndpoint), TimeSpan.FromSeconds(12)))
+            // Hosted Windows runners can spend substantially longer starting
+            // their first browser process under load. Wait for the browser's
+            // own endpoint file without touching another Chrome process.
+            if (!await UntilAsync(() => File.Exists(ownedEndpoint), TimeSpan.FromSeconds(30)))
             {
+                int? exitCode = browser.HasExited ? browser.ExitCode : null;
+                var chromeProcesses = Process.GetProcessesByName("chrome");
+                int chromeCount = chromeProcesses.Length;
+                foreach (var process in chromeProcesses) process.Dispose();
+                Console.WriteLine($"CHROME_CI_STARTUP_DIAGNOSTIC " +
+                    $"browser_exited={browser.HasExited} " +
+                    $"exit_code={exitCode} chrome_process_count={chromeCount}");
                 Blocked("CI_CHROME_DEBUG_ENDPOINT_UNAVAILABLE");
                 return;
             }
             // Validate actual loopback endpoint syntax before presenting it to
             // the unmodified real worker. Never overwrite an existing file.
             string text = await File.ReadAllTextAsync(ownedEndpoint);
-            if (!WindowChromeCdp.TryReadEndpoint(text, out _) || File.Exists(endpointFile))
+            if (!WindowChromeCdp.TryReadEndpoint(text, out var endpoint) || File.Exists(endpointFile))
             {
                 Blocked("CI_CHROME_ENDPOINT_NOT_EXCLUSIVE");
                 return;
@@ -104,7 +112,8 @@ internal static class ChromeAcceptanceFixture
             bool found = await UntilAsync(() =>
             {
                 var window = WindowCatalog.List(100, self.SessionId).Windows
-                    .FirstOrDefault(w => w.ProcessId == browserPid);
+                    .FirstOrDefault(w => w.ProcessId == browserPid &&
+                        w.Title == "WMCP CI Chrome - Google Chrome");
                 if (window is null) return false;
                 windowId = window.WindowId;
                 profile = ChromeProfileCatalog.ReadWindowProfile(windowId, self.SessionId);
@@ -116,32 +125,56 @@ internal static class ChromeAcceptanceFixture
                 return;
             }
 
-            var workerStart = new ProcessStartInfo("dotnet")
+            // The throwaway CI profile has no stable account metadata. Its
+            // verified native avatar display name is the binding selector.
+            string selector = profile!.DisplayName;
+            // This test owns the entire new profile. The native avatar label
+            // is safe to report here when a profile check fails; production
+            // diagnostics never reveal unrelated Chrome profile labels.
+            string ProfileEvidence()
             {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-            workerStart.ArgumentList.Add(typeof(WindowChromeBroker).Assembly.Location);
-            workerStart.ArgumentList.Add("window-cdp-worker");
-            workerStart.ArgumentList.Add(self.Id.ToString(CultureInfo.InvariantCulture));
-            var cdpWorker = Process.Start(workerStart) ??
-                throw new InvalidOperationException("CDP_WORKER_NOT_STARTED");
-            worker = cdpWorker;
-            string selector = profile!.ProfileId ?? profile.Email ?? profile.DisplayName;
+                var observed = ChromeProfileCatalog.ReadWindowProfile(windowId!, self.SessionId,
+                    out var probe);
+                return $"native_probe={probe} initial_label={selector} " +
+                    $"current_label={observed?.DisplayName} " +
+                    $"initial_id={profile.ProfileId} current_id={observed?.ProfileId}";
+            }
+            void RefreshOwnedProfile()
+            {
+                // In an unsigned, new test profile Chrome may change its
+                // native avatar tooltip from a sign-in hint to "You". The
+                // test owns this exact HWND/PID and user-data-dir, so obtain
+                // the current selector from the real UIA avatar before each
+                // *new* operation. Production never substitutes a selector.
+                var observed = ChromeProfileCatalog.ReadWindowProfileStable(windowId!,
+                    self.SessionId, out var probe);
+                if (observed is null || observed.WindowId != windowId ||
+                    observed.ProcessId != browserPid)
+                    throw new InvalidOperationException(
+                        $"CI_CDP_OWNED_PROFILE_LOST probe={probe} {ProfileEvidence()}");
+                if (!string.Equals(selector, observed.DisplayName, StringComparison.Ordinal))
+                {
+                    Console.WriteLine("CHROME_CI_OWNED_AVATAR_LABEL_UPDATED " +
+                        "(same native window and process)");
+                    selector = observed.DisplayName;
+                }
+            }
 
+            // Use the real USER owner from the first request onward. The 100
+            // cycles and the 2/4/8 independent clients must share its single
+            // worker and its consented WebSocket, without a second connection.
+            using var brokerStop = new CancellationTokenSource();
+            Task owner = ChromeBrokerPipe.RunOwnerAsync(brokerStop.Token);
+            try
+            {
+                if (!ChromeBrokerPipe.IsOwner)
+                throw new InvalidOperationException("CI_CDP_PIPE_OWNER_NOT_STARTED");
             async Task<ChromeBrokerReply> ExchangeAsync(ChromeBrokerRequest request)
             {
                 string trace = Guid.NewGuid().ToString("N");
                 request = request with { TraceId = trace };
-                await cdpWorker.StandardInput.WriteLineAsync(JsonSerializer.Serialize(request, PipeWire.Json));
-                await cdpWorker.StandardInput.FlushAsync();
-                string? replyLine = await cdpWorker.StandardOutput.ReadLineAsync()
-                    .WaitAsync(TimeSpan.FromSeconds(35));
-                var reply = replyLine is null ? null :
-                    JsonSerializer.Deserialize<ChromeBrokerReply>(replyLine, PipeWire.Json);
+                using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+                var reply = await ChromeBrokerPipe.ExchangeAsync(request, deadline.Token);
                 if (!WindowChromeBroker.ReplyMatches(request, reply) || reply!.TraceId != trace)
                     throw new InvalidOperationException("CI_CDP_BROKER_WIRE_IDENTITY_MISMATCH");
                 return reply!;
@@ -166,14 +199,50 @@ internal static class ChromeAcceptanceFixture
             }
             string? generation = connected.Connection.SessionGeneration;
             if (generation is null) throw new InvalidOperationException("CI_CDP_GENERATION_MISSING");
-            Console.WriteLine($"PASS chrome_ci.authorized_worker_connected owner={cdpWorker.Id} generation={generation}");
+            Console.WriteLine($"PASS chrome_ci.authorized_shared_owner_connected owner={self.Id} generation={generation}");
 
+            // Chrome's first native window can be visible before the page
+            // target and its window geometry settle. Only retry the *read-only*
+            // inspection preflight; never replay a potentially effectful action.
+            WindowInspectResult? preflight = null;
+            for (int attempt = 0; attempt < 30; attempt++)
+            {
+                RefreshOwnedProfile();
+                preflight = (await ExchangeAsync(new(Inspect: new WindowInspectRequest(
+                    windowId!, 4, 20, null, null, 0, false, "CI_CDP_VALUE",
+                    WindowRoleFilter.EDIT, 0, WindowInspectScope.TAB,
+                    ExpectedProfile: selector, ExpectedUrl: url)))).Inspect;
+                if (preflight?.Status == WindowInspectCode.COMPLETED &&
+                    preflight.Elements.Any(e => e.ElementId.StartsWith("c1:",
+                        StringComparison.Ordinal))) break;
+                await Task.Delay(300);
+            }
+            if (preflight?.Status != WindowInspectCode.COMPLETED)
+                throw new InvalidOperationException($"CI_CDP_READ_ONLY_PREFLIGHT " +
+                    $"status={preflight?.Status} detail={preflight?.Detail}");
+
+            int rejectedBeforeDispatch = 0;
             for (int iteration = 0; iteration < Cycles; iteration++)
             {
+                for (int planningAttempt = 0; ; planningAttempt++)
+                {
+                RefreshOwnedProfile();
                 var status = (await ExchangeAsync(Connection(ChromeConnectionAction.STATUS))).Connection;
                 if (status?.State != ChromeConnectionState.CONNECTED ||
                     status.SessionGeneration != generation)
-                    throw new InvalidOperationException($"CI_CDP_STATUS_LOST cycle={iteration} state={status?.State}");
+                {
+                    // A native toolbar label can change between our last
+                    // read and STATUS. This rejected operation had no effect.
+                    if (planningAttempt < 3 && status?.Status == ChromeConnectionCode.PROFILE_MISMATCH &&
+                        status.Detail?.StartsWith("PROFILE_", StringComparison.Ordinal) == true)
+                    {
+                        rejectedBeforeDispatch++;
+                        continue;
+                    }
+                    throw new InvalidOperationException($"CI_CDP_STATUS_LOST cycle={iteration} " +
+                        $"code={status?.Status} state={status?.State} detail={status?.Detail} " +
+                        $"failure={status?.FailureReason} {ProfileEvidence()}");
+                }
 
                 bool setText = iteration % 2 == 0;
                 string label = setText ? "CI_CDP_VALUE" : "CI_CDP_BUTTON";
@@ -186,9 +255,17 @@ internal static class ChromeAcceptanceFixture
                 if (inspect?.Status != WindowInspectCode.COMPLETED || targets.Length != 1 ||
                     inspect.SessionGeneration != generation || inspect.Tabs?.Length != 1 ||
                     inspect.Tabs[0].Url != url)
+                {
+                    if (planningAttempt < 3 && inspect?.Status == WindowInspectCode.CDP_CONTEXT_MISMATCH &&
+                        inspect.Detail?.StartsWith("PROFILE_", StringComparison.Ordinal) == true)
+                    {
+                        rejectedBeforeDispatch++;
+                        continue;
+                    }
                     throw new InvalidOperationException($"CI_CDP_INSPECT cycle={iteration} " +
                         $"status={inspect?.Status} detail={inspect?.Detail} count={inspect?.Elements.Length} " +
-                        $"candidates={targets.Length}");
+                        $"candidates={targets.Length} {ProfileEvidence()}");
+                }
 
                 string value = $"CI_CDP_CYCLE_{iteration:D3}";
                 var action = (await ExchangeAsync(new(Action: new WindowActionRequest(
@@ -200,8 +277,23 @@ internal static class ChromeAcceptanceFixture
                     action.SessionGeneration != generation ||
                     action.ExecutionMethod != WindowExecutionMethod.CHROME_CDP ||
                     setText && action.ExpectedStateObserved != true)
+                {
+                    // A *proven* NOT_DISPATCHED profile rejection is the only
+                    // effectful-call response that permits new planning here.
+                    // Re-resolve the element; never replay an unknown effect.
+                    if (planningAttempt < 3 && action?.Status == WindowActionCode.CDP_CONTEXT_MISMATCH &&
+                        action.Detail?.StartsWith("PROFILE_", StringComparison.Ordinal) == true &&
+                        action.EffectState == WindowEffectState.NO_EFFECT &&
+                        action.ProviderOutcome == WindowProviderOutcome.NOT_DISPATCHED &&
+                        action.FailureStage == WindowFailureStage.CDP_TARGET)
+                    {
+                        rejectedBeforeDispatch++;
+                        continue;
+                    }
                     throw new InvalidOperationException($"CI_CDP_ACTION cycle={iteration} " +
-                        $"status={action?.Status} detail={action?.Detail} unknown={action?.EffectUnknown}");
+                        $"status={action?.Status} detail={action?.Detail} unknown={action?.EffectUnknown} " +
+                        ProfileEvidence());
+                }
 
                 int expectedClicks = (iteration + 1) / 2;
                 bool observed = await UntilAsync(() => setText
@@ -210,25 +302,68 @@ internal static class ChromeAcceptanceFixture
                 if (!observed)
                     throw new InvalidOperationException($"CI_CDP_EFFECT cycle={iteration} " +
                         $"clicks={state.Clicks} text={state.LastText}");
+                break;
+                }
             }
 
             if (state.Clicks != Cycles / 2 || state.Inputs < Cycles / 2)
                 throw new InvalidOperationException("CI_CDP_FINAL_EFFECT_COUNT_MISMATCH");
             Console.WriteLine($"PASS chrome_ci.100_status_inspect_action_verify_cycles " +
-                $"clicks={state.Clicks} inputs={state.Inputs} owner={cdpWorker.Id} generation={generation}");
-            Console.WriteLine("NOT_TESTED / EXTERNAL_BLOCKER chrome_ci.multi_mcp_clients " +
-                "(standalone worker fixture, no installed USER broker)");
+                $"clicks={state.Clicks} inputs={state.Inputs} owner={self.Id} generation={generation} " +
+                $"no_effect_profile_rejections={rejectedBeforeDispatch}");
+
+            int expected = state.Clicks;
+            foreach (int concurrency in new[] { 2, 4, 8 })
+            {
+                RefreshOwnedProfile();
+                var reports = await Task.WhenAll(Enumerable.Range(0, concurrency)
+                    .Select(_ => RunPipeClientAsync(windowId!, selector, url)));
+                if (!reports.All(r => r.OwnerPid == self.Id &&
+                    r.Generation == generation && r.Verified))
+                    throw new InvalidOperationException(
+                        $"CI_CDP_MULTICLIENT_REPLY_FAILURE clients={concurrency}");
+                expected += concurrency;
+                if (!await UntilAsync(() => state.Clicks == expected,
+                    TimeSpan.FromSeconds(3)))
+                    throw new InvalidOperationException(
+                        $"CI_CDP_MULTICLIENT_EFFECT_COUNT clients={concurrency} " +
+                        $"expected={expected} actual={state.Clicks}");
+                Console.WriteLine($"PASS chrome_ci.shared_owner_clients_{concurrency} " +
+                    $"clicks={expected} generation={generation}");
+            }
+            var processes = Process.GetProcessesByName("RunnerTests");
+            int[] children;
+            try
+            {
+                children = processes.Where(p => p.Id != self.Id &&
+                    p.SessionId == self.SessionId).Select(p => p.Id).ToArray();
+            }
+            finally { foreach (var p in processes) p.Dispose(); }
+            if (children.Length != 1)
+                throw new InvalidOperationException(
+                    $"CI_CDP_EXPECT_ONE_WORKER found={children.Length}");
+            var sockets = SystemSnapshot.Observe(SystemQueryKind.TCP_CONNECTIONS,
+                children[0], null, 50, 0, CancellationToken.None);
+            int established = sockets.TcpConnections?.Count(t =>
+                t.State == SystemTcpState.ESTABLISHED &&
+                t.RemotePort == endpoint!.Port &&
+                t.RemoteAddress == "127.0.0.1") ?? 0;
+            if (sockets.Status != SystemQueryCode.COMPLETED || established != 1)
+                throw new InvalidOperationException($"CI_CDP_EXPECT_ONE_SOCKET " +
+                    $"query={sockets.Status} established={established}");
+            Console.WriteLine($"PASS chrome_ci.one_shared_cdp_worker_and_websocket " +
+                $"worker_pid={children[0]} owner_pid={self.Id} socket_count={established}");
+            }
+            finally
+            {
+                await brokerStop.CancelAsync();
+                await owner;
+            }
             Console.WriteLine("NOT_TESTED / EXTERNAL_BLOCKER chrome_ci.uia_locator " +
                 "(CDP element reference, not UIA locator)");
         }
         finally
         {
-            if (worker is not null)
-            {
-                try { worker.StandardInput.Close(); } catch (IOException) { }
-                if (!worker.HasExited && !worker.WaitForExit(1500)) worker.Kill(entireProcessTree: true);
-                worker.Dispose();
-            }
             if (browser is not null)
             {
                 if (!browser.HasExited) browser.Kill(entireProcessTree: true);
@@ -246,6 +381,40 @@ internal static class ChromeAcceptanceFixture
 
     private static void Blocked(string reason) =>
         Console.WriteLine($"NOT_TESTED / EXTERNAL_BLOCKER chrome_ci.100_cycles reason={reason}");
+
+    private sealed record PipeClientReport(int OwnerPid, string Generation, bool Verified);
+
+    private static async Task<PipeClientReport> RunPipeClientAsync(string window, string profile,
+        string url)
+    {
+        string executable = Environment.ProcessPath ??
+            throw new InvalidOperationException("CI_PIPE_CLIENT_EXE_MISSING");
+        var start = new ProcessStartInfo(executable)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true
+        };
+        if (Path.GetFileNameWithoutExtension(executable).Equals("dotnet",
+            StringComparison.OrdinalIgnoreCase))
+            start.ArgumentList.Add(typeof(ChromeAcceptanceFixture).Assembly.Location);
+        start.ArgumentList.Add("--chrome-pipe-live-action");
+        start.ArgumentList.Add(window);
+        start.ArgumentList.Add(profile);
+        start.ArgumentList.Add(url);
+        using var client = Process.Start(start) ??
+            throw new InvalidOperationException("CI_CDP_PIPE_CLIENT_START_FAILED");
+        var output = client.StandardOutput.ReadToEndAsync();
+        await client.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(60));
+        string report = await output;
+        if (client.ExitCode != 0)
+            throw new InvalidOperationException($"CI_CDP_PIPE_CLIENT_EXIT={client.ExitCode}: {report}");
+        using var doc = JsonDocument.Parse(report);
+        var json = doc.RootElement;
+        return new(json.GetProperty("owner_pid").GetInt32(),
+            json.GetProperty("session_generation").GetString() ?? "",
+            json.GetProperty("verified").GetBoolean());
+    }
 
     private static async Task<bool> UntilAsync(Func<bool> predicate, TimeSpan budget)
     {
