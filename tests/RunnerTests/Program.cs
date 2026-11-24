@@ -1731,6 +1731,21 @@ Check(WindowChromeCdp.UniqueStrongTabFingerprintWindow(new[] { 12,13 },fallbackP
     WindowChromeCdp.UniqueStrongTabFingerprintWindow(new[] { 12,13 },fallbackPages,
         new[] { "Stale Active Title","Shared" }) is null,
     "chrome.cdp_missing_active_title_requires_multiple_exclusive_near_complete_tab_matches");
+var maximizedSameTitlePages = new (int WindowId, string Title)[]
+{
+    (12,"All workflows"),(12,"Profile Control Plane"),(12,"Unique Test Tab"),
+    (13,"All workflows"),(13,"Other Profile Tab")
+};
+Check(WindowChromeCdp.UniqueStrongTabFingerprintWindow(new[] { 12,13 },
+        maximizedSameTitlePages,
+        new[] { "All workflows", "Profile Control Plane", "Unique Test Tab" }) == 12 &&
+    WindowChromeCdp.UniqueStrongTabFingerprintWindow(new[] { 12,13 },
+        maximizedSameTitlePages,
+        new[] { "All workflows", "Profile Control Plane" }) is null &&
+    WindowChromeCdp.UniqueStrongTabFingerprintWindow(new[] { 12,13 },
+        maximizedSameTitlePages,
+        new[] { "All workflows", "Profile Control Plane", "Other Profile Tab" }) is null,
+    "chrome.maximized_windows_with_mismatched_bounds_require_two_exclusive_native_tab_titles");
 string mappingWire=System.Text.Json.JsonSerializer.Serialize(new WindowInspectResult(
     WindowInspectCode.CDP_TARGET_NOT_FOUND,[],Detail:"CDP_WINDOW_NO_MATCH",
     CdpMappingFailure:WindowCdpMappingFailure.FINGERPRINT_AMBIGUOUS,
@@ -1741,6 +1756,16 @@ Check(mappingWire.Contains("\"cdp_mapping_failure\":\"FINGERPRINT_AMBIGUOUS\"",
     mappingWire.Contains("\"cdp_fingerprint_candidates\":9",StringComparison.Ordinal) &&
     !mappingWire.Contains("targetIds",StringComparison.OrdinalIgnoreCase),
     "chrome.cdp_window_mapping_failure_typed_bounded_metadata_without_target_leak");
+string tabMappingWire=System.Text.Json.JsonSerializer.Serialize(new ChromeTabResult(
+    ChromeTabCode.TARGET_NOT_FOUND, ChromeTabAction.LIST,
+    Detail:"CDP_WINDOW_NO_MATCH", CdpMappingFailure:WindowCdpMappingFailure.BOUNDS_MISMATCH,
+    CdpTitleCandidates:5, CdpFingerprintCandidates:26),PipeWire.Json);
+Check(tabMappingWire.Contains("\"cdp_mapping_failure\":\"BOUNDS_MISMATCH\"",
+        StringComparison.Ordinal) &&
+    tabMappingWire.Contains("\"cdp_title_candidates\":5",StringComparison.Ordinal) &&
+    tabMappingWire.Contains("\"cdp_fingerprint_candidates\":26",StringComparison.Ordinal) &&
+    !tabMappingWire.Contains("targetIds",StringComparison.OrdinalIgnoreCase),
+    "chrome.tab_management_mapping_failure_reports_typed_candidates_without_target_leak");
 Check(WindowPhysicalClick.CanUseNativeFallback(null) &&
     WindowPhysicalClick.CanUseNativeFallback(new(WindowActionCode.CDP_UNAVAILABLE,
         FailureStage: WindowFailureStage.CDP_CONNECT)) &&

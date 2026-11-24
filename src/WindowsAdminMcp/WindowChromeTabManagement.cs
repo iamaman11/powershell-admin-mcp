@@ -40,7 +40,13 @@ public sealed record ChromeTabResult(
     [property: JsonPropertyName("audit_id")] string? AuditId = null,
     [property: JsonPropertyName("broker_owner_pid")] int? BrokerOwnerPid = null,
     [property: JsonPropertyName("session_generation")] string? SessionGeneration = null,
-    [property: JsonPropertyName("trace_id")] string? TraceId = null)
+    [property: JsonPropertyName("trace_id")] string? TraceId = null,
+    [property: JsonPropertyName("cdp_mapping_failure"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        WindowCdpMappingFailure? CdpMappingFailure = null,
+    [property: JsonPropertyName("cdp_title_candidates"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        int? CdpTitleCandidates = null,
+    [property: JsonPropertyName("cdp_fingerprint_candidates"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        int? CdpFingerprintCandidates = null)
 {
     [JsonPropertyName("effect_state")]
     public WindowEffectState EffectState => Status == ChromeTabCode.COMPLETED && Action != ChromeTabAction.LIST
@@ -142,7 +148,9 @@ internal static partial class WindowChromeCdp
         {
             return new(e.State == CdpWindowMappingState.NOT_FOUND
                 ? ChromeTabCode.TARGET_NOT_FOUND : ChromeTabCode.TARGET_AMBIGUOUS,
-                request.Action, Detail: e.Message);
+                request.Action, Detail: e.Message, CdpMappingFailure: e.Failure,
+                CdpTitleCandidates: e.TitleCandidates,
+                CdpFingerprintCandidates: e.FingerprintCandidates);
         }
         catch (Exception e) when (e is OperationCanceledException or WebSocketException or
                                    IOException or JsonException or InvalidOperationException)

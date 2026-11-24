@@ -196,11 +196,13 @@ internal static partial class WindowChromeCdp
         }
 
         var titleMatches = new List<(int WindowId, string? ContextId)>();
+        var titleWindowIds = new HashSet<int>();
         var titlePages = pages.Where(p => nativeTitle.StartsWith(p.Title + " - Google Chrome",
             StringComparison.Ordinal)).ToArray();
         foreach (var page in titlePages)
         {
             int browserWindowId = await WindowId(page.Id);
+            titleWindowIds.Add(browserWindowId);
             if (await BoundsMatch(browserWindowId))
                 titleMatches.Add((browserWindowId, page.ContextId));
         }
@@ -236,10 +238,19 @@ internal static partial class WindowChromeCdp
                         failure = WindowCdpMappingFailure.FINGERPRINT_LIMIT;
                     else
                     {
+                        // Maximized Chrome windows can report bounds in a different
+                        // coordinate space from Win32. Geometry alone cannot
+                        // distinguish overlapping HWNDs anyway. With an exact
+                        // active title and a unique native tab strip, permit only
+                        // the stronger multi-tab fingerprint to resolve them.
+                        // Never admit a window without that active-title match.
+                        if (distinctCount == 0 && titlePages.Length > 0)
+                            candidates.UnionWith(titleWindowIds);
                         foreach (var page in matchingPages)
                         {
                             int id = await WindowId(page.Id);
-                            if (distinctCount == 0 && await BoundsMatch(id)) candidates.Add(id);
+                            if (distinctCount == 0 && titlePages.Length == 0 &&
+                                await BoundsMatch(id)) candidates.Add(id);
                             if (candidates.Contains(id)) titles.Add((id, page.Title));
                         }
                         selected = distinctCount > 1
