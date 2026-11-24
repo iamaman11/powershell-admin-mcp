@@ -84,7 +84,7 @@ internal static class ChromeAcceptanceFixture
             // Validate actual loopback endpoint syntax before presenting it to
             // the unmodified real worker. Never overwrite an existing file.
             string text = await File.ReadAllTextAsync(ownedEndpoint);
-            if (!WindowChromeCdp.TryReadEndpoint(text, out _) || File.Exists(endpointFile))
+            if (!WindowChromeCdp.TryReadEndpoint(text, out var endpoint) || File.Exists(endpointFile))
             {
                 Blocked("CI_CHROME_ENDPOINT_NOT_EXCLUSIVE");
                 return;
@@ -216,8 +216,91 @@ internal static class ChromeAcceptanceFixture
                 throw new InvalidOperationException("CI_CDP_FINAL_EFFECT_COUNT_MISMATCH");
             Console.WriteLine($"PASS chrome_ci.100_status_inspect_action_verify_cycles " +
                 $"clicks={state.Clicks} inputs={state.Inputs} owner={cdpWorker.Id} generation={generation}");
-            Console.WriteLine("NOT_TESTED / EXTERNAL_BLOCKER chrome_ci.multi_mcp_clients " +
-                "(standalone worker fixture, no installed USER broker)");
+
+            // The direct worker has finished its 100 verified effects. Close
+            // its socket *before* starting the real USER pipe ownership path.
+            cdpWorker.StandardInput.Close();
+            await cdpWorker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            cdpWorker.Dispose();
+            worker = null;
+
+            using (var brokerStop = new CancellationTokenSource())
+            {
+                Task owner = ChromeBrokerPipe.RunOwnerAsync(brokerStop.Token);
+                try
+                {
+                    if (!ChromeBrokerPipe.IsOwner)
+                        throw new InvalidOperationException("CI_CDP_PIPE_OWNER_NOT_STARTED");
+                    async Task<ChromeBrokerReply?> PipeAsync(ChromeConnectionAction action)
+                    {
+                        return await ChromeBrokerPipe.ExchangeAsync(new(Connection:
+                            new ChromeConnectionRequest(windowId!, selector, action),
+                            TraceId: Guid.NewGuid().ToString("N")), CancellationToken.None);
+                    }
+                    var shared = await PipeAsync(ChromeConnectionAction.REQUEST);
+                    for (int attempt = 0; attempt < 15 && shared?.Connection?.State ==
+                         ChromeConnectionState.CONSENT_PENDING; attempt++)
+                    {
+                        await Task.Delay(300);
+                        shared = await PipeAsync(ChromeConnectionAction.STATUS);
+                    }
+                    if (shared?.Connection?.State != ChromeConnectionState.CONNECTED)
+                    {
+                        Console.WriteLine("NOT_TESTED / EXTERNAL_BLOCKER " +
+                            $"chrome_ci.multi_mcp_clients reason=CONSENT_{shared?.Connection?.State}");
+                    }
+                    else
+                    {
+                        string sharedGeneration = shared!.Connection!.SessionGeneration ??
+                            throw new InvalidOperationException("CI_CDP_PIPE_GENERATION_MISSING");
+                        int expected = state.Clicks;
+                        foreach (int concurrency in new[] { 2, 4, 8 })
+                        {
+                            var reports = await Task.WhenAll(Enumerable.Range(0, concurrency)
+                                .Select(_ => RunPipeClientAsync(windowId!, selector, url)));
+                            if (!reports.All(r => r.OwnerPid == self.Id &&
+                                r.Generation == sharedGeneration && r.Verified))
+                                throw new InvalidOperationException(
+                                    $"CI_CDP_MULTICLIENT_REPLY_FAILURE clients={concurrency}");
+                            expected += concurrency;
+                            if (!await UntilAsync(() => state.Clicks == expected,
+                                TimeSpan.FromSeconds(3)))
+                                throw new InvalidOperationException(
+                                    $"CI_CDP_MULTICLIENT_EFFECT_COUNT clients={concurrency} " +
+                                    $"expected={expected} actual={state.Clicks}");
+                            Console.WriteLine($"PASS chrome_ci.shared_owner_clients_{concurrency} " +
+                                $"clicks={expected} generation={sharedGeneration}");
+                        }
+                        var processes = Process.GetProcessesByName("RunnerTests");
+                        int[] children;
+                        try
+                        {
+                            children = processes.Where(p => p.Id != self.Id &&
+                                p.SessionId == self.SessionId).Select(p => p.Id).ToArray();
+                        }
+                        finally { foreach (var p in processes) p.Dispose(); }
+                        if (children.Length != 1)
+                            throw new InvalidOperationException(
+                                $"CI_CDP_EXPECT_ONE_WORKER found={children.Length}");
+                        var sockets = SystemSnapshot.Observe(SystemQueryKind.TCP_CONNECTIONS,
+                            children[0], null, 50, 0, CancellationToken.None);
+                        int established = sockets.TcpConnections?.Count(t =>
+                            t.State == SystemTcpState.ESTABLISHED &&
+                            t.RemotePort == endpoint!.Port &&
+                            t.RemoteAddress == "127.0.0.1") ?? 0;
+                        if (sockets.Status != SystemQueryCode.COMPLETED || established != 1)
+                            throw new InvalidOperationException($"CI_CDP_EXPECT_ONE_SOCKET " +
+                                $"query={sockets.Status} established={established}");
+                        Console.WriteLine($"PASS chrome_ci.one_shared_cdp_worker_and_websocket " +
+                            $"worker_pid={children[0]} owner_pid={self.Id} socket_count={established}");
+                    }
+                }
+                finally
+                {
+                    await brokerStop.CancelAsync();
+                    await owner;
+                }
+            }
             Console.WriteLine("NOT_TESTED / EXTERNAL_BLOCKER chrome_ci.uia_locator " +
                 "(CDP element reference, not UIA locator)");
         }
@@ -246,6 +329,40 @@ internal static class ChromeAcceptanceFixture
 
     private static void Blocked(string reason) =>
         Console.WriteLine($"NOT_TESTED / EXTERNAL_BLOCKER chrome_ci.100_cycles reason={reason}");
+
+    private sealed record PipeClientReport(int OwnerPid, string Generation, bool Verified);
+
+    private static async Task<PipeClientReport> RunPipeClientAsync(string window, string profile,
+        string url)
+    {
+        string executable = Environment.ProcessPath ??
+            throw new InvalidOperationException("CI_PIPE_CLIENT_EXE_MISSING");
+        var start = new ProcessStartInfo(executable)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true
+        };
+        if (Path.GetFileNameWithoutExtension(executable).Equals("dotnet",
+            StringComparison.OrdinalIgnoreCase))
+            start.ArgumentList.Add(typeof(ChromeAcceptanceFixture).Assembly.Location);
+        start.ArgumentList.Add("--chrome-pipe-live-action");
+        start.ArgumentList.Add(window);
+        start.ArgumentList.Add(profile);
+        start.ArgumentList.Add(url);
+        using var client = Process.Start(start) ??
+            throw new InvalidOperationException("CI_CDP_PIPE_CLIENT_START_FAILED");
+        var output = client.StandardOutput.ReadToEndAsync();
+        await client.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(60));
+        string report = await output;
+        if (client.ExitCode != 0)
+            throw new InvalidOperationException($"CI_CDP_PIPE_CLIENT_EXIT={client.ExitCode}: {report}");
+        using var doc = JsonDocument.Parse(report);
+        var json = doc.RootElement;
+        return new(json.GetProperty("owner_pid").GetInt32(),
+            json.GetProperty("session_generation").GetString() ?? "",
+            json.GetProperty("verified").GetBoolean());
+    }
 
     private static async Task<bool> UntilAsync(Func<bool> predicate, TimeSpan budget)
     {
