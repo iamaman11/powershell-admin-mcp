@@ -30,12 +30,12 @@ if (args is ["--chrome-pipe-live-action", var liveWindow, var liveProfile, var l
         // dispatched no browser action; re-read the same HWND and PID before
         // trying the read-only STATUS once with the current native selector.
         using var self = Process.GetCurrentProcess();
-        var observed = ChromeProfileCatalog.ReadWindowProfileStable(liveWindow,
+        var nativeAvatar = ChromeProfileCatalog.ReadWindowProfileStable(liveWindow,
             self.SessionId, out _);
-        if (observed is { } current && current.WindowId == liveWindow &&
-            current.ProcessId == identity.ProcessId)
+        if (nativeAvatar is { } resolvedAvatar && resolvedAvatar.WindowId == liveWindow &&
+            resolvedAvatar.ProcessId == identity.ProcessId)
         {
-            liveProfile = current.DisplayName;
+            liveProfile = resolvedAvatar.DisplayName;
             statusRequest = Status();
             status = await ChromeBrokerPipe.ExchangeAsync(statusRequest, limit.Token);
         }

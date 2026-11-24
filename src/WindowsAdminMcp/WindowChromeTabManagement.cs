@@ -130,9 +130,29 @@ internal static partial class WindowChromeCdp
         IntPtr hwnd, Uri endpoint)
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(16));
-        var cdp = await TabSessionAsync(endpoint, deadline.Token);
-        var tabs = await TargetsForWindow(cdp, hwnd, request.WindowId, deadline.Token,
-            allowFallback: true);
+        Session cdp;
+        List<TabTarget> tabs;
+        try
+        {
+            cdp = await TabSessionAsync(endpoint, deadline.Token);
+            tabs = await TargetsForWindow(cdp, hwnd, request.WindowId, deadline.Token,
+                allowFallback: true);
+        }
+        catch (CdpWindowMappingException e)
+        {
+            return new(e.State == CdpWindowMappingState.NOT_FOUND
+                ? ChromeTabCode.TARGET_NOT_FOUND : ChromeTabCode.TARGET_AMBIGUOUS,
+                request.Action, Detail: e.Message);
+        }
+        catch (Exception e) when (e is OperationCanceledException or WebSocketException or
+                                   IOException or JsonException or InvalidOperationException)
+        {
+            ObserveCdpFailure(e);
+            // Native/CDP preflight failed before any tab command was sent.
+            return new(ChromeTabCode.CDP_UNAVAILABLE, request.Action,
+                Detail: e is OperationCanceledException ? "PREFLIGHT_TIMEOUT" :
+                    "PREFLIGHT_" + e.GetType().Name);
+        }
         if (request.Action == ChromeTabAction.LIST)
             return new(ChromeTabCode.COMPLETED, request.Action, Tabs: tabs.Take(100).Select(TabInfo).ToArray());
 
@@ -225,9 +245,16 @@ internal static partial class WindowChromeCdp
                     if (history.GetProperty("currentIndex").GetInt32() == desiredIndex)
                     {
                         var uri = new Uri(request.Url!);
-                        return new(ChromeTabCode.COMPLETED, request.Action, targetId,
-                            new(targetId, current?.Title ?? "", uri.AbsoluteUri,
-                                uri.GetLeftPart(UriPartial.Authority)));
+                        stage = "VERIFY_HISTORY_TARGET_URL";
+                        var targetInfo = await cdp.Call("Target.getTargetInfo", new {targetId});
+                        string? actualUrl = targetInfo.GetProperty("targetInfo")
+                            .GetProperty("url").GetString();
+                        if (Uri.TryCreate(actualUrl, UriKind.Absolute, out var actual) &&
+                            string.Equals(actual.AbsoluteUri, uri.AbsoluteUri,
+                                StringComparison.Ordinal))
+                            return new(ChromeTabCode.COMPLETED, request.Action, targetId,
+                                new(targetId, current?.Title ?? "", uri.AbsoluteUri,
+                                    uri.GetLeftPart(UriPartial.Authority)));
                     }
                     await Task.Delay(150, deadline.Token);
                     continue;
