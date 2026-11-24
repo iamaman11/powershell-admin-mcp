@@ -931,6 +931,21 @@ Check(doctorCatalogJson.Contains("\"tool_count\":22", StringComparison.Ordinal) 
 string missingRollbackRoot=Path.Combine(Path.GetTempPath(), "wmcp-doctor-test-" + Guid.NewGuid().ToString("N"));
 Check(Doctor.ReadRollbackPending(missingRollbackRoot) == false,
     "doctor.v2_absent_rollback_journal_is_not_a_pending_trial");
+Check(Doctor.OverallStatus([
+        new(DoctorComponent.Service,DoctorState.OK,DoctorReason.OBSERVED,DoctorAction.NONE),
+        new(DoctorComponent.Chrome,DoctorState.NOT_TESTED,DoctorReason.CHROME_NOT_PROBED,DoctorAction.CHECK_CHROME_CONNECTION),
+        new(DoctorComponent.PublishedClientSchema,DoctorState.NOT_TESTED,DoctorReason.CLIENT_SCHEMA_NOT_VERIFIED,
+            DoctorAction.VERIFY_PUBLISHED_CLIENT_SCHEMA),
+        new(DoctorComponent.UpdateAcceptance,DoctorState.NOT_TESTED,DoctorReason.UPDATE_TRIAL_PENDING,
+            DoctorAction.VERIFY_UPDATE_ACCEPTANCE)]) == DoctorState.OK &&
+    Doctor.OverallStatus([
+        new(DoctorComponent.Store,DoctorState.DEGRADED,DoctorReason.RECONCILIATION_REQUIRED,DoctorAction.INSPECT_JOBS),
+        new(DoctorComponent.Chrome,DoctorState.NOT_TESTED,DoctorReason.CHROME_NOT_PROBED,DoctorAction.CHECK_CHROME_CONNECTION)])
+        == DoctorState.DEGRADED &&
+    Doctor.OverallStatus([
+        new(DoctorComponent.Remote,DoctorState.NOT_TESTED,DoctorReason.REMOTE_NOT_TESTED,
+            DoctorAction.VERIFY_SUPPORTED_REMOTE_ACCESS)]) == DoctorState.NOT_TESTED,
+    "doctor.v2_optional_checks_do_not_mask_baseline_health");
 var historicTrial=UpdateTools.WithCurrentReadiness(new(UpdateToolCode.COMPLETED,
     Stage:"trial_not_ready",RollbackPending:true),doctorStatus);
 Check(historicTrial is {Stage:"trial_not_ready",RollbackPending:true,

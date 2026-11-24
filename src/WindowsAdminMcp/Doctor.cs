@@ -184,8 +184,7 @@ internal static class Doctor
         // never conflated with current admission capacity or service liveness.
         bool localReady=service && response.Info?.AdmissionOpen==true && store is not null &&
             store.Detailed < store.TotalLimit;
-        return new(2,checks.Any(c=>c.Status==DoctorState.DEGRADED)?DoctorState.DEGRADED:
-            checks.Any(c=>c.Status==DoctorState.NOT_TESTED)?DoctorState.NOT_TESTED:DoctorState.OK,
+        return new(2,OverallStatus(checks),
             Guid.NewGuid().ToString("N"),DateTimeOffset.UtcNow,clock.ElapsedMilliseconds,checks.ToArray(),
             RuntimeInformation.FrameworkDescription,Environment.ProcessPath,PowerShellRunner.Executable,
             response.Info,store,boot,tun,tunnelPid,vendorHash,self.SessionId,Environment.UserInteractive,package,startup,
@@ -193,6 +192,17 @@ internal static class Doctor
             localReady,service && response.Info?.UserContextAvailable==true,store?.NeedsReconciliation,
             evidence.RemoteReceiptMatched?DoctorState.OK:DoctorState.NOT_TESTED,
             package.Status==PackageCode.VERIFIED?package.Commit:null,toolCatalog,rollbackPending);
+    }
+
+    // These optional capabilities have no safe profile-free or connector-free
+    // proof in a default Doctor run. They remain visible without making a
+    // fully verified baseline installation permanently NOT_TESTED.
+    internal static DoctorState OverallStatus(IEnumerable<DoctorCheck> checks)
+    {
+        var baseline=checks.Where(c => c.Component is not
+            (DoctorComponent.Chrome or DoctorComponent.PublishedClientSchema or DoctorComponent.UpdateAcceptance)).ToArray();
+        return baseline.Any(c=>c.Status==DoctorState.DEGRADED)?DoctorState.DEGRADED:
+            baseline.Any(c=>c.Status==DoctorState.NOT_TESTED)?DoctorState.NOT_TESTED:DoctorState.OK;
     }
 
     internal static bool? ReadRollbackPending(string root)
