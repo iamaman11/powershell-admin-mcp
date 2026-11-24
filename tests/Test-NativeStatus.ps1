@@ -131,8 +131,10 @@ try{
             $statusTool[0].outputSchema.properties.Contains('tunnel_metrics')) 'r5.optional_typed_doctor_and_tunnel_metrics_without_new_tool'
         $schemaBytes=[Text.Encoding]::UTF8.GetByteCount(($list|ConvertTo-Json -Depth 30 -Compress))
         Write-Host "MCP_TOOLS_LIST_BYTES=$schemaBytes"
-        # Typed Chrome profile discovery and consent states increase the catalog.
-        Assert ($schemaBytes -le 65536) 'issue56.typed_tool_schema_under_64kib'
+        # Five additional strictly typed native tools grow the catalog to
+        # ~75.8 KiB. Keep a measured 80 KiB ceiling so a future accidental
+        # unbounded schema expansion still fails this real MCP tools/list test.
+        Assert ($schemaBytes -le 81920) 'issue56.typed_tool_schema_under_80kib'
         Assert (@($list.tools|Where-Object {$_.name -eq 'powershell_status' -and $_.Contains('outputSchema')}).Count -eq 1) 'r1.typed_status_schema'
         $v=Wait-Status $p 'OK'
         Assert ($v.service_pid -eq $svc.ProcessId -and $v.execution_sid -eq 'S-1-5-18' -and $v.elevated) 'r1.scm_pid_and_real_execution_identity'
