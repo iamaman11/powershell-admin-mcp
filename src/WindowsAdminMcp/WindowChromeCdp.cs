@@ -475,11 +475,18 @@ internal static partial class WindowChromeCdp
                         }
                         continue;
                     }
-                    if (!responseId.TryGetInt32(out int id) || id <= 0)
+                    if (responseId.ValueKind != JsonValueKind.Number ||
+                        !responseId.TryGetInt32(out int id) || id <= 0)
                         throw new JsonException("CDP_RESPONSE_ID_INVALID");
                     if (!_pending.TryGetValue(id, out var waiter)) continue;
-                    string? responseSession = message.TryGetProperty("sessionId", out var targetSession)
-                        ? targetSession.GetString() : null;
+                    string? responseSession = null;
+                    if (message.TryGetProperty("sessionId", out var targetSession))
+                    {
+                        if (targetSession.ValueKind is not
+                            (JsonValueKind.String or JsonValueKind.Null))
+                            throw new JsonException("CDP_RESPONSE_SESSION_INVALID");
+                        responseSession = targetSession.GetString();
+                    }
                     if (responseSession != waiter.SessionId)
                         throw new JsonException("CDP_RESPONSE_SESSION_MISMATCH");
                     if (message.TryGetProperty("error", out _))
