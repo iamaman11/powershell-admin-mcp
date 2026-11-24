@@ -2,10 +2,6 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 
-using System.Net;
-using System.Net.Sockets;
-using System.Text;
-
 internal static class NetworkProbeAcceptance
 {
     internal static void Run()
