@@ -1709,12 +1709,16 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
     int keyboardClickCount = 0;
     int asyncDispatchCount = 0;
     int titleDispatchCount = 0;
+    int gestureHoverCount = 0;
+    int gestureLeftDownCount = 0;
+    int gestureRightDownCount = 0;
+    int scrollWheelCount = 0;
     System.Windows.Forms.Form? testCover = null;
     var uiThread = new Thread(() =>
     {
         try
         {
-            using var form = new System.Windows.Forms.Form { Text = "CI_UIA_OWNED_WINDOW", Width = 330, Height = 475 };
+            using var form = new System.Windows.Forms.Form { Text = "CI_UIA_OWNED_WINDOW", Width = 330, Height = 600 };
             using var button = new System.Windows.Forms.Button
                 { Text = "CI_UIA_OWNED_BUTTON", AccessibleName = "CI_UIA_OWNED_BUTTON", Width = 250 };
             using var input = new System.Windows.Forms.TextBox
@@ -1808,6 +1812,29 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             expandable.Items.AddRange(["Option A", "Option B"]);
             expandable.SelectedIndex = 0;
             form.Controls.Add(expandable);
+            // Every physical pointer event below is delivered only to this
+            // disposable CI-owned window. Counters prove actual OS delivery,
+            // not merely a successful SendInput return value.
+            using var gestureButton = new System.Windows.Forms.Button
+                { Text = "CI_UIA_GESTURE_BUTTON", AccessibleName = "CI_UIA_GESTURE_BUTTON",
+                  Left = 10, Top = 425, Width = 250, Height = 30 };
+            gestureButton.MouseEnter += (_, _) => Interlocked.Increment(ref gestureHoverCount);
+            gestureButton.MouseDown += (_, e) =>
+            {
+                if (e.Button == System.Windows.Forms.MouseButtons.Left)
+                    Interlocked.Increment(ref gestureLeftDownCount);
+                if (e.Button == System.Windows.Forms.MouseButtons.Right)
+                    Interlocked.Increment(ref gestureRightDownCount);
+            };
+            form.Controls.Add(gestureButton);
+            using var scrollPanel = new System.Windows.Forms.Panel
+                { AccessibleName = "CI_UIA_SCROLL_PANEL", AccessibleRole =
+                    System.Windows.Forms.AccessibleRole.Pane,
+                  Left = 10, Top = 470, Width = 250, Height = 60, AutoScroll = true };
+            scrollPanel.MouseWheel += (_, _) => Interlocked.Increment(ref scrollWheelCount);
+            scrollPanel.Controls.Add(new System.Windows.Forms.Label
+                { Text = "CI_UIA_SCROLL_CONTENT", Top = 210, Width = 100, Height = 20 });
+            form.Controls.Add(scrollPanel);
             // Emulate Chromium's deeply nested ControlView hierarchy without a browser dependency.
             var nested = new System.Windows.Forms.Panel
                 { Left = 10, Top = 142, Width = 275, Height = 42,
@@ -2322,6 +2349,122 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                 typed.ExpectedStateObserved == true && actualText == typedValue,
                 "windows.type_text_owned_edit_value_observed_after_native_input");
         }
+        // Physical input is restricted to the isolated GitHub Windows runner.
+        // An API dispatch acknowledgement is not proof: the owned controls
+        // count actual WinForms events, and unknown effects are never retried.
+        if (Environment.GetEnvironmentVariable("GITHUB_ACTIONS") == "true" &&
+            Environment.GetEnvironmentVariable("RUNNER_OS") == "Windows")
+        {
+            static bool InputNotAvailable(WindowActionResult action) => action.Status is
+                WindowActionCode.FOREGROUND_UNAVAILABLE or WindowActionCode.WINDOW_NOT_VISIBLE or
+                WindowActionCode.CLICK_POINT_UNAVAILABLE or WindowActionCode.TARGET_OCCLUDED;
+            static async Task<bool> Observed(Func<bool> condition)
+            {
+                for (int i = 0; i < 20; i++)
+                {
+                    if (condition()) return true;
+                    await Task.Delay(25);
+                }
+                return condition();
+            }
+            var gestureTree = await Task.Run(() => WindowInspector.InspectCore(created.Handle,
+                3, 50, realWindowId, nameContains: "CI_UIA_GESTURE_BUTTON",
+                roleFilter: WindowRoleFilter.BUTTON)).WaitAsync(TimeSpan.FromSeconds(5));
+            Check(gestureTree.Status == WindowInspectCode.COMPLETED &&
+                gestureTree.Elements.Length == 1, "windows.owned_pointer_fixture_resolves_exact_button");
+            var gesture = gestureTree.Elements[0];
+            var hover = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+                new WindowActionRequest(realWindowId, gesture.ElementId, WindowActionKind.HOVER,
+                    null, gesture.Path, InputMode: WindowInputMode.ALLOW_FOREGROUND_INPUT)))
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            if (InputNotAvailable(hover))
+                Console.WriteLine($"NOT_TESTED windows.hover_owned_button status={hover.Status}");
+            else
+                Check(hover.Status == WindowActionCode.COMPLETED &&
+                    hover.ExecutionMethod == WindowExecutionMethod.WIN32_SENDINPUT &&
+                    await Observed(() => Volatile.Read(ref gestureHoverCount) > 0) &&
+                    (bool)created.Form.Invoke(new Func<bool>(() =>
+                    {
+                        var target = created.Form.Controls.OfType<System.Windows.Forms.Button>()
+                            .Single(b => b.AccessibleName == "CI_UIA_GESTURE_BUTTON");
+                        return target.RectangleToScreen(target.ClientRectangle)
+                            .Contains(System.Windows.Forms.Cursor.Position);
+                    })), "windows.hover_owned_button_observes_pointer_and_mouseenter");
+
+            var right = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+                new WindowActionRequest(realWindowId, gesture.ElementId, WindowActionKind.RIGHT_CLICK,
+                    null, gesture.Path, InputMode: WindowInputMode.ALLOW_FOREGROUND_INPUT)))
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            if (InputNotAvailable(right))
+                Console.WriteLine($"NOT_TESTED windows.right_click_owned_button status={right.Status}");
+            else
+                Check(right.Status == WindowActionCode.COMPLETED &&
+                    right.ExecutionMethod == WindowExecutionMethod.WIN32_SENDINPUT &&
+                    await Observed(() => Volatile.Read(ref gestureRightDownCount) == 1),
+                    "windows.right_click_owned_button_observes_single_right_mouse_down");
+
+            var doubled = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+                new WindowActionRequest(realWindowId, gesture.ElementId, WindowActionKind.DOUBLE_CLICK,
+                    null, gesture.Path, InputMode: WindowInputMode.ALLOW_FOREGROUND_INPUT)))
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            if (InputNotAvailable(doubled))
+                Console.WriteLine($"NOT_TESTED windows.double_click_owned_button status={doubled.Status}");
+            else
+                Check(doubled.Status == WindowActionCode.COMPLETED &&
+                    doubled.ExecutionMethod == WindowExecutionMethod.WIN32_SENDINPUT &&
+                    await Observed(() => Volatile.Read(ref gestureLeftDownCount) == 2),
+                    "windows.double_click_owned_button_observes_two_left_mouse_downs");
+
+            var destination = (System.Drawing.Point)created.Form.Invoke(
+                new Func<System.Drawing.Point>(() =>
+                {
+                    var target = created.Form.Controls.OfType<System.Windows.Forms.Button>()
+                        .Single(b => b.AccessibleName == "CI_UIA_GESTURE_BUTTON");
+                    return target.PointToScreen(new System.Drawing.Point(target.Width * 3 / 4,
+                        target.Height / 2));
+                }));
+            var dragged = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+                new WindowActionRequest(realWindowId, gesture.ElementId, WindowActionKind.DRAG,
+                    null, gesture.Path, TargetX: destination.X, TargetY: destination.Y,
+                    InputMode: WindowInputMode.ALLOW_FOREGROUND_INPUT)))
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            if (InputNotAvailable(dragged))
+                Console.WriteLine($"NOT_TESTED windows.drag_owned_button status={dragged.Status}");
+            else
+                Check(dragged.Status == WindowActionCode.COMPLETED &&
+                    dragged.ExecutionMethod == WindowExecutionMethod.WIN32_SENDINPUT &&
+                    System.Windows.Forms.Cursor.Position == destination &&
+                    await Observed(() => Volatile.Read(ref gestureLeftDownCount) == 3),
+                    "windows.drag_owned_button_observes_down_and_destination");
+
+            var scrollTree = await Task.Run(() => WindowInspector.InspectCore(created.Handle,
+                3, 50, realWindowId, nameContains: "CI_UIA_SCROLL_PANEL"))
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            Check(scrollTree.Status == WindowInspectCode.COMPLETED &&
+                scrollTree.Elements.Length == 1, "windows.owned_scroll_fixture_resolves_exact_container");
+            var scrollTarget = scrollTree.Elements[0];
+            var scrolled = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+                new WindowActionRequest(realWindowId, scrollTarget.ElementId, WindowActionKind.SCROLL,
+                    null, scrollTarget.Path, ScrollDirection: WindowScrollDirection.DOWN,
+                    ScrollUnits: 2, InputMode: WindowInputMode.ALLOW_FOREGROUND_INPUT)))
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            if (InputNotAvailable(scrolled))
+                Console.WriteLine($"NOT_TESTED windows.scroll_owned_panel status={scrolled.Status}");
+            else
+                Check(scrolled.Status == WindowActionCode.COMPLETED &&
+                    (scrolled.ExecutionMethod is WindowExecutionMethod.UIA_PATTERN or
+                        WindowExecutionMethod.WIN32_SENDINPUT) &&
+                    await Observed(() => (bool)created.Form.Invoke(new Func<bool>(() =>
+                        created.Form.Controls.OfType<System.Windows.Forms.Panel>()
+                            .Single(p => p.AccessibleName == "CI_UIA_SCROLL_PANEL")
+                            .AutoScrollPosition.Y != 0))),
+                    "windows.scroll_owned_panel_observes_actual_scroll_offset");
+            Console.WriteLine($"OWNED_POINTER_EVENTS hover={Volatile.Read(ref gestureHoverCount)} " +
+                $"right={Volatile.Read(ref gestureRightDownCount)} " +
+                $"left={Volatile.Read(ref gestureLeftDownCount)} " +
+                $"wheel={Volatile.Read(ref scrollWheelCount)}");
+        }
+        else Console.WriteLine("NOT_TESTED windows.physical_pointer_suite ISOLATED_WINDOWS_CI_ONLY");
         // Last action on our own synthetic form: WM_CLOSE must be observed,
         // never confused with mere PostMessage acceptance or process killing.
         var closed=await Task.Run(() => WindowManager.Execute(realWindowId,
