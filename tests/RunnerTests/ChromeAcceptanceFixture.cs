@@ -194,7 +194,9 @@ internal static class ChromeAcceptanceFixture
                 var status = (await ExchangeAsync(Connection(ChromeConnectionAction.STATUS))).Connection;
                 if (status?.State != ChromeConnectionState.CONNECTED ||
                     status.SessionGeneration != generation)
-                    throw new InvalidOperationException($"CI_CDP_STATUS_LOST cycle={iteration} state={status?.State}");
+                    throw new InvalidOperationException($"CI_CDP_STATUS_LOST cycle={iteration} " +
+                        $"code={status?.Status} state={status?.State} detail={status?.Detail} " +
+                        $"failure={status?.FailureReason}");
 
                 bool setText = iteration % 2 == 0;
                 string label = setText ? "CI_CDP_VALUE" : "CI_CDP_BUTTON";

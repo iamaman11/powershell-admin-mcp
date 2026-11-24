@@ -252,6 +252,22 @@ internal static class ChromeProfileCatalog
         IReadOnlyList<ChromeProfileMetadata>? known = null) =>
         ReadWindowProfile(windowId, session, out _, known);
 
+    // Chrome can temporarily hide the native avatar while rebuilding its UIA
+    // toolbar. Retry only this read-only identity probe, never a CDP action.
+    internal static ChromeProfileInfo? ReadWindowProfileStable(string windowId, int session,
+        out ChromeProfileReadCode code)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            var profile = ReadWindowProfile(windowId, session, out code);
+            if (profile is not null || attempt == 3 || code is not (
+                ChromeProfileReadCode.AVATAR_MISSING or
+                ChromeProfileReadCode.ROOT_UNAVAILABLE or
+                ChromeProfileReadCode.PROVIDER_ERROR)) return profile;
+            Thread.Sleep(125);
+        }
+    }
+
     internal static ChromeProfileInfo? ReadWindowProfile(string windowId, int session,
         out ChromeProfileReadCode code, IReadOnlyList<ChromeProfileMetadata>? known = null)
     {

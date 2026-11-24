@@ -245,10 +245,13 @@ internal static partial class WindowChromeCdp
     internal static ChromeConnectionResult ConnectInWorker(ChromeConnectionRequest request)
     {
         using var self = Process.GetCurrentProcess();
-        var profile = ChromeProfileCatalog.ReadWindowProfile(request.WindowId, self.SessionId);
+        var profile = ChromeProfileCatalog.ReadWindowProfileStable(request.WindowId,
+            self.SessionId, out var profileRead);
         if (profile is null || !ChromeProfileCatalog.MatchesSelector(profile, request.ExpectedProfile))
             return new(ChromeConnectionCode.PROFILE_MISMATCH,
-                ChromeConnectionState.NOT_REQUESTED, ChromeConnectionNextAction.SELECT_PROFILE);
+                ChromeConnectionState.NOT_REQUESTED, ChromeConnectionNextAction.SELECT_PROFILE,
+                Detail: $"PROFILE_{(profile is null ? profileRead :
+                    ChromeProfileCatalog.ChromeProfileReadCode.PROFILE_MISMATCH)}");
 
         if (request.Action == ChromeConnectionAction.STATUS)
         {
@@ -389,25 +392,12 @@ internal static partial class WindowChromeCdp
             using var self = Process.GetCurrentProcess();
             var id = WindowCatalog.FormatId(new WindowIdentity(hwnd.ToInt64(), owner.Id,
                 owner.StartTime.ToFileTimeUtc(), self.SessionId));
-            // Chrome's native toolbar can momentarily rebuild its UIA tree.
-            // Revalidate the identity read at most four times; do not dispatch
-            // or replay an action when the identity remains unverified.
-            for (int attempt = 0; attempt < 4; attempt++)
-            {
-                var profile = ChromeProfileCatalog.ReadWindowProfile(id, self.SessionId, out reason);
-                if (profile is not null)
-                {
-                    bool matches = ChromeProfileCatalog.MatchesSelector(profile, expected);
-                    if (!matches) reason = ChromeProfileCatalog.ChromeProfileReadCode.PROFILE_MISMATCH;
-                    return matches;
-                }
-                if (attempt == 3 || reason is not (
-                    ChromeProfileCatalog.ChromeProfileReadCode.AVATAR_MISSING or
-                    ChromeProfileCatalog.ChromeProfileReadCode.ROOT_UNAVAILABLE or
-                    ChromeProfileCatalog.ChromeProfileReadCode.PROVIDER_ERROR)) break;
-                Thread.Sleep(125);
-            }
-            return false;
+            var profile = ChromeProfileCatalog.ReadWindowProfileStable(id, self.SessionId,
+                out reason);
+            if (profile is null) return false;
+            bool matches = ChromeProfileCatalog.MatchesSelector(profile, expected);
+            if (!matches) reason = ChromeProfileCatalog.ChromeProfileReadCode.PROFILE_MISMATCH;
+            return matches;
         }
         catch (Exception e) when (e is COMException or ElementNotAvailableException or
             InvalidOperationException or ArgumentException or Win32Exception or OverflowException)
