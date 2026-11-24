@@ -50,26 +50,23 @@ try{
     Check ($plan.status -eq 'READY' -and $plan.candidate_count -eq 2 -and
         $plan.retained_count -eq 3 -and $plan.candidate_bytes -gt 70 -and
         $plan.plan_sha256 -cmatch '^[a-f0-9]{64}$') 'retention.plan_bounded_and_typed'
-    Check (Reject {Invoke-BackupCleanup $root ('9'*40) $plan.plan_sha256}
-        'BACKUP_INSTALLED_COMMIT_CHANGED') 'retention.reject_changed_installation'
+    $wrongCommit=Reject {Invoke-BackupCleanup $root ('9'*40) $plan.plan_sha256} 'BACKUP_INSTALLED_COMMIT_CHANGED'
+    Check $wrongCommit 'retention.reject_changed_installation'
     [IO.File]::WriteAllBytes((Join-Path $oldTrial 'payload.bin'),[byte[]]::new(35))
     Set-TestProtection (Join-Path $oldTrial 'payload.bin')
-    Check (Reject {Invoke-BackupCleanup $root $current $plan.plan_sha256}
-        'BACKUP_PLAN_CHANGED') 'retention.changed_size_denies_delete'
-    Check ((Test-Path -LiteralPath $oldAccepted) -and (Test-Path -LiteralPath $oldTrial))
-        'retention.failed_plan_preserves_all_archives'
+    $changed=Reject {Invoke-BackupCleanup $root $current $plan.plan_sha256} 'BACKUP_PLAN_CHANGED'
+    Check $changed 'retention.changed_size_denies_delete'
+    Check ((Test-Path -LiteralPath $oldAccepted) -and (Test-Path -LiteralPath $oldTrial)) 'retention.failed_plan_preserves_all_archives'
     $fresh=Get-BackupPlan $root $current
     $result=Invoke-BackupCleanup $root $current $fresh.plan_sha256
     Check ($result.status -eq 'COMPLETED' -and $result.deleted_count -eq 2 -and
-        $result.reclaimed_bytes -eq $fresh.candidate_bytes -and $result.remaining_count -eq 3)
-        'retention.apply_exact_plan_and_independent_readback'
+        $result.reclaimed_bytes -eq $fresh.candidate_bytes -and $result.remaining_count -eq 3) 'retention.apply_exact_plan_and_independent_readback'
     Check ((Test-Path -LiteralPath $keepTrial) -and (Test-Path -LiteralPath $keepAccepted) -and
         (Test-Path -LiteralPath $legacy) -and
         (Test-Path -LiteralPath (Join-Path $root '.rollback')) -and
-        -not(Test-Path -LiteralPath $oldTrial) -and -not(Test-Path -LiteralPath $oldAccepted))
-        'retention.protected_rollback_and_last_accepted_survive'
-    Check (Reject {Invoke-BackupCleanup $root $current $fresh.plan_sha256}
-        'BACKUP_PLAN_CHANGED') 'retention.stale_plan_cannot_replay'
+        -not(Test-Path -LiteralPath $oldTrial) -and -not(Test-Path -LiteralPath $oldAccepted)) 'retention.protected_rollback_and_last_accepted_survive'
+    $stale=Reject {Invoke-BackupCleanup $root $current $fresh.plan_sha256} 'BACKUP_PLAN_CHANGED'
+    Check $stale 'retention.stale_plan_cannot_replay'
 }finally{
     # CI fixture only; never point this cleanup at the actual installation.
     if(Test-Path -LiteralPath $root){Remove-Item -LiteralPath $root -Recurse -Force}
