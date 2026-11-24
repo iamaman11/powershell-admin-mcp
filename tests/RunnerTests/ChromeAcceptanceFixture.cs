@@ -104,7 +104,8 @@ internal static class ChromeAcceptanceFixture
             bool found = await UntilAsync(() =>
             {
                 var window = WindowCatalog.List(100, self.SessionId).Windows
-                    .FirstOrDefault(w => w.ProcessId == browserPid);
+                    .FirstOrDefault(w => w.ProcessId == browserPid &&
+                        w.Title == "WMCP CI Chrome - Google Chrome");
                 if (window is null) return false;
                 windowId = window.WindowId;
                 profile = ChromeProfileCatalog.ReadWindowProfile(windowId, self.SessionId);
@@ -169,6 +170,25 @@ internal static class ChromeAcceptanceFixture
             string? generation = connected.Connection.SessionGeneration;
             if (generation is null) throw new InvalidOperationException("CI_CDP_GENERATION_MISSING");
             Console.WriteLine($"PASS chrome_ci.authorized_worker_connected owner={cdpWorker.Id} generation={generation}");
+
+            // Chrome's first native window can be visible before the page
+            // target and its window geometry settle. Only retry the *read-only*
+            // inspection preflight; never replay a potentially effectful action.
+            WindowInspectResult? preflight = null;
+            for (int attempt = 0; attempt < 30; attempt++)
+            {
+                preflight = (await ExchangeAsync(new(Inspect: new WindowInspectRequest(
+                    windowId!, 4, 20, null, null, 0, false, "CI_CDP_VALUE",
+                    WindowRoleFilter.EDIT, 0, WindowInspectScope.TAB,
+                    ExpectedProfile: selector, ExpectedUrl: url)))).Inspect;
+                if (preflight?.Status == WindowInspectCode.COMPLETED &&
+                    preflight.Elements.Any(e => e.ElementId.StartsWith("c1:",
+                        StringComparison.Ordinal))) break;
+                await Task.Delay(300);
+            }
+            if (preflight?.Status != WindowInspectCode.COMPLETED)
+                throw new InvalidOperationException($"CI_CDP_READ_ONLY_PREFLIGHT " +
+                    $"status={preflight?.Status} detail={preflight?.Detail}");
 
             for (int iteration = 0; iteration < Cycles; iteration++)
             {
