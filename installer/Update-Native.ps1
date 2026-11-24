@@ -295,6 +295,14 @@ function Test-ScheduledUpdateIdentity($task,[string]$account,[string]$updater,[s
         $task.Principal.RunLevel.ToString() -eq 'Highest' -and @($task.Actions).Count -eq 1 -and
         $task.Actions[0].Arguments -ceq $expectedArguments
 }
+function Assert-InstalledDoctorReport($d){
+    # The updater consumes the package integrity field, not a particular
+    # Doctor presentation schema. A new Doctor schema must not make a verified
+    # installation look broken during the exact-commit readiness readback.
+    if($null -eq $d -or ($d.schemaVersion -isnot [int] -and $d.schemaVersion -isnot [long]) -or
+       $d.schemaVersion -lt 1 -or
+       $d.package.status -ne 'VERIFIED'){throw 'UPDATE_INSTALLED_PACKAGE_UNVERIFIED'}
+}
 # Dot-sourcing exposes only the pure checks for isolated CI, not a way around
 # the public local-console guard.
 if($MyInvocation.InvocationName -eq '.'){return}
@@ -357,7 +365,7 @@ function Read-InstalledDoctor {
     $PSNativeCommandUseErrorActionPreference=$false
     $raw=& $native doctor
     $d=$raw|ConvertFrom-Json
-    if($d.schemaVersion -ne 1 -or $d.package.status -ne 'VERIFIED'){throw 'UPDATE_INSTALLED_PACKAGE_UNVERIFIED'}
+    Assert-InstalledDoctorReport $d
     return $d
 }
 function Get-UpdateClients([int[]]$allowedParents){

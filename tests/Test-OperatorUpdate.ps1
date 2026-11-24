@@ -4,6 +4,19 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot '../installer/Update-OperatorTask.ps1')
 function Check($ok,$name){if(-not $ok){throw "FAIL $name"};Write-Host "PASS $name"}
 function Reject([scriptblock]$body,[string]$prefix){try{& $body;return $false}catch{return $_.Exception.Message.StartsWith($prefix,[StringComparison]::Ordinal)}}
+$doctorVerified=[pscustomobject]@{schemaVersion=2;package=[pscustomobject]@{status='VERIFIED'}}
+Assert-InstalledDoctorReport $doctorVerified
+Write-Host 'PASS operator.doctor_v2_verified_package_readback'
+$doctorVerified.schemaVersion=3
+Assert-InstalledDoctorReport $doctorVerified
+Write-Host 'PASS operator.future_doctor_schema_not_pinned_to_v2'
+$doctorVerified.schemaVersion=0
+Check (Reject {Assert-InstalledDoctorReport $doctorVerified} 'UPDATE_INSTALLED_PACKAGE_UNVERIFIED') 'operator.invalid_doctor_schema_denied'
+$doctorVerified.schemaVersion='2'
+Check (Reject {Assert-InstalledDoctorReport $doctorVerified} 'UPDATE_INSTALLED_PACKAGE_UNVERIFIED') 'operator.untyped_doctor_schema_denied'
+$doctorVerified.schemaVersion=2
+$doctorVerified.package.status='MANIFEST_UNVERIFIED'
+Check (Reject {Assert-InstalledDoctorReport $doctorVerified} 'UPDATE_INSTALLED_PACKAGE_UNVERIFIED') 'operator.unverified_package_still_denied'
 $tokens=$null;$parseErrors=$null
 $helperAst=[Management.Automation.Language.Parser]::ParseFile(
     (Join-Path $PSScriptRoot '../installer/Update-OperatorTask.ps1'),[ref]$tokens,[ref]$parseErrors)
