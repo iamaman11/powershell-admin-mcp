@@ -130,7 +130,9 @@ internal static class ChromeAcceptanceFixture
             var cdpWorker = Process.Start(workerStart) ??
                 throw new InvalidOperationException("CDP_WORKER_NOT_STARTED");
             worker = cdpWorker;
-            string selector = profile!.ProfileId ?? profile.Email ?? profile.DisplayName;
+            // The throwaway CI profile has no stable account metadata. Its
+            // verified native avatar display name is the binding selector.
+            string selector = profile!.DisplayName;
 
             async Task<ChromeBrokerReply> ExchangeAsync(ChromeBrokerRequest request)
             {
@@ -238,6 +240,9 @@ internal static class ChromeAcceptanceFixture
                             TraceId: Guid.NewGuid().ToString("N")), CancellationToken.None);
                     }
                     var shared = await PipeAsync(ChromeConnectionAction.REQUEST);
+                    Console.WriteLine($"CHROME_CI_SHARED_REQUEST status={shared?.Connection?.Status} " +
+                        $"state={shared?.Connection?.State} next={shared?.Connection?.NextAction} " +
+                        $"failure={shared?.Connection?.FailureReason} detail={shared?.Connection?.Detail}");
                     for (int attempt = 0; attempt < 15 && shared?.Connection?.State ==
                          ChromeConnectionState.CONSENT_PENDING; attempt++)
                     {
@@ -246,8 +251,14 @@ internal static class ChromeAcceptanceFixture
                     }
                     if (shared?.Connection?.State != ChromeConnectionState.CONNECTED)
                     {
-                        Console.WriteLine("NOT_TESTED / EXTERNAL_BLOCKER " +
-                            $"chrome_ci.multi_mcp_clients reason=CONSENT_{shared?.Connection?.State}");
+                        if (shared?.Connection?.State is ChromeConnectionState.CONSENT_PENDING or
+                            ChromeConnectionState.CONSENT_WINDOW_UNAVAILABLE or
+                            ChromeConnectionState.CONSENT_TIMED_OUT)
+                            Console.WriteLine("NOT_TESTED / EXTERNAL_BLOCKER " +
+                                $"chrome_ci.multi_mcp_clients reason=CONSENT_{shared.Connection.State}");
+                        else throw new InvalidOperationException(
+                            $"CI_CDP_SHARED_OWNER_CONNECT_FAILED status={shared?.Connection?.Status} " +
+                            $"state={shared?.Connection?.State} detail={shared?.Connection?.Detail}");
                     }
                     else
                     {
