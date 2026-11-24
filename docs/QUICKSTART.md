@@ -217,6 +217,10 @@ Call `windows.chrome_connection(action=LIST)` to discover the exact new
 managed_profile_id=work, window_id=..., expected_profile=...)`.
 `CONNECTING` means wait for `STATUS`; `CONNECTED` proves a usable CDP socket.
 The separate managed profile needs no native consent prompt on every connection.
+The connection-only result has `target_ready=null` because no particular tab
+was probed. This is **not** a failed target check. Verify an actual tab with
+`windows.chrome_tab(action=LIST)` or `windows.inspect_window(scope=TAB)`;
+their typed results describe target resolution and readiness.
 
 After connecting either mode, use `windows.chrome_tab`:
 

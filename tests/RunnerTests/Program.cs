@@ -1444,6 +1444,15 @@ Check(new ChromeBrokerRequest(Connection: connectRequest).Valid &&
     WindowChromeCdp.ConsentTimeout == TimeSpan.FromMinutes(5) &&
     connectReply.NextAction == ChromeConnectionNextAction.ALLOW_CHROME_PROMPT,
     "chrome.connection_consent_pending_is_typed_and_not_a_grant");
+var connectedWithoutTab = new ChromeConnectionResult(ChromeConnectionCode.OK,
+    ChromeConnectionState.CONNECTED);
+string connectedWire = System.Text.Json.JsonSerializer.Serialize(connectedWithoutTab, PipeWire.Json);
+Check(connectedWithoutTab.TransportConnected && connectedWithoutTab.ConsentConfirmed &&
+    connectedWithoutTab.TargetReady is null &&
+    connectedWire.Contains("\"target_ready\":null", StringComparison.Ordinal) &&
+    System.Text.Json.JsonSerializer.Deserialize<ChromeConnectionResult>(connectedWire, PipeWire.Json)?
+        .TargetReady is null,
+    "chrome.connection_only_reports_not_probed_tab_readiness_as_nullable");
 var lostConnection = new ChromeConnectionResult(ChromeConnectionCode.OK,
     ChromeConnectionState.CONNECTION_LOST, ChromeConnectionNextAction.RETRY_CONNECTION,
     FailureReason: ChromeConnectionFailureReason.SOCKET_CLOSED,

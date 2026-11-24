@@ -214,6 +214,9 @@ internal static partial class WindowChromeCdp
     // read-only alternative; neither route focuses, reloads or thaws a page.
     // The first command has its *own* deadline: the canceled waiter leaves the
     // socket reader alive and a late reply cannot be mistaken for the fallback.
+    // A tab-local command rejection or a response without a usable loaderId
+    // also permits this read-only alternative; other failures retain their
+    // original cause instead of being silently hidden.
     // Both paths must yield a real loaderId, otherwise no actionable element
     // fingerprint can be minted and no input can be dispatched.
     internal static async Task<string> ReadFrameLoaderAsync(Session cdp, string sessionId,
@@ -232,6 +235,12 @@ internal static partial class WindowChromeCdp
         {
             // An unanswered *individual* command is not proof of a lost CDP
             // connection, and no subsequent command may reuse its response.
+        }
+        catch (InvalidOperationException e) when (e.Message is
+            "CDP_COMMAND_REJECTED" or "CDP_TAB_LOADER_UNAVAILABLE")
+        {
+            // A rejected frame-tree query is not a failed WebSocket. Do not
+            // reconnect or retry the same command; query the alternative.
         }
         finally
         {
