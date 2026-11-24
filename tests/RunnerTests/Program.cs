@@ -2180,7 +2180,7 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         // on a disabled button without actually emitting a Click event. A
         // successful provider call is not a verified effect.
         int saveClicks = Volatile.Read(ref disabledSaveClickCount);
-        Check(saveClicks == 0 && !nativeDisabled.Current.IsEnabled,
+        Check(saveClicks == 0 && !nativeDisabled!.Current.IsEnabled,
             "windows.disabled_native_provider_did_not_emit_click_event");
         if (providerDisabled.Status == WindowActionCode.UIA_ELEMENTNOTENABLED_UNKNOWN_EFFECT)
         {
