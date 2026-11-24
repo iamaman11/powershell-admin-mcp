@@ -68,13 +68,16 @@ function Get-BackupPlan([string]$root,[string]$expected){
     })
     $selected=@($rows|Where-Object {-not $_.keep})
     $retained=@($rows|Where-Object keep)
+    [long]$selectedBytes=0;[long]$retainedBytes=0
+    foreach($row in $selected){$selectedBytes+=[long]$row.bytes}
+    foreach($row in $retained){$retainedBytes+=[long]$row.bytes}
     $canonical=($expected+'|'+$rollbackCommit+'|'+
         (($rows|ForEach-Object {"$($_.name):$($_.bytes):$($_.files):$($_.keep)"}) -join '|'))
     $digest=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
         [Text.Encoding]::UTF8.GetBytes($canonical))).ToLowerInvariant()
     return [pscustomobject]@{status='READY';installed_commit=$active;plan_sha256=$digest;
-        candidate_count=$selected.Count;candidate_bytes=[long](($selected|Measure-Object bytes -Sum).Sum);
-        retained_count=$retained.Count;retained_bytes=[long](($retained|Measure-Object bytes -Sum).Sum);
+        candidate_count=$selected.Count;candidate_bytes=$selectedBytes;
+        retained_count=$retained.Count;retained_bytes=$retainedBytes;
         rollback_pending=($null -ne $rollbackCommit);entries=$selected}
 }
 function Invoke-BackupCleanup([string]$root,[string]$expected,[string]$digest){
