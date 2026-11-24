@@ -58,7 +58,9 @@ internal static class WindowActionNoFocus
         WindowActionRequest request, Stopwatch clock, bool radioInvoke = false)
     {
         if (path.Length > WindowInspector.MaxDepth || expectedRuntimeId.Length is < 1 or > 128)
-            return new(WindowActionCode.STALE_ELEMENT, ElapsedMs: clock.ElapsedMilliseconds);
+            return new(WindowActionCode.STALE_ELEMENT,
+                FailureStage: WindowFailureStage.RESOLVE_ELEMENT,
+                ElapsedMs: clock.ElapsedMilliseconds);
 
         object? factory = null;
         IntPtr unknown = IntPtr.Zero, automation = IntPtr.Zero, walker = IntPtr.Zero;
@@ -85,7 +87,8 @@ internal static class WindowActionNoFocus
                 automation, hwnd, out element));
             stage = WindowFailureStage.RESOLVE_ELEMENT;
             if (element == IntPtr.Zero)
-                return new(WindowActionCode.STALE_ELEMENT, ElapsedMs: clock.ElapsedMilliseconds);
+                return new(WindowActionCode.STALE_ELEMENT, FailureStage: stage,
+                    ElapsedMs: clock.ElapsedMilliseconds);
 
             Check(Method<GetControlWalker>(automation, ControlViewWalkerSlot)(automation, out walker));
             if (walker == IntPtr.Zero)
@@ -96,7 +99,8 @@ internal static class WindowActionNoFocus
             foreach (int childIndex in path)
             {
                 if (childIndex is < 0 or > WindowInspector.MaxTraversal)
-                    return new(WindowActionCode.STALE_ELEMENT, ElapsedMs: clock.ElapsedMilliseconds);
+                    return new(WindowActionCode.STALE_ELEMENT, FailureStage: stage,
+                        ElapsedMs: clock.ElapsedMilliseconds);
                 IntPtr child = IntPtr.Zero;
                 try
                 {
@@ -110,7 +114,8 @@ internal static class WindowActionNoFocus
                         child = sibling;
                     }
                     if (child == IntPtr.Zero)
-                        return new(WindowActionCode.STALE_ELEMENT, ElapsedMs: clock.ElapsedMilliseconds);
+                        return new(WindowActionCode.STALE_ELEMENT, FailureStage: stage,
+                            ElapsedMs: clock.ElapsedMilliseconds);
                     Release(ref element);
                     element = child;
                     child = IntPtr.Zero;
@@ -119,7 +124,8 @@ internal static class WindowActionNoFocus
             }
 
             if (!RuntimeIdMatches(element, expectedRuntimeId))
-                return new(WindowActionCode.STALE_ELEMENT, ElapsedMs: clock.ElapsedMilliseconds);
+                return new(WindowActionCode.STALE_ELEMENT, FailureStage: stage,
+                    ElapsedMs: clock.ElapsedMilliseconds);
 
             int patternId = request.Action switch
             {

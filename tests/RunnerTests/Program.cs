@@ -2144,6 +2144,49 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             titleClock.ElapsedMilliseconds >= 600 && Volatile.Read(ref titleDispatchCount) == 1 &&
             WindowAction.WindowTitlePresent(realWindowId, "CI_UIA_TITLE_READY"),
             "windows.async_title_change_observed_on_target_hwnd_exactly_once");
+        // This native button is still disabled. The normal route must not
+        // invoke its provider, while a direct test-only native UIA2 call
+        // diagnoses how the actual Windows provider rejects Invoke.
+        var disabledTree = await Task.Run(() => WindowInspector.InspectCore(created.Handle,
+            3, 20, realWindowId, nameContains: "CI_UIA_SAVE",
+            roleFilter: WindowRoleFilter.BUTTON)).WaitAsync(TimeSpan.FromSeconds(5));
+        var disabledButton = disabledTree.Elements.Single(e => e.Name == "CI_UIA_SAVE");
+        var disabledRequest = new WindowActionRequest(realWindowId,
+            disabledButton.ElementId, WindowActionKind.INVOKE, null);
+        var disabledPreflight = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            disabledRequest)).WaitAsync(TimeSpan.FromSeconds(5));
+        Check(disabledPreflight.Status == WindowActionCode.DISABLED &&
+            disabledPreflight.EnabledBefore == false && disabledPreflight.TargetVerified &&
+            disabledPreflight.TargetIdentity == disabledButton.ElementId &&
+            disabledPreflight.FailureStage == WindowFailureStage.PREPARE_UIA &&
+            disabledPreflight.EffectState == WindowEffectState.NO_EFFECT &&
+            disabledPreflight.ProviderOutcome == WindowProviderOutcome.NOT_DISPATCHED &&
+            !disabledPreflight.EffectUnknown,
+            "windows.disabled_native_button_rejected_before_provider_dispatch");
+        Check(WindowInspector.TryParsePath(disabledButton.Path, out var disabledPath),
+            "windows.disabled_native_button_has_exact_uia_path");
+        var nativeDisabledRoot = System.Windows.Automation.AutomationElement.FromHandle(created.Handle);
+        var nativeDisabled = nativeDisabledRoot.FindFirst(System.Windows.Automation.TreeScope.Descendants,
+            new System.Windows.Automation.PropertyCondition(
+                System.Windows.Automation.AutomationElement.NameProperty, "CI_UIA_SAVE"));
+        Check(nativeDisabled is not null && !nativeDisabled.Current.IsEnabled,
+            "windows.disabled_native_button_reports_current_isenabled_false");
+        var providerDisabled = await Task.Run(() => WindowActionNoFocus.Invoke(created.Handle,
+            disabledPath, nativeDisabled!.GetRuntimeId(), disabledRequest, Stopwatch.StartNew()))
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        if (providerDisabled.Status == WindowActionCode.UIA_ELEMENTNOTENABLED_UNKNOWN_EFFECT)
+        {
+            Check(providerDisabled.HResult == "80040200" &&
+                providerDisabled.ExecutionMethod == WindowExecutionMethod.UIA_PATTERN &&
+                providerDisabled.FailureStage == WindowFailureStage.DISPATCH_UIA &&
+                providerDisabled.ProviderOutcome == WindowProviderOutcome.REJECTED &&
+                providerDisabled.EffectState == WindowEffectState.EFFECT_UNKNOWN &&
+                !providerDisabled.SafeToRetry,
+                "windows.real_uia_provider_elementnotenabled_hresult_is_typed_no_replay");
+        }
+        else Console.WriteLine("NOT_TESTED / EXTERNAL_BLOCKER " +
+            $"windows.real_uia_provider_elementnotenabled reason={providerDisabled.Status} " +
+            $"stage={providerDisabled.FailureStage} hresult={providerDisabled.HResult}");
         var inputTarget = result.Elements.Single(e => e.Role.Contains("Edit", StringComparison.Ordinal));
         var edit = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, inputTarget.ElementId, WindowActionKind.SET_VALUE,
@@ -2287,7 +2330,11 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         var stalePath = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, paged.ElementId, WindowActionKind.INVOKE,
                 null, parent.Path))).WaitAsync(TimeSpan.FromSeconds(5));
-        Check(stalePath.Status == WindowActionCode.STALE_ELEMENT && Volatile.Read(ref pagedClickCount) == 1,
+        Check(stalePath.Status == WindowActionCode.STALE_ELEMENT &&
+            stalePath.FailureStage == WindowFailureStage.RESOLVE_ELEMENT &&
+            stalePath.EffectState == WindowEffectState.NO_EFFECT &&
+            stalePath.ProviderOutcome == WindowProviderOutcome.NOT_DISPATCHED &&
+            Volatile.Read(ref pagedClickCount) == 1,
             "windows.action_reject_mismatched_exact_path");
         // WinForms may reposition its main form after Shown (DPI/nonclient
         // corrections). Realign the independent topmost cover before using it
