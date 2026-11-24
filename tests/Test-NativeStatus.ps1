@@ -286,7 +286,7 @@ try{
     Send $a 39 'tools/call' @{name='powershell_status';arguments=@{include_diagnostics=$true};_meta=$meta}
     $diagnostics=(Receive $a 39).structuredContent
     Assert ($diagnostics.status -eq 'OK' -and $diagnostics.diagnostics.status -in @('OK','DEGRADED','NOT_TESTED') -and
-        @($diagnostics.diagnostics.checks).Count -eq 11 -and
+        @($diagnostics.diagnostics.checks).Count -eq 15 -and
         $diagnostics.diagnostics.checks[0].component -eq 'Native') 'r5.doctor_typed_on_non_ok_health_without_exec_error'
     Stop-Service $name
     $offline=Wait-Status $a 'SERVICE_UNAVAILABLE'
