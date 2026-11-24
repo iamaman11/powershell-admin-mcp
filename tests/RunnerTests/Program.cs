@@ -3450,6 +3450,10 @@ await UserWorker.ExecuteAsync(expiredClaim,Environment.TickCount64-10000,LateHea
 Check(lateHeartbeat==1 && lateResult is {Status:ExecutionState.CANCELLED_UNKNOWN_EFFECT,Stage:"USER_WATCHDOG_EXPIRED"},
     "h1.late_heartbeat_cannot_revive_expired_authority");
 
+// An isolated, debugging-enabled Chrome profile on the Windows CI machine;
+// never attach to or manipulate a user's Chrome profile or desktop.
+await ChromeAcceptanceFixture.RunAsync();
+
 internal sealed class CancelOnFirstReadStream(byte[] bytes,CancellationTokenSource cancellation)
     :MemoryStream(bytes,false)
 {
