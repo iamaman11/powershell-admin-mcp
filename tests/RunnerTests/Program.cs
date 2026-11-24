@@ -1355,6 +1355,8 @@ var sampleTabId = "0123456789abcdef0123456789abcdef";
 var chromeTabRequest = new ChromeTabRequest(testWindowId, "Valer", ChromeTabAction.NAVIGATE,
     sampleTabId, "https://example.com/");
 var chromeTabWire = System.Text.Json.JsonSerializer.Serialize(chromeTabRequest, PipeWire.Json);
+var browserScopedTabRequest = chromeTabRequest with
+    { Scope = ChromeTabScope.BROWSER, BrowserWindowId = 12 };
 Check(WindowChromeCdp.ValidTabRequest(chromeTabRequest) &&
     WindowChromeCdp.ValidTabRequest(chromeTabRequest with { Action = ChromeTabAction.LIST,
         TabId = null, Url = null }) &&
@@ -1362,14 +1364,37 @@ Check(WindowChromeCdp.ValidTabRequest(chromeTabRequest) &&
     !WindowChromeCdp.ValidTabRequest(chromeTabRequest with { TabId = "bad" }) &&
     !WindowChromeCdp.ValidTabRequest(chromeTabRequest with { Action = ChromeTabAction.CLOSE,
         Url = "https://example.com/" }) &&
+    WindowChromeCdp.ValidTabRequest(browserScopedTabRequest) &&
+    WindowChromeCdp.ValidTabRequest(browserScopedTabRequest with
+        { Action = ChromeTabAction.LIST, TabId = null, Url = null, BrowserWindowId = null }) &&
+    WindowChromeCdp.ValidTabRequest(browserScopedTabRequest with
+        { Action = ChromeTabAction.OPEN, TabId = null, BrowserWindowId = null }) &&
+    !WindowChromeCdp.ValidTabRequest(browserScopedTabRequest with { BrowserWindowId = null }) &&
+    !WindowChromeCdp.ValidTabRequest(browserScopedTabRequest with { BrowserWindowId = -1 }) &&
+    !WindowChromeCdp.ValidTabRequest(browserScopedTabRequest with
+        { Action = ChromeTabAction.OPEN, TabId = null }) &&
+    !WindowChromeCdp.ValidTabRequest(chromeTabRequest with { BrowserWindowId = 12 }) &&
+    !WindowChromeCdp.ValidTabRequest(chromeTabRequest with
+        { Scope = ChromeTabScope.BROWSER, PageSize = 101 }) &&
+    WindowChromeCdp.ValidBrowserTargetUrl("about:blank") &&
+    WindowChromeCdp.ValidBrowserTargetUrl("chrome://newtab/") &&
+    !WindowChromeCdp.ValidBrowserTargetUrl("relative/path") &&
+    !WindowChromeCdp.ValidBrowserTargetUrl("https://example.com/\ncontrol") &&
     chromeTabWire.Contains("\"action\":\"NAVIGATE\"", StringComparison.Ordinal) &&
+    System.Text.Json.JsonSerializer.Serialize(browserScopedTabRequest, PipeWire.Json)
+        .Contains("\"browser_window_id\":12", StringComparison.Ordinal) &&
+    System.Text.Json.JsonSerializer.Serialize(new WindowTab(sampleTabId, "Test",
+        "https://example.com/", "https://example.com", 12), PipeWire.Json)
+        .Contains("\"browser_window_id\":12", StringComparison.Ordinal) &&
     new ChromeTabResult(ChromeTabCode.COMPLETED, ChromeTabAction.NAVIGATE).EffectState ==
         WindowEffectState.EFFECT_VERIFIED &&
     new ChromeTabResult(ChromeTabCode.COMPLETED, ChromeTabAction.LIST).EffectState ==
         WindowEffectState.NO_EFFECT &&
     !new ChromeTabResult(ChromeTabCode.EFFECT_UNKNOWN, ChromeTabAction.NAVIGATE).SafeToRetry &&
     new ChromeTabResult(ChromeTabCode.EFFECT_UNKNOWN, ChromeTabAction.NAVIGATE).NextStep ==
-        ChromeTabNextStep.INSPECT_STATE_DO_NOT_RETRY,
+        ChromeTabNextStep.INSPECT_STATE_DO_NOT_RETRY &&
+    new ChromeTabResult(ChromeTabCode.TARGET_AMBIGUOUS, ChromeTabAction.LIST).NextStep ==
+        ChromeTabNextStep.LIST_BROWSER_TABS,
     "chrome.typed_tab_lifecycle_requires_exact_target_url_and_never_retries_unknown_effect");
 var invalidTabCall = await ChromeTabTools.ChromeTab("bad", "Valer", ChromeTabAction.LIST);
 var unconfirmedTabCall = await ChromeTabTools.ChromeTab(testWindowId, "Valer",

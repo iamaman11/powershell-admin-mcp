@@ -385,11 +385,30 @@ internal static class ChromeAcceptanceFixture
             if (tabList.Status != ChromeTabCode.COMPLETED ||
                 tabList.Tabs?.All(t => t.Url != url) != false)
                 throw new InvalidOperationException($"CI_TAB_LIST_{tabList.Status}");
-            var openedTab = await Tab(ChromeTabAction.OPEN, navigateUrl: url);
+            var browserListReply = await ExchangeAsync(new(TabManage: new ChromeTabRequest(
+                windowId!, selector, ChromeTabAction.LIST, Scope: ChromeTabScope.BROWSER)));
+            var browserList = browserListReply.TabManage;
+            int? explicitWindow = browserList?.Tabs?.FirstOrDefault(t => t.Url == url)?.BrowserWindowId;
+            if (browserList?.Status != ChromeTabCode.COMPLETED || explicitWindow is not > 0)
+                throw new InvalidOperationException($"CI_BROWSER_SCOPED_LIST_{browserList?.Status}");
+            var selectedWindowReply = await ExchangeAsync(new(TabManage: new ChromeTabRequest(
+                windowId!, selector, ChromeTabAction.LIST, Scope: ChromeTabScope.BROWSER,
+                BrowserWindowId: explicitWindow)));
+            if (selectedWindowReply.TabManage is not { Status: ChromeTabCode.COMPLETED } selectedWindow ||
+                selectedWindow.Tabs?.Any(t => t.BrowserWindowId != explicitWindow) == true ||
+                selectedWindow.Tabs?.All(t => t.Url != url) != false)
+                throw new InvalidOperationException("CI_BROWSER_SCOPED_WINDOW_FILTER_FAILED");
+            var openedReply = await ExchangeAsync(new(TabManage: new ChromeTabRequest(
+                windowId!, selector, ChromeTabAction.OPEN, Url: url,
+                Scope: ChromeTabScope.BROWSER)));
+            var openedTab = openedReply.TabManage ??
+                throw new InvalidOperationException("CI_BROWSER_SCOPED_OPEN_REPLY_MISSING");
             if (openedTab.Status != ChromeTabCode.COMPLETED || openedTab.TabId is null ||
-                openedTab.EffectState != WindowEffectState.EFFECT_VERIFIED)
+                openedTab.EffectState != WindowEffectState.EFFECT_VERIFIED ||
+                openedTab.Tab?.BrowserWindowId is not > 0)
                 throw new InvalidOperationException($"CI_TAB_OPEN_{openedTab.Status}_{openedTab.Detail}");
             string newTab = openedTab.TabId;
+            int openedWindowId = openedTab.Tab!.BrowserWindowId!.Value;
             string secondUrl = url + "?history=1";
             foreach (var (action, destination) in new[]
             {
@@ -399,18 +418,28 @@ internal static class ChromeAcceptanceFixture
                 (ChromeTabAction.RELOAD, (string?)null)
             })
             {
-                var changed = await Tab(action, newTab, action == ChromeTabAction.NAVIGATE
-                    ? destination : null);
+                var changedReply = await ExchangeAsync(new(TabManage: new ChromeTabRequest(
+                    windowId!, selector, action, newTab,
+                    action == ChromeTabAction.NAVIGATE ? destination : null,
+                    Scope: ChromeTabScope.BROWSER, BrowserWindowId: openedWindowId)));
+                var changed = changedReply.TabManage ??
+                    throw new InvalidOperationException("CI_BROWSER_SCOPED_CHANGE_REPLY_MISSING");
                 if (changed.Status != ChromeTabCode.COMPLETED ||
                     changed.EffectState != WindowEffectState.EFFECT_VERIFIED)
                     throw new InvalidOperationException($"CI_TAB_{action}_{changed.Status}_{changed.Detail}");
             }
-            var closedTab = await Tab(ChromeTabAction.CLOSE, newTab);
+            var closedReply = await ExchangeAsync(new(TabManage: new ChromeTabRequest(
+                windowId!, selector, ChromeTabAction.CLOSE, newTab,
+                Scope: ChromeTabScope.BROWSER,
+                BrowserWindowId: openedWindowId)));
+            var closedTab = closedReply.TabManage ??
+                throw new InvalidOperationException("CI_BROWSER_SCOPED_CLOSE_REPLY_MISSING");
             if (closedTab.Status != ChromeTabCode.COMPLETED ||
                 closedTab.EffectState != WindowEffectState.EFFECT_VERIFIED)
                 throw new InvalidOperationException($"CI_TAB_CLOSE_{closedTab.Status}");
             Console.WriteLine("PASS chrome_ci.native_typed_tab_lifecycle " +
-                "list_open_navigate_back_forward_reload_close same_broker_same_socket");
+                "list_open_navigate_back_forward_reload_close " +
+                "browser_scoped_exact_id_same_broker_same_socket");
             }
             finally
             {

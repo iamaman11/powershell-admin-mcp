@@ -152,6 +152,45 @@ internal static partial class WindowChromeCdp
         return represented >= native.Count - 1 ? selected : null;
     }
 
+    // Browser-native identity is authoritative when the caller explicitly
+    // selects a CDP window/tab from the consented browser. No HWND geometry or
+    // native tab-title heuristic is needed in this opt-in scope.
+    private static async Task<List<TabTarget>> BrowserTargets(Session cdp,
+        int? browserWindowId, string? exactTabId)
+    {
+        var response = await cdp.Call("Target.getTargets", new { });
+        var result = new List<TabTarget>();
+        foreach (var info in response.GetProperty("targetInfos").EnumerateArray())
+        {
+            if (!info.TryGetProperty("type", out var type) ||
+                type.ValueKind != JsonValueKind.String || type.GetString() != "page" ||
+                !info.TryGetProperty("targetId", out var target) ||
+                target.ValueKind != JsonValueKind.String ||
+                !ValidTargetId(target.GetString()) ||
+                !info.TryGetProperty("url", out var url) ||
+                url.ValueKind != JsonValueKind.String ||
+                !ValidBrowserTargetUrl(url.GetString()) ||
+                exactTabId is not null && target.GetString() != exactTabId) continue;
+            string id = target.GetString()!;
+            JsonElement owner;
+            try { owner = await cdp.Call("Browser.getWindowForTarget", new { targetId = id }); }
+            catch (InvalidOperationException e) when (e.Message == "CDP_COMMAND_REJECTED")
+            { continue; } // Tab closed between the read-only snapshot and lookup.
+            int ownerWindow = owner.GetProperty("windowId").GetInt32();
+            if (ownerWindow <= 0 || browserWindowId is { } requested && ownerWindow != requested)
+                continue;
+            result.Add(new(id, info.TryGetProperty("title", out var title) &&
+                title.ValueKind == JsonValueKind.String ? title.GetString() ?? "" : "",
+                url.GetString()!, ownerWindow));
+        }
+        return result;
+    }
+
+    internal static bool ValidBrowserTargetUrl(string? address) =>
+        address is { Length: >= 1 and <= 2048 } &&
+        !address.Any(char.IsControl) &&
+        Uri.TryCreate(address, UriKind.Absolute, out var url) && url.UserInfo.Length == 0;
+
     private static async Task<List<TabTarget>> TargetsForWindow(Session cdp, IntPtr hwnd,
         string windowId, CancellationToken cancellationToken, string? expectedOrigin = null,
         string? expectedUrl = null, string? exactTabId = null, bool allowFallback = false)

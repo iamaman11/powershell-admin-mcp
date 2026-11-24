@@ -7,6 +7,9 @@ using System.Text.Json.Serialization;
 [JsonConverter(typeof(JsonStringEnumConverter<ChromeTabAction>))]
 public enum ChromeTabAction { LIST, OPEN, NAVIGATE, BACK, FORWARD, RELOAD, CLOSE }
 
+[JsonConverter(typeof(JsonStringEnumConverter<ChromeTabScope>))]
+public enum ChromeTabScope { WINDOW, BROWSER }
+
 [JsonConverter(typeof(JsonStringEnumConverter<ChromeTabCode>))]
 public enum ChromeTabCode
 {
@@ -19,7 +22,8 @@ public enum ChromeTabCode
 [JsonConverter(typeof(JsonStringEnumConverter<ChromeTabNextStep>))]
 public enum ChromeTabNextStep
 {
-    NONE, FIX_ARGUMENTS, CONNECT_BROWSER, REINSPECT_TAB, INSPECT_STATE_DO_NOT_RETRY
+    NONE, FIX_ARGUMENTS, CONNECT_BROWSER, REINSPECT_TAB, LIST_BROWSER_TABS,
+    INSPECT_STATE_DO_NOT_RETRY
 }
 
 internal sealed record ChromeTabRequest(
@@ -28,7 +32,11 @@ internal sealed record ChromeTabRequest(
     [property: JsonPropertyName("action")] ChromeTabAction Action,
     [property: JsonPropertyName("tab_id")] string? TabId = null,
     [property: JsonPropertyName("url")] string? Url = null,
-    [property: JsonPropertyName("background")] bool Background = true);
+    [property: JsonPropertyName("background")] bool Background = true,
+    [property: JsonPropertyName("scope")] ChromeTabScope Scope = ChromeTabScope.WINDOW,
+    [property: JsonPropertyName("browser_window_id")] int? BrowserWindowId = null,
+    [property: JsonPropertyName("offset")] int Offset = 0,
+    [property: JsonPropertyName("page_size")] int PageSize = 100);
 
 public sealed record ChromeTabResult(
     [property: JsonPropertyName("status")] ChromeTabCode Status,
@@ -46,7 +54,9 @@ public sealed record ChromeTabResult(
     [property: JsonPropertyName("cdp_title_candidates"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         int? CdpTitleCandidates = null,
     [property: JsonPropertyName("cdp_fingerprint_candidates"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        int? CdpFingerprintCandidates = null)
+        int? CdpFingerprintCandidates = null,
+    [property: JsonPropertyName("next_offset"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        int? NextOffset = null)
 {
     [JsonPropertyName("effect_state")]
     public WindowEffectState EffectState => Status == ChromeTabCode.COMPLETED && Action != ChromeTabAction.LIST
@@ -67,8 +77,9 @@ public sealed record ChromeTabResult(
         ChromeTabCode.EFFECT_UNKNOWN => ChromeTabNextStep.INSPECT_STATE_DO_NOT_RETRY,
         ChromeTabCode.CDP_UNAVAILABLE or ChromeTabCode.CONSENT_PENDING =>
             ChromeTabNextStep.CONNECT_BROWSER,
-        ChromeTabCode.TARGET_NOT_FOUND or ChromeTabCode.TARGET_AMBIGUOUS or
-            ChromeTabCode.STALE_WINDOW or ChromeTabCode.PROFILE_MISMATCH =>
+        ChromeTabCode.TARGET_NOT_FOUND or ChromeTabCode.TARGET_AMBIGUOUS =>
+            ChromeTabNextStep.LIST_BROWSER_TABS,
+        ChromeTabCode.STALE_WINDOW or ChromeTabCode.PROFILE_MISMATCH =>
             ChromeTabNextStep.REINSPECT_TAB,
         ChromeTabCode.INVALID_ARGUMENT => ChromeTabNextStep.FIX_ARGUMENTS,
         _ => ChromeTabNextStep.NONE
@@ -88,7 +99,17 @@ internal static partial class WindowChromeCdp
             ? request.TabId is null : ValidTargetId(request.TabId)) &&
         (request.Action is ChromeTabAction.OPEN or ChromeTabAction.NAVIGATE
             ? ValidNavigationUrl(request.Url) : request.Url is null) &&
-        (request.Action == ChromeTabAction.OPEN || request.Background);
+        (request.Action == ChromeTabAction.OPEN || request.Background) &&
+        Enum.IsDefined(request.Scope) && request.Offset is >= 0 and <= 10000 &&
+        request.PageSize is >= 1 and <= 100 &&
+        (request.Action == ChromeTabAction.LIST || request.Offset == 0 && request.PageSize == 100) &&
+        (request.Scope == ChromeTabScope.WINDOW && request.BrowserWindowId is null ||
+         request.Scope == ChromeTabScope.BROWSER &&
+         (request.Action == ChromeTabAction.LIST &&
+              (request.BrowserWindowId is null or > 0) ||
+          request.Action == ChromeTabAction.OPEN && request.BrowserWindowId is null ||
+          request.Action is not (ChromeTabAction.LIST or ChromeTabAction.OPEN) &&
+          request.BrowserWindowId is > 0));
 
     internal static bool ValidNavigationUrl(string? url) =>
         url is {Length: >= 1 and <= 2048} &&
@@ -98,8 +119,19 @@ internal static partial class WindowChromeCdp
     private static WindowTab TabInfo(TabTarget tab)
     {
         var uri = new Uri(tab.Url);
-        return new(tab.Id, tab.Title, uri.GetLeftPart(UriPartial.Path),
-            uri.GetLeftPart(UriPartial.Authority));
+        bool web = uri.Scheme is "http" or "https";
+        return new(tab.Id, tab.Title, web ? uri.GetLeftPart(UriPartial.Path) : tab.Url,
+            web ? uri.GetLeftPart(UriPartial.Authority) : uri.Scheme + ":",
+            tab.BrowserWindowId);
+    }
+
+    // During a committed navigation Chrome may briefly reject a read-only
+    // history query. Retry the observation, never the effectful navigation.
+    private static async Task<JsonElement?> ReadNavigationHistory(Session cdp, string? sessionId)
+    {
+        try { return await cdp.Call("Page.getNavigationHistory", new { }, sessionId); }
+        catch (InvalidOperationException e) when (e.Message == "CDP_COMMAND_REJECTED")
+        { return null; }
     }
 
     internal static ChromeTabResult ManageTabInWorker(ChromeTabRequest request)
@@ -141,8 +173,10 @@ internal static partial class WindowChromeCdp
         try
         {
             cdp = await TabSessionAsync(endpoint, deadline.Token);
-            tabs = await TargetsForWindow(cdp, hwnd, request.WindowId, deadline.Token,
-                allowFallback: true);
+            tabs = request.Scope == ChromeTabScope.BROWSER
+                ? await BrowserTargets(cdp, request.BrowserWindowId, request.TabId)
+                : await TargetsForWindow(cdp, hwnd, request.WindowId, deadline.Token,
+                    allowFallback: true);
         }
         catch (CdpWindowMappingException e)
         {
@@ -162,12 +196,32 @@ internal static partial class WindowChromeCdp
                     "PREFLIGHT_" + e.GetType().Name);
         }
         if (request.Action == ChromeTabAction.LIST)
-            return new(ChromeTabCode.COMPLETED, request.Action, Tabs: tabs.Take(100).Select(TabInfo).ToArray());
+            return new(ChromeTabCode.COMPLETED, request.Action,
+                Tabs: tabs.Skip(request.Offset).Take(request.PageSize).Select(TabInfo).ToArray(),
+                NextOffset: tabs.Count > request.Offset + request.PageSize
+                    ? request.Offset + request.PageSize : null);
 
         var current = tabs.SingleOrDefault(t => t.Id == request.TabId);
         if (request.Action != ChromeTabAction.OPEN && current is null)
             return new(ChromeTabCode.TARGET_NOT_FOUND, request.Action);
         string targetId = current?.Id ?? "";
+        if (request.Scope == ChromeTabScope.BROWSER && request.Action != ChromeTabAction.OPEN)
+        {
+            try
+            {
+                var owner = await cdp.Call("Browser.getWindowForTarget", new { targetId });
+                if (owner.GetProperty("windowId").GetInt32() != request.BrowserWindowId)
+                    return new(ChromeTabCode.TARGET_NOT_FOUND, request.Action,
+                        Detail: "CDP_TARGET_CHANGED_WINDOW");
+            }
+            catch (Exception e) when (e is OperationCanceledException or WebSocketException or
+                                       IOException or JsonException or InvalidOperationException)
+            {
+                ObserveCdpFailure(e);
+                return new(ChromeTabCode.CDP_UNAVAILABLE, request.Action,
+                    Detail: "CDP_WINDOW_PREFLIGHT_FAILED");
+            }
+        }
         if (request.Action == ChromeTabAction.NAVIGATE &&
             string.Equals(current?.Url, new Uri(request.Url!).AbsoluteUri, StringComparison.Ordinal))
             return new(ChromeTabCode.ALREADY_AT_URL, request.Action, targetId);
@@ -179,12 +233,14 @@ internal static partial class WindowChromeCdp
         {
             if (request.Action == ChromeTabAction.OPEN)
             {
-                // Target.createTarget has no native window selector. Restrict
-                // OPEN to one Chrome HWND owned by this process, and verify
-                // the resulting target's exact CDP window before success.
+                // Target.createTarget has no exact native-window selector.
+                // WINDOW scope keeps the single-HWND guarantee. Explicit
+                // BROWSER scope permits Chrome to choose the destination;
+                // the actual CDP window ID is returned after readback.
                 WindowCatalog.TryParseId(request.WindowId, out var identity);
-                if (WindowCatalog.List(100, identity.SessionId).Windows.Count(w =>
-                    w.ProcessId == identity.ProcessId) != 1 || tabs.Count == 0)
+                if (request.Scope == ChromeTabScope.WINDOW &&
+                    (WindowCatalog.List(100, identity.SessionId).Windows.Count(w =>
+                        w.ProcessId == identity.ProcessId) != 1 || tabs.Count == 0))
                     return new(ChromeTabCode.TARGET_AMBIGUOUS, request.Action,
                         Detail: "OPEN_REQUIRES_ONE_CHROME_WINDOW");
                 dispatched = true;
@@ -227,10 +283,18 @@ internal static partial class WindowChromeCdp
                 }
                 else
                 {
-                    var history = await cdp.Call("Page.getNavigationHistory", new {}, sessionId);
-                    int index = history.GetProperty("currentIndex").GetInt32() +
+                    var history = await ReadNavigationHistory(cdp, sessionId);
+                    for (int attempt = 0; history is null && attempt < 8; attempt++)
+                    {
+                        await Task.Delay(150, deadline.Token);
+                        history = await ReadNavigationHistory(cdp, sessionId);
+                    }
+                    if (history is null)
+                        return new(ChromeTabCode.CDP_UNAVAILABLE, request.Action, targetId,
+                            Detail: "HISTORY_PREFLIGHT_REJECTED");
+                    int index = history.Value.GetProperty("currentIndex").GetInt32() +
                         (request.Action == ChromeTabAction.BACK ? -1 : 1);
-                    var entries = history.GetProperty("entries");
+                    var entries = history.Value.GetProperty("entries");
                     if (index < 0 || index >= entries.GetArrayLength())
                         return new(ChromeTabCode.HISTORY_UNAVAILABLE, request.Action, targetId);
                     int entryId = entries[index].GetProperty("id").GetInt32();
@@ -249,8 +313,13 @@ internal static partial class WindowChromeCdp
                 if (expectedHistoryIndex is { } desiredIndex)
                 {
                     stage = "VERIFY_HISTORY_INDEX";
-                    var history = await cdp.Call("Page.getNavigationHistory", new {}, historySessionId);
-                    if (history.GetProperty("currentIndex").GetInt32() == desiredIndex)
+                    var history = await ReadNavigationHistory(cdp, historySessionId);
+                    if (history is null)
+                    {
+                        await Task.Delay(150, deadline.Token);
+                        continue;
+                    }
+                    if (history.Value.GetProperty("currentIndex").GetInt32() == desiredIndex)
                     {
                         var uri = new Uri(request.Url!);
                         stage = "VERIFY_HISTORY_TARGET_URL";
@@ -262,7 +331,7 @@ internal static partial class WindowChromeCdp
                                 StringComparison.Ordinal))
                             return new(ChromeTabCode.COMPLETED, request.Action, targetId,
                                 new(targetId, current?.Title ?? "", uri.AbsoluteUri,
-                                    uri.GetLeftPart(UriPartial.Authority)));
+                                    uri.GetLeftPart(UriPartial.Authority), current?.BrowserWindowId));
                     }
                     await Task.Delay(150, deadline.Token);
                     continue;
@@ -287,10 +356,14 @@ internal static partial class WindowChromeCdp
                         // history entry. BACK immediately after a URL-only ACK
                         // would then race the still-pending navigation.
                         stage = "VERIFY_COMMITTED_NAVIGATION";
-                        var history = await cdp.Call("Page.getNavigationHistory", new {},
-                            historySessionId);
-                        int index = history.GetProperty("currentIndex").GetInt32();
-                        var entries = history.GetProperty("entries");
+                        var history = await ReadNavigationHistory(cdp, historySessionId);
+                        if (history is null)
+                        {
+                            await Task.Delay(150, deadline.Token);
+                            continue;
+                        }
+                        int index = history.Value.GetProperty("currentIndex").GetInt32();
+                        var entries = history.Value.GetProperty("entries");
                         if (index < 0 || index >= entries.GetArrayLength() ||
                             !Uri.TryCreate(entries[index].GetProperty("url").GetString(),
                                 UriKind.Absolute, out var committed) ||
@@ -302,16 +375,18 @@ internal static partial class WindowChromeCdp
                         }
                         return new(ChromeTabCode.COMPLETED, request.Action, targetId,
                             new(targetId, entry.GetProperty("title").GetString() ?? "",
-                                request.Url!, new Uri(request.Url!).GetLeftPart(UriPartial.Authority)));
+                                request.Url!, new Uri(request.Url!).GetLeftPart(UriPartial.Authority),
+                                current?.BrowserWindowId));
                     }
                     var owner = await cdp.Call("Browser.getWindowForTarget", new {targetId});
-                    var firstOwner = await cdp.Call("Browser.getWindowForTarget", new
-                        {targetId = tabs[0].Id});
-                    if (owner.GetProperty("windowId").GetInt32() ==
-                        firstOwner.GetProperty("windowId").GetInt32())
+                    int actualBrowserWindowId = owner.GetProperty("windowId").GetInt32();
+                    if (request.Scope == ChromeTabScope.BROWSER ||
+                        actualBrowserWindowId == (await cdp.Call("Browser.getWindowForTarget", new
+                            {targetId = tabs[0].Id})).GetProperty("windowId").GetInt32())
                         return new(ChromeTabCode.COMPLETED, request.Action, targetId,
                             new(targetId, entry.GetProperty("title").GetString() ?? "",
-                                request.Url!, new Uri(request.Url!).GetLeftPart(UriPartial.Authority)));
+                                request.Url!, new Uri(request.Url!).GetLeftPart(UriPartial.Authority),
+                                actualBrowserWindowId));
                     return new(ChromeTabCode.EFFECT_UNKNOWN, request.Action, targetId,
                         Detail:"OPENED_IN_DIFFERENT_WINDOW");
                 }
