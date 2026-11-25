@@ -155,6 +155,15 @@ always means a new action. File receipts share the same 100,000-row and
    mode returns `FOREGROUND_INPUT_DISALLOWED` with `effect_state=NO_EFFECT`.
    Explicit `input_mode=ALLOW_FOREGROUND_INPUT` permits the verified native
    pointer/keyboard path, subject to Windows foreground restrictions.
+   For a Chrome web page, `input_mode=CDP_ONLY` also supports `DRAG` between
+   two **fresh** `c1` DOM references using `target_element_id`; neither endpoint
+   is a screen coordinate. `SET_FILES` selects 1–16 existing local files in an
+   HTML `<input type=file>` using `file_paths=["C:\\path\\file.txt"]`. It is
+   file selection only: submitting the form and transferring data to a site
+   requires another explicit action. Multi-file selection requires the HTML
+   control's native `multiple` attribute. The result reports
+   `selected_file_count` only after the DOM's file list was verified. Neither
+   operation activates Chrome or uses OS pointer/keyboard injection.
 4. `windows.manage_window(action=CLOSE)` sends graceful `WM_CLOSE`. A successful
    message enqueue is **not** success: `COMPLETED` requires the exact HWND to
    disappear. Applications may show a save prompt; then the effect is unknown.
@@ -178,6 +187,15 @@ The following fields have separate meanings:
 | `effect_state=EFFECT_UNKNOWN`, `effect_evidence=PROVIDER_ACK_ONLY` | No independently verified effect; do a fresh **read-only** inspection |
 | `effect_evidence=POSTCONDITION_NOT_OBSERVED` | A requested postcondition was checked but not seen; still no blind retry |
 | `safe_to_retry=false` | Do not re-dispatch the same state-changing action without independent evidence |
+
+`windows.chrome_tab` and `windows.inspect_window(scope=TABS|TAB)` intentionally
+omit query strings and fragments from displayed URLs. A tab with omitted
+components reports `url_components_redacted=true`. Do not reuse such a display
+URL as an exact `expected_url` for a web action: use the fresh `c1` identity and
+`expected_origin`, or an independently known complete URL. With several Chrome
+windows, use the existing `chrome_tab(scope=BROWSER)` interface and its exact
+`browser_window_id`; opening a tab into a particular native HWND cannot be
+guaranteed through CDP alone.
 | `next_step` | Typed guidance such as `INSPECT_AND_SUPPLY_POSTCONDITION` or `INSPECT_STATE_DO_NOT_RETRY` |
 | `focus_behavior=UIA_PROVIDER_MAY_ACTIVATE` | Even with `BACKGROUND_ONLY`, a third-party UIA provider may momentarily change foreground |
 | `focus_behavior=UNKNOWN_METHOD_MAY_ACTIVATE` | The action outcome/method is uncertain; do not infer that focus stayed unchanged |

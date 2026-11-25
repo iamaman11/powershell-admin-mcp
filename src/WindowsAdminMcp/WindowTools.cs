@@ -142,7 +142,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.invoke_element", UseStructuredContent = true),
-     Description("Act on a fresh UIA/Chrome element. Supply expected_name and expected_change for independently verified navigation. BACKGROUND_ONLY forbids our own OS input/activation but a UIA provider may briefly focus its window. CDP_ONLY requires consented Chrome and never falls back to UIA/SendInput. ALLOW_FOREGROUND_INPUT explicitly permits native pointer/keyboard input. EFFECT_UNKNOWN means inspect state, never replay blindly; inspect effect_evidence, next_step and focus_behavior.")]
+     Description("Act on a fresh UIA/Chrome element. Supply expected_name and expected_change for independently verified navigation. CDP_ONLY supports DRAG between two fresh DOM element IDs (target_element_id) and SET_FILES on an HTML file input (file_paths, 1..16 local absolute paths); these never use OS input. BACKGROUND_ONLY forbids our own OS input/activation but a UIA provider may briefly focus its window. CDP_ONLY requires consented Chrome and never falls back to UIA/SendInput. ALLOW_FOREGROUND_INPUT explicitly permits native pointer/keyboard input. EFFECT_UNKNOWN means inspect state, never replay blindly; inspect effect_evidence, next_step and focus_behavior.")]
     public static async Task<WindowActionResult> InvokeElement(string window_id, string element_id,
         WindowActionKind action, string? value = null, bool confirm = true,
         string? element_path = null, string? expected_name = null,
@@ -158,6 +158,7 @@ public sealed class WindowTools
         string? locator_automation_id = null, string? locator_name = null,
         WindowRoleFilter? locator_role = null,
         WindowInputMode input_mode = WindowInputMode.BACKGROUND_ONLY,
+        string? target_element_id = null, string[]? file_paths = null,
         CancellationToken cancellationToken = default)
     {
         var request = new WindowActionRequest(window_id, element_id, action, value,
@@ -166,7 +167,7 @@ public sealed class WindowTools
             expected_enabled_name, expected_enabled, virtual_key, ctrl, alt, shift, win,
             scroll_direction, scroll_units, target_x, target_y,
             locator_automation_id, locator_name, locator_role,
-            InputMode: input_mode);
+            InputMode: input_mode, TargetElementId: target_element_id, FilePaths: file_paths);
         if (!WindowAction.Valid(request)) return new(WindowAction.InvalidCode(request));
         if (!confirm) return new(WindowActionCode.CONFIRMATION_REQUIRED);
 
@@ -202,6 +203,7 @@ public sealed class WindowTools
         WindowScrollDirection? scroll_direction=null,int scroll_units=1,
         int? target_x=null,int? target_y=null,
         WindowInputMode input_mode=WindowInputMode.BACKGROUND_ONLY,
+        string? target_element_id=null,string[]? file_paths=null,
         CancellationToken cancellationToken=default)=>
         InvokeElement(window_id,"locator",action,value,confirm,
             expected_name:expected_name,expected_change:expected_change,key:key,
@@ -211,7 +213,7 @@ public sealed class WindowTools
             scroll_direction:scroll_direction,scroll_units:scroll_units,
             target_x:target_x,target_y:target_y,
             locator_automation_id:automation_id,locator_name:name,locator_role:role,
-            input_mode:input_mode,
+            input_mode:input_mode,target_element_id:target_element_id,file_paths:file_paths,
             cancellationToken:cancellationToken);
 }
 

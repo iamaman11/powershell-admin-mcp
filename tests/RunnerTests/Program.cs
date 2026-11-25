@@ -1521,8 +1521,32 @@ Check(WindowChromeCdp.ValidTargetId("0123456789abcdef0123456789abcdef") &&
     "chrome.cdp_target_and_element_reference_boundaries");
 string freshTabRef = "c1:" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString("x") +
     ":0123456789abcdef0123456789abcdef:1:loader:0123456789abcdef0123456789abcdef";
+string secondTabRef = freshTabRef.Replace(":1:loader:", ":2:loader:", StringComparison.Ordinal);
 var chromeAction = new WindowActionRequest(testWindowId, freshTabRef,
     WindowActionKind.CLICK, null, ExpectedProfile: "Valer");
+string fixtureUploadPath = Path.Combine(Path.GetTempPath(), "wmcp-upload-fixture.txt");
+Check(WindowAction.Valid(chromeAction with { Action = WindowActionKind.DRAG,
+        InputMode = WindowInputMode.CDP_ONLY, TargetElementId = secondTabRef }) &&
+    !WindowAction.Valid(chromeAction with { Action = WindowActionKind.DRAG,
+        InputMode = WindowInputMode.CDP_ONLY, TargetElementId = "bad" }) &&
+    !WindowAction.Valid(chromeAction with { Action = WindowActionKind.DRAG,
+        InputMode = WindowInputMode.CDP_ONLY, TargetElementId = secondTabRef,
+        TargetX = 10, TargetY = 20 }) &&
+    WindowAction.Valid(chromeAction with { Action = WindowActionKind.SET_FILES,
+        InputMode = WindowInputMode.CDP_ONLY, FilePaths = [fixtureUploadPath] }) &&
+    !WindowAction.Valid(chromeAction with { Action = WindowActionKind.SET_FILES,
+        InputMode = WindowInputMode.BACKGROUND_ONLY, FilePaths = [fixtureUploadPath] }) &&
+    !WindowAction.Valid(chromeAction with { Action = WindowActionKind.SET_FILES,
+        InputMode = WindowInputMode.CDP_ONLY, FilePaths = ["relative.txt"] }) &&
+    !WindowAction.Valid(chromeAction with { Action = WindowActionKind.SET_FILES,
+        InputMode = WindowInputMode.CDP_ONLY, FilePaths = [] }) &&
+    !WindowAction.Valid(chromeAction with { Action = WindowActionKind.SET_FILES,
+        InputMode = WindowInputMode.CDP_ONLY, FilePaths = [fixtureUploadPath], Value = "unexpected" }) &&
+    !WindowAction.Valid(chromeAction with { Action = WindowActionKind.CLICK,
+        FilePaths = [fixtureUploadPath] }) &&
+    new WindowTab("id", "title", "https://example.org/path", "https://example.org", 1,
+        true).UrlComponentsRedacted,
+    "chrome.cdp_drag_and_file_inputs_have_exact_typed_contracts");
 var chromeUiaAction = new WindowActionRequest(testWindowId, freshElementId,
     WindowActionKind.CLICK, null, ExpectedProfile: "Valer");
 string expiredStamp = DateTimeOffset.UtcNow.AddMinutes(-1).ToUnixTimeMilliseconds().ToString("x");
@@ -1667,12 +1691,12 @@ Check(Enum.GetValues<WindowActionKind>().Where(WindowChromeCdp.CdpPointerAction)
         [WindowActionKind.CLICK, WindowActionKind.DOUBLE_CLICK, WindowActionKind.RIGHT_CLICK,
          WindowActionKind.INVOKE, WindowActionKind.SELECT, WindowActionKind.TOGGLE,
          WindowActionKind.EXPAND, WindowActionKind.COLLAPSE,
-         WindowActionKind.HOVER, WindowActionKind.SCROLL]) &&
+         WindowActionKind.HOVER, WindowActionKind.SCROLL, WindowActionKind.DRAG]) &&
     WindowChromeCdp.WheelDelta(WindowScrollDirection.UP, 3) == (0, -360) &&
     WindowChromeCdp.WheelDelta(WindowScrollDirection.DOWN, 3) == (0, 360) &&
     WindowChromeCdp.WheelDelta(WindowScrollDirection.LEFT, 3) == (-360, 0) &&
     WindowChromeCdp.WheelDelta(WindowScrollDirection.RIGHT, 3) == (360, 0) &&
-    !WindowChromeCdp.CdpPointerAction(WindowActionKind.DRAG) &&
+    !WindowChromeCdp.CdpPointerAction(WindowActionKind.SET_FILES) &&
     !WindowChromeCdp.CdpPointerAction(WindowActionKind.KEY_PRESS),
     "chrome.cdp_hover_and_wheel_are_bounded_background_pointer_actions");
 using (var states = System.Text.Json.JsonDocument.Parse("""

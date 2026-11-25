@@ -122,7 +122,7 @@ internal static partial class WindowChromeCdp
         bool web = uri.Scheme is "http" or "https";
         return new(tab.Id, tab.Title, web ? uri.GetLeftPart(UriPartial.Path) : tab.Url,
             web ? uri.GetLeftPart(UriPartial.Authority) : uri.Scheme + ":",
-            tab.BrowserWindowId);
+            tab.BrowserWindowId, web && (uri.Query.Length != 0 || uri.Fragment.Length != 0));
     }
 
     // During a committed navigation Chrome may briefly reject a read-only
