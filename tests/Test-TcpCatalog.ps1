@@ -56,6 +56,23 @@ try {
         @($fields|Where-Object {-not $tcpOutput.Contains($_)}).Count -eq 0) 'tcp_schema.output_has_exact_tcp_fields'
     $kindSchema=$tcp[0].outputSchema|ConvertTo-Json -Depth 30 -Compress
     Assert ($kindSchema.Contains('TCP_CONNECTIONS',[StringComparison]::Ordinal)) 'tcp_schema.output_discriminator_is_tcp_only'
+    $chrome=@($list.tools|Where-Object {$_.name -eq 'windows.chrome_tab'})
+    $invoke=@($list.tools|Where-Object {$_.name -eq 'windows.invoke_element'})
+    Assert ($chrome.Count -eq 1 -and $invoke.Count -eq 1 -and
+        $chrome[0].inputSchema.properties.Contains('scope') -and
+        $chrome[0].inputSchema.properties.Contains('browser_window_id') -and
+        $chrome[0].inputSchema.properties.Contains('page_size') -and
+        $chrome[0].inputSchema.properties.Contains('offset') -and
+        ($chrome[0].inputSchema.properties.scope|ConvertTo-Json -Compress).Contains('BROWSER')) `
+        'browser_schema.publishes_exact_browser_scope'
+    $invokeProps=$invoke[0].inputSchema.properties
+    $invokeAction=$invokeProps.action|ConvertTo-Json -Depth 20 -Compress
+    Assert ($invokeProps.Contains('target_element_id') -and
+        $invokeProps.Contains('file_paths') -and
+        $invokeAction.Contains('DRAG',[StringComparison]::Ordinal) -and
+        $invokeAction.Contains('SET_FILES',[StringComparison]::Ordinal) -and
+        $invoke[0].outputSchema.properties.Contains('selected_file_count')) `
+        'browser_schema.publishes_background_drag_and_file_selection'
     $bad=Rpc 3 'tools/call' @{name='windows.tcp_connections';arguments=@{page_size=0}}
     Assert ($bad.structuredContent.status -eq 'INVALID_ARGUMENT' -and
         $bad.structuredContent.kind -eq 'TCP_CONNECTIONS' -and

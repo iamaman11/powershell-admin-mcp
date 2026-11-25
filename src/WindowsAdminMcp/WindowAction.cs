@@ -8,7 +8,7 @@ using System.Text.Json.Serialization;
 using System.Windows.Automation;
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowActionKind>))]
-public enum WindowActionKind { INVOKE, SET_VALUE, SELECT, TOGGLE, EXPAND, COLLAPSE, CLICK, KEY_PRESS, TYPE_TEXT, SCROLL, HOVER, DRAG, DOUBLE_CLICK, RIGHT_CLICK }
+public enum WindowActionKind { INVOKE, SET_VALUE, SELECT, TOGGLE, EXPAND, COLLAPSE, CLICK, KEY_PRESS, TYPE_TEXT, SCROLL, HOVER, DRAG, DOUBLE_CLICK, RIGHT_CLICK, SET_FILES }
 
 [JsonConverter(typeof(JsonStringEnumConverter<WindowScrollDirection>))]
 public enum WindowScrollDirection { UP, DOWN, LEFT, RIGHT }
@@ -115,7 +115,9 @@ internal sealed record WindowActionRequest(
     [property: JsonPropertyName("locator_name")] string? LocatorName = null,
     [property: JsonPropertyName("locator_role")] WindowRoleFilter? LocatorRole = null,
     [property: JsonPropertyName("resolve_only")] bool ResolveOnly = false,
-    [property: JsonPropertyName("input_mode")] WindowInputMode InputMode = WindowInputMode.BACKGROUND_ONLY);
+    [property: JsonPropertyName("input_mode")] WindowInputMode InputMode = WindowInputMode.BACKGROUND_ONLY,
+    [property: JsonPropertyName("target_element_id")] string? TargetElementId = null,
+    [property: JsonPropertyName("file_paths")] string[]? FilePaths = null);
 
 public sealed record WindowActionResult(
     [property: JsonPropertyName("status")] WindowActionCode Status,
@@ -147,7 +149,9 @@ public sealed record WindowActionResult(
     [property: JsonPropertyName("resolved_element_id"), JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)]
         string? ResolvedElementId = null,
     [property: JsonPropertyName("resolved_element_path"), JsonIgnore(Condition=JsonIgnoreCondition.WhenWritingNull)]
-        string? ResolvedElementPath = null)
+        string? ResolvedElementPath = null,
+    [property: JsonPropertyName("selected_file_count"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        int? SelectedFileCount = null)
 {
     [JsonPropertyName("safe_to_retry")]
     public bool SafeToRetry => EffectState==WindowEffectState.NO_EFFECT &&
@@ -259,8 +263,20 @@ internal static class WindowAction
         (request.Action==WindowActionKind.SCROLL ? request.ScrollDirection is not null &&
             Enum.IsDefined(request.ScrollDirection.Value) && request.ScrollUnits is >=1 and <=10 :
             request.ScrollDirection is null && request.ScrollUnits==1) &&
-        (request.Action==WindowActionKind.DRAG ? request.TargetX.HasValue && request.TargetY.HasValue :
-            request.TargetX is null && request.TargetY is null) &&
+        (request.Action == WindowActionKind.DRAG ?
+            (tabRef && request.InputMode == WindowInputMode.CDP_ONLY &&
+                request.TargetX is null && request.TargetY is null &&
+                (requireFresh ? WindowChromeCdp.ValidTabElementRef(request.TargetElementId) :
+                    WindowChromeCdp.WellFormedTabElementRef(request.TargetElementId)) ||
+             request.TargetElementId is null && request.TargetX.HasValue && request.TargetY.HasValue &&
+                request.InputMode != WindowInputMode.CDP_ONLY) :
+            request.TargetX is null && request.TargetY is null && request.TargetElementId is null) &&
+        (request.Action == WindowActionKind.SET_FILES ?
+            tabRef && request.InputMode == WindowInputMode.CDP_ONLY &&
+            request.FilePaths is { Length: >= 1 and <= 16 } &&
+            request.FilePaths.All(p => p is { Length: >= 3 and <= 1024 } &&
+                !p.Contains('\0') && Path.IsPathFullyQualified(p)) :
+            request.FilePaths is null) &&
         Enum.IsDefined(request.ExpectedKind) &&
         request.ObservationTimeoutMs is >= 100 and <= 15000 &&
         (request.ExpectedKind is not (WindowExpectedKind.WINDOW_CREATED or WindowExpectedKind.PROCESS_STARTED) ||

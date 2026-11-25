@@ -40,7 +40,8 @@ public sealed record WindowTab(
     [property: JsonPropertyName("url")] string Url,
     [property: JsonPropertyName("origin")] string Origin,
     [property: JsonPropertyName("browser_window_id"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        int? BrowserWindowId = null);
+        int? BrowserWindowId = null,
+    [property: JsonPropertyName("url_components_redacted")] bool UrlComponentsRedacted = false);
 
 public sealed record WindowElement(
     [property: JsonPropertyName("path")] string Path,

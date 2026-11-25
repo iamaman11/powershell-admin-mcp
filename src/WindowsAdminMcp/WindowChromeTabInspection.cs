@@ -103,7 +103,8 @@ internal static partial class WindowChromeCdp
             {
                 var uri = new Uri(t.Url);
                 return new WindowTab(t.Id, t.Title, uri.GetLeftPart(UriPartial.Path),
-                    uri.GetLeftPart(UriPartial.Authority), t.BrowserWindowId);
+                    uri.GetLeftPart(UriPartial.Authority), t.BrowserWindowId,
+                    uri.Query.Length != 0 || uri.Fragment.Length != 0);
             }).ToArray();
             return new(WindowInspectCode.COMPLETED, [], tabs.Count > offset + page.Length,
                 NextOffset: tabs.Count > offset + page.Length ? offset + page.Length : null,
@@ -157,7 +158,8 @@ internal static partial class WindowChromeCdp
             NextOffset: more ? offset + elements.Count : null,
             Tabs: [new WindowTab(selected.Id, selected.Title,
                 selectedAddress.GetLeftPart(UriPartial.Path),
-                selectedAddress.GetLeftPart(UriPartial.Authority), selected.BrowserWindowId)]);
+                selectedAddress.GetLeftPart(UriPartial.Authority), selected.BrowserWindowId,
+                selectedAddress.Query.Length != 0 || selectedAddress.Fragment.Length != 0)]);
     }
 
     private static string RoleName(string role) => role switch

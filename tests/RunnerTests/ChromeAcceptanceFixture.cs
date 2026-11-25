@@ -43,6 +43,9 @@ internal static class ChromeAcceptanceFixture
         }
 
         string root = Path.Combine(Path.GetTempPath(), "wmcp-owned-chrome-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        string uploadFile = Path.Combine(root, "ci-file.txt");
+        File.WriteAllText(uploadFile, "WMCP_CI_NATIVE_FILE_SELECTION", Encoding.UTF8);
         string managedProfileId = "ci_" + Guid.NewGuid().ToString("N");
         string profileDir = ChromeManagedProfile.DataDirectory(managedProfileId)!;
         Directory.CreateDirectory(profileDir);
@@ -328,6 +331,52 @@ internal static class ChromeAcceptanceFixture
             Console.WriteLine($"PASS chrome_ci.100_status_inspect_action_verify_cycles " +
                 $"clicks={state.Clicks} inputs={state.Inputs} owner={self.Id} generation={generation} " +
                 $"no_effect_profile_rejections={rejectedBeforeDispatch}");
+
+            // Two real DOM interactions in this isolated CI-owned browser.
+            // Neither uses OS input or a second CDP owner.
+            async Task<string> FindOwnedElement(string name)
+            {
+                RefreshOwnedProfile();
+                var reply = await ExchangeAsync(new(Inspect: new WindowInspectRequest(
+                    windowId!, 5, 30, null, null, 0, false, name,
+                    null, 0, WindowInspectScope.TAB,
+                    ExpectedProfile: selector, ExpectedUrl: url)));
+                var matches = reply.Inspect?.Elements.Where(e =>
+                    e.Name == name && e.ElementId.StartsWith("c1:", StringComparison.Ordinal)).ToArray();
+                if (reply.Inspect?.Status != WindowInspectCode.COMPLETED || matches?.Length != 1)
+                    throw new InvalidOperationException($"CI_CDP_ELEMENT_{name}_{reply.Inspect?.Status}");
+                return matches[0].ElementId;
+            }
+            string fileInput = await FindOwnedElement("CI_CDP_FILE_INPUT");
+            var fileReply = await ExchangeAsync(new(Action: new WindowActionRequest(
+                windowId!, fileInput, WindowActionKind.SET_FILES, null,
+                ExpectedProfile: selector, ExpectedUrl: url,
+                InputMode: WindowInputMode.CDP_ONLY, FilePaths: [uploadFile])));
+            var fileResult = fileReply.Action;
+            if (fileResult?.Status != WindowActionCode.COMPLETED ||
+                fileResult.EffectState != WindowEffectState.EFFECT_VERIFIED ||
+                fileResult.SelectedFileCount != 1 ||
+                fileResult.FocusBehavior != WindowFocusBehavior.CDP_NO_NATIVE_ACTIVATION)
+                throw new InvalidOperationException($"CI_CDP_SET_FILES_{fileResult?.Status}_" +
+                    $"{fileResult?.EffectEvidence}");
+            Console.WriteLine("PASS chrome_ci.typed_file_input_selected_and_read_back");
+
+            string dragSource = await FindOwnedElement("CI_CDP_DRAG_SOURCE");
+            string dragTarget = await FindOwnedElement("CI_CDP_DROP_TARGET");
+            var dragReply = await ExchangeAsync(new(Action: new WindowActionRequest(
+                windowId!, dragSource, WindowActionKind.DRAG, null,
+                ExpectedName: "CI_CDP_DROP_COMPLETE",
+                ExpectedChange: WindowExpectedChange.APPEARS,
+                ExpectedProfile: selector, ExpectedUrl: url,
+                InputMode: WindowInputMode.CDP_ONLY, TargetElementId: dragTarget)));
+            var dragResult = dragReply.Action;
+            if (dragResult?.Status != WindowActionCode.COMPLETED ||
+                dragResult.EffectState != WindowEffectState.EFFECT_VERIFIED ||
+                dragResult.FocusBehavior != WindowFocusBehavior.CDP_NO_NATIVE_ACTIVATION ||
+                !await UntilAsync(() => state.Drops == 1, TimeSpan.FromSeconds(4)))
+                throw new InvalidOperationException($"CI_CDP_DRAG_{dragResult?.Status}_" +
+                    $"{dragResult?.EffectEvidence}_drops={state.Drops}");
+            Console.WriteLine("PASS chrome_ci.addressed_dom_drag_drop_verified");
 
             int expected = state.Clicks;
             foreach (int concurrency in new[] { 2, 4, 8 })
@@ -844,6 +893,7 @@ internal static class ChromeAcceptanceFixture
     {
         internal int Clicks;
         internal int Inputs;
+        internal int Drops;
         internal string LastText = "";
     }
 
@@ -865,18 +915,32 @@ internal static class ChromeAcceptanceFixture
                 contentType = "text/html; charset=utf-8";
                 body = "<!doctype html><html><head><title>WMCP CI Chrome</title></head><body>" +
                     "<input aria-label='CI_CDP_VALUE' id='value'>" +
+                    "<input type='file' aria-label='CI_CDP_FILE_INPUT' id='file'>" +
                     "<button aria-label='CI_CDP_BUTTON' id='button'>CI_CDP_BUTTON</button>" +
+                    "<div role='button' tabindex='0' draggable='true' aria-label='CI_CDP_DRAG_SOURCE' " +
+                    "id='drag' style='width:140px;height:50px;background:#ddd;margin:15px'>Drag</div>" +
+                    "<div role='button' tabindex='0' aria-label='CI_CDP_DROP_TARGET' " +
+                    "id='drop' style='width:140px;height:50px;background:#aaa;margin:15px'>Drop</div>" +
                     "<script>" +
                     "document.getElementById('value').addEventListener('input',e=>" +
                     "fetch('/REPLACE/report?text='+encodeURIComponent(e.target.value)));" +
                     "document.getElementById('button').addEventListener('click',()=>" +
-                    "fetch('/REPLACE/report?click=1'));</script></body></html>";
+                    "fetch('/REPLACE/report?click=1'));" +
+                    "document.getElementById('drag').addEventListener('dragstart',e=>" +
+                    "e.dataTransfer.setData('text/plain','WMCP'));" +
+                    "document.getElementById('drop').addEventListener('dragover',e=>e.preventDefault());" +
+                    "document.getElementById('drop').addEventListener('drop',e=>{e.preventDefault();" +
+                    "if(e.dataTransfer.getData('text/plain')==='WMCP'){" +
+                    "e.target.setAttribute('aria-label','CI_CDP_DROP_COMPLETE');" +
+                    "e.target.textContent='CI_CDP_DROP_COMPLETE';" +
+                    "fetch('/REPLACE/report?drag=1')}});</script></body></html>";
                 body = body.Replace("REPLACE", nonce, StringComparison.Ordinal);
             }
             else if (route.StartsWith($"/{nonce}/report?", StringComparison.Ordinal))
             {
                 string query = route[(route.IndexOf('?') + 1)..];
                 if (query == "click=1") Interlocked.Increment(ref state.Clicks);
+                else if (query == "drag=1") Interlocked.Increment(ref state.Drops);
                 else if (query.StartsWith("text=", StringComparison.Ordinal))
                 {
                     Volatile.Write(ref state.LastText, Uri.UnescapeDataString(query[5..]));

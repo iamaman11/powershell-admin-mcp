@@ -23,7 +23,8 @@ internal static partial class WindowChromeCdp
         WindowActionKind.TOGGLE or WindowActionKind.EXPAND or WindowActionKind.COLLAPSE;
 
     internal static bool CdpPointerAction(WindowActionKind action) =>
-        PointerAction(action) || action is WindowActionKind.HOVER or WindowActionKind.SCROLL;
+        PointerAction(action) || action is WindowActionKind.HOVER or WindowActionKind.SCROLL or
+            WindowActionKind.DRAG;
 
     internal static (int DeltaX, int DeltaY) WheelDelta(WindowScrollDirection direction, int units) =>
         direction switch
@@ -62,6 +63,65 @@ internal static partial class WindowChromeCdp
                     button, clickCount = click }, sessionId);
             }
         }
+    }
+
+    // Both endpoints are verified DOM identities in the same page/loader, not
+    // guessed screen coordinates. CDP owns these events; Win32 input is unused.
+    private static async Task DispatchDomDrag(Session cdp, string sessionId,
+        double fromX, double fromY, double toX, double toY)
+    {
+        await cdp.Call("Input.dispatchMouseEvent", new
+            { type = "mouseMoved", x = fromX, y = fromY }, sessionId);
+        await cdp.Call("Input.dispatchMouseEvent", new
+            { type = "mousePressed", x = fromX, y = fromY, button = "left", clickCount = 1 }, sessionId);
+        for (int step = 1; step <= 12; step++)
+        {
+            double fraction = step / 12.0;
+            await cdp.Call("Input.dispatchMouseEvent", new
+            {
+                type = "mouseMoved", x = fromX + (toX - fromX) * fraction,
+                y = fromY + (toY - fromY) * fraction, button = "left", buttons = 1
+            }, sessionId);
+        }
+        await cdp.Call("Input.dispatchMouseEvent", new
+            { type = "mouseReleased", x = toX, y = toY, button = "left", clickCount = 1 }, sessionId);
+    }
+
+    private static async Task<bool> FileInputNode(Session cdp, string sessionId,
+        int backendNodeId, int fileCount)
+    {
+        var resolved = await cdp.Call("DOM.resolveNode", new { backendNodeId }, sessionId);
+        string objectId = resolved.GetProperty("object").GetProperty("objectId").GetString()!;
+        var result = await cdp.Call("Runtime.callFunctionOn", new
+        {
+            objectId,
+            functionDeclaration = "function(count){return this instanceof HTMLInputElement && this.type==='file' && !this.disabled && !this.closest('[inert]') && (count===1 || this.multiple);}",
+            arguments = new[] { new { value = fileCount } },
+            returnByValue = true, silent = true
+        }, sessionId);
+        return result.GetProperty("result").TryGetProperty("value", out var value) &&
+            value.ValueKind == JsonValueKind.True;
+    }
+
+    // Do not return any file path or local file contents through the result.
+    private static async Task<bool> FilesSelected(Session cdp, string sessionId, int backendNodeId,
+        string[] paths, long[] lengths)
+    {
+        var resolved = await cdp.Call("DOM.resolveNode", new { backendNodeId }, sessionId);
+        string objectId = resolved.GetProperty("object").GetProperty("objectId").GetString()!;
+        var result = await cdp.Call("Runtime.callFunctionOn", new
+        {
+            objectId,
+            functionDeclaration = "function(names,sizes){return this instanceof HTMLInputElement && this.type==='file' && this.files.length===names.length && names.every((n,i)=>this.files[i].name===n && this.files[i].size===sizes[i]);}",
+            arguments = new object[]
+            {
+                new { value = paths.Select(p => Path.GetFileName(p)).ToArray() },
+                new { value = lengths }
+            },
+            returnByValue = true, silent = true
+        }, sessionId);
+        return result.GetProperty("result").TryGetProperty("value", out var value) &&
+            value.ValueKind == JsonValueKind.True;
     }
 
     internal static bool? AxActionState(JsonElement node, WindowActionKind action)
@@ -274,6 +334,7 @@ internal static partial class WindowChromeCdp
             if (desiredState is not null && stateBefore == desiredState)
                 return Rejected(WindowActionCode.EXPECTED_STATE_ALREADY_TRUE);
             string provider = "CDP_BACKGROUND";
+            int? selectedFileCount = null;
             if (CdpPointerAction(request.Action))
             {
                 var box = await cdp.Call("DOM.getBoxModel", new { backendNodeId = target.BackendId }, sessionId);
@@ -292,13 +353,94 @@ internal static partial class WindowChromeCdp
                 }, sessionId);
                 if (!hit.GetProperty("result").TryGetProperty("value", out var ok) ||
                     ok.ValueKind != JsonValueKind.True) return Rejected(WindowActionCode.TARGET_OCCLUDED);
+                double? dropX = null, dropY = null;
+                if (request.Action == WindowActionKind.DRAG)
+                {
+                    if (!TryParseTabElementRef(request.TargetElementId, out var destination) ||
+                        destination is null || destination.TargetId != target.TargetId ||
+                        destination.LoaderId != target.LoaderId)
+                        return Rejected(WindowActionCode.STALE_ELEMENT, "DRAG_DESTINATION_CHANGED");
+                    var dropAx = ax.GetProperty("nodes").EnumerateArray().Where(node =>
+                        node.TryGetProperty("backendDOMNodeId", out var backend) &&
+                        backend.ValueKind == JsonValueKind.Number &&
+                        backend.GetInt32() == destination.BackendId &&
+                        !(node.TryGetProperty("ignored", out var ignored) && ignored.GetBoolean())).ToArray();
+                    if (dropAx.Length != 1 || AxDisabled(dropAx[0]) ||
+                        !string.Equals(ElementDigest(request.WindowId, selected.Id,
+                            destination.BackendId, loader, selected.Url,
+                            AxValue(dropAx[0], "role"), AxValue(dropAx[0], "name")),
+                            destination.Digest, StringComparison.OrdinalIgnoreCase))
+                        return Rejected(WindowActionCode.STALE_ELEMENT, "DRAG_DESTINATION_CHANGED");
+                    var dropBox = await cdp.Call("DOM.getBoxModel", new
+                        { backendNodeId = destination.BackendId }, sessionId);
+                    if (!TryPoint(dropBox.GetProperty("model").GetProperty("content"),
+                        metrics.GetProperty("cssVisualViewport"), out double dx, out double dy))
+                        return Rejected(WindowActionCode.CDP_TARGET_NOT_VISIBLE);
+                    var dropResolved = await cdp.Call("DOM.resolveNode", new
+                        { backendNodeId = destination.BackendId }, sessionId);
+                    var dropHit = await cdp.Call("Runtime.callFunctionOn", new
+                    {
+                        objectId = dropResolved.GetProperty("object").GetProperty("objectId").GetString()!,
+                        functionDeclaration = "function(x,y){const h=document.elementFromPoint(x,y);return !!h && (h===this || this.contains(h)) && !this.matches(':disabled') && !this.closest('[inert]');}",
+                        arguments = new[] { new { value = dx }, new { value = dy } },
+                        returnByValue = true, silent = true
+                    }, sessionId);
+                    if (!dropHit.GetProperty("result").TryGetProperty("value", out var dropOk) ||
+                        dropOk.ValueKind != JsonValueKind.True)
+                        return Rejected(WindowActionCode.TARGET_OCCLUDED, "DRAG_DESTINATION_OCCLUDED");
+                    dropX = dx; dropY = dy;
+                }
                 var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
                     target.TargetId, selected.Url, selected.BrowserWindowId, target.LoaderId,
                     timeout.Token);
                 if (checkpoint.Code is not null) return Rejected(checkpoint.Code.Value,
                     checkpoint.Detail);
                 dispatched = true;
-                await DispatchPointer(cdp, sessionId, request, x, y);
+                if (request.Action == WindowActionKind.DRAG)
+                    await DispatchDomDrag(cdp, sessionId, x, y, dropX!.Value, dropY!.Value);
+                else await DispatchPointer(cdp, sessionId, request, x, y);
+            }
+            else if (request.Action == WindowActionKind.SET_FILES)
+            {
+                if (!await FileInputNode(cdp, sessionId, target.BackendId,
+                    request.FilePaths!.Length))
+                    return Rejected(WindowActionCode.UNSUPPORTED_ACTION, "NOT_FILE_INPUT");
+                var paths = request.FilePaths!;
+                long[] lengths = new long[paths.Length];
+                for (int i = 0; i < paths.Length; i++)
+                {
+                    try
+                    {
+                        var info = new FileInfo(paths[i]);
+                        if (!info.Exists || (info.Attributes & FileAttributes.Directory) != 0)
+                            return Rejected(WindowActionCode.ACCESS_DENIED, "FILE_NOT_READABLE");
+                        using var stream = new FileStream(paths[i], FileMode.Open, FileAccess.Read,
+                            FileShare.ReadWrite | FileShare.Delete);
+                        lengths[i] = stream.Length;
+                    }
+                    catch (Exception e) when (e is IOException or UnauthorizedAccessException or
+                                               ArgumentException or System.Security.SecurityException)
+                    { return Rejected(WindowActionCode.ACCESS_DENIED, "FILE_NOT_READABLE"); }
+                }
+                if (await FilesSelected(cdp, sessionId, target.BackendId, paths, lengths))
+                    return Rejected(WindowActionCode.EXPECTED_STATE_ALREADY_TRUE, "FILES_ALREADY_SELECTED");
+                var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
+                    target.TargetId, selected.Url, selected.BrowserWindowId, target.LoaderId,
+                    timeout.Token);
+                if (checkpoint.Code is not null) return Rejected(checkpoint.Code.Value, checkpoint.Detail);
+                dispatched = true;
+                await cdp.Call("DOM.setFileInputFiles", new
+                    { files = paths, backendNodeId = target.BackendId }, sessionId);
+                selectedFileCount = paths.Length;
+                bool observed = await FilesSelected(cdp, sessionId, target.BackendId, paths, lengths);
+                return new(WindowActionCode.COMPLETED, TargetVerified: true,
+                    TargetIdentity: request.ElementId, ProviderResponse: provider,
+                    ExpectedStateObserved: observed,
+                    ObservationState: observed ? WindowObservationState.OBSERVED :
+                        WindowObservationState.NOT_OBSERVED,
+                    ElapsedMs: clock.ElapsedMilliseconds,
+                    ExecutionMethod: WindowExecutionMethod.CHROME_CDP,
+                    SelectedFileCount: observed ? selectedFileCount : null);
             }
             else if (request.Action is WindowActionKind.KEY_PRESS or WindowActionKind.TYPE_TEXT or
                      WindowActionKind.SET_VALUE)
