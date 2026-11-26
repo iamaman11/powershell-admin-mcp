@@ -58,9 +58,12 @@ try {
     Assert ($kindSchema.Contains('TCP_CONNECTIONS',[StringComparison]::Ordinal)) 'tcp_schema.output_discriminator_is_tcp_only'
     $chrome=@($list.tools|Where-Object {$_.name -eq 'windows.chrome_tab'})
     $invoke=@($list.tools|Where-Object {$_.name -eq 'windows.invoke_element'})
-    Assert ($chrome.Count -eq 1 -and $invoke.Count -eq 1 -and
+    $inspect=@($list.tools|Where-Object {$_.name -eq 'windows.inspect_window'})
+    Assert ($chrome.Count -eq 1 -and $invoke.Count -eq 1 -and $inspect.Count -eq 1 -and
         $chrome[0].inputSchema.properties.Contains('scope') -and
         $chrome[0].inputSchema.properties.Contains('browser_window_id') -and
+        $inspect[0].inputSchema.properties.Contains('browser_window_id') -and
+        $invoke[0].inputSchema.properties.Contains('browser_window_id') -and
         $chrome[0].inputSchema.properties.Contains('page_size') -and
         $chrome[0].inputSchema.properties.Contains('offset') -and
         ($chrome[0].inputSchema.properties.scope|ConvertTo-Json -Compress).Contains('BROWSER')) `

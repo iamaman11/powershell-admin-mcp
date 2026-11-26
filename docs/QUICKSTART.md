@@ -287,6 +287,35 @@ tab_id=<listed tab>, browser_window_id=<listed window>, url=https://example.com/
 confirm=true`. The tool always validates the target's current CDP window
 before dispatch. `next_offset` means another read-only page is available.
 
+For a DOM button in a browser tab whose native HWND mapping is ambiguous,
+the same explicit browser window identity now works for inspection and
+element actions (without a second CDP connection):
+
+1. Use `windows.chrome_tab(action=LIST, scope=BROWSER, window_id=<anchor>,
+   expected_profile=<anchor profile>)` and select the intended exact
+   `browser_window_id` and `tab_id`. The list covers **all profiles** of the
+   consented Chrome process; verify your choice, including the unredacted
+   origin from a trusted context. Displayed URLs can omit query/fragment.
+2. Use `windows.inspect_window(window_id=<anchor>, scope=TAB,
+   browser_window_id=<selected window>, tab_id=<selected tab>,
+   expected_profile=<anchor profile>, expected_origin=https://example.com)`
+   to get fresh DOM `c1` element references. This opt-in route verifies the
+   exact CDP window/tab pair, not native window geometry or a tab title.
+3. Use `windows.invoke_element(window_id=<anchor>,
+   element_id=<fresh c1 reference>, action=CLICK,
+   browser_window_id=<selected window>, input_mode=CDP_ONLY,
+   expected_profile=<anchor profile>, expected_origin=https://example.com,
+   expected_name=<known control>, expected_change=...)`, with `confirm=true`
+   when required. Each dispatch rechecks the current native anchor profile,
+   tab ownership, URL and loader. Background-only CDP input never steals OS
+   pointer/keyboard focus or falls back to physical input.
+
+Here, `expected_profile` verifies the **native anchor** used to authorize
+the connection; it does **not** attest to the destination tab's Chrome profile.
+If a native window-to-tab mapping is required, keep the default route without
+`browser_window_id`. With an uncertain effect, perform a read-only check;
+do not automatically repeat the action.
+
 Internal Chrome pages, OS file pickers and privileged prompts may still require
 the existing native UIA/foreground consent policy rather than a CDP action.
 

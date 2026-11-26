@@ -117,7 +117,8 @@ internal sealed record WindowActionRequest(
     [property: JsonPropertyName("resolve_only")] bool ResolveOnly = false,
     [property: JsonPropertyName("input_mode")] WindowInputMode InputMode = WindowInputMode.BACKGROUND_ONLY,
     [property: JsonPropertyName("target_element_id")] string? TargetElementId = null,
-    [property: JsonPropertyName("file_paths")] string[]? FilePaths = null);
+    [property: JsonPropertyName("file_paths")] string[]? FilePaths = null,
+    [property: JsonPropertyName("browser_window_id")] int? BrowserWindowId = null);
 
 public sealed record WindowActionResult(
     [property: JsonPropertyName("status")] WindowActionCode Status,
@@ -245,6 +246,10 @@ internal static class WindowAction
         (tabRef ||
             request.ExpectedOrigin is null && request.ExpectedUrl is null) &&
         (uiaRef || tabRef || locator) &&
+        (request.BrowserWindowId is null || request.BrowserWindowId > 0 && tabRef &&
+            request.InputMode == WindowInputMode.CDP_ONLY &&
+            request.ExpectedProfile is not null &&
+            (request.ExpectedOrigin is not null || request.ExpectedUrl is not null)) &&
         (!request.ResolveOnly || locator) &&
         (locator ? request.ElementId=="locator" &&
             request.LocatorAutomationId is null or {Length:>=1 and <=128} &&
