@@ -303,7 +303,8 @@ internal static class WindowChromeBroker
                                 inspect.StartElementId, inspect.Offset, inspect.IncludeDetails,
                                 inspect.NameContains, inspect.RoleFilter, inspect.WaitMs,
                                 inspect.Scope, inspect.TabId, inspect.ExpectedProfile,
-                                inspect.ExpectedOrigin, inspect.ExpectedUrl))
+                                inspect.ExpectedOrigin, inspect.ExpectedUrl,
+                                inspect.BrowserWindowId))
                             : new(Action: InvokeBoundAction(request.Action!));
                     }
                     reply = reply with { TraceId = request?.TraceId,

@@ -142,6 +142,10 @@ always means a new action. File receipts share the same 100,000-row and
 1. `windows.list_windows` returns an exact, reusable *window* identity.
 2. `windows.inspect_window` returns fresh UIA element IDs; `windows.invoke_locator`
    can resolve one exact locator and act in a single request.
+   For common `CLICK` actions, supply only `window_id`, fresh `element_id` and
+   `action=CLICK` to `windows.invoke_element`. For text, also supply `value` with
+   `action=SET_VALUE`. Advanced typed options remain available when needed;
+   unused optional fields need not be supplied.
 3. Choose `INVOKE`, `CLICK`, `DOUBLE_CLICK`, `RIGHT_CLICK`, `SCROLL`, `HOVER`,
    `DRAG`, `KEY_PRESS` or an available semantic pattern. Provide an expected
    postcondition for verification. `input_mode=BACKGROUND_ONLY` is the default:
@@ -187,6 +191,9 @@ The following fields have separate meanings:
 | `effect_state=EFFECT_UNKNOWN`, `effect_evidence=PROVIDER_ACK_ONLY` | No independently verified effect; do a fresh **read-only** inspection |
 | `effect_evidence=POSTCONDITION_NOT_OBSERVED` | A requested postcondition was checked but not seen; still no blind retry |
 | `safe_to_retry=false` | Do not re-dispatch the same state-changing action without independent evidence |
+| `next_step` | Typed guidance such as `INSPECT_AND_SUPPLY_POSTCONDITION` or `INSPECT_STATE_DO_NOT_RETRY` |
+| `focus_behavior=UIA_PROVIDER_MAY_ACTIVATE` | Even with `BACKGROUND_ONLY`, a third-party UIA provider may momentarily change foreground |
+| `focus_behavior=UNKNOWN_METHOD_MAY_ACTIVATE` | The action outcome/method is uncertain; do not infer that focus stayed unchanged |
 
 `windows.chrome_tab` and `windows.inspect_window(scope=TABS|TAB)` intentionally
 omit query strings and fragments from displayed URLs. A tab with omitted
@@ -195,10 +202,9 @@ URL as an exact `expected_url` for a web action: use the fresh `c1` identity and
 `expected_origin`, or an independently known complete URL. With several Chrome
 windows, use the existing `chrome_tab(scope=BROWSER)` interface and its exact
 `browser_window_id`; opening a tab into a particular native HWND cannot be
-guaranteed through CDP alone.
-| `next_step` | Typed guidance such as `INSPECT_AND_SUPPLY_POSTCONDITION` or `INSPECT_STATE_DO_NOT_RETRY` |
-| `focus_behavior=UIA_PROVIDER_MAY_ACTIVATE` | Even with `BACKGROUND_ONLY`, a third-party UIA provider may momentarily change foreground |
-| `focus_behavior=UNKNOWN_METHOD_MAY_ACTIVATE` | The action outcome/method is uncertain; do not infer that focus stayed unchanged |
+guaranteed through CDP alone. `windows.chrome_tab(OPEN, scope=BROWSER)` reports
+`destination=CHROME_SELECTED_UNVERIFIED` for a Chrome-chosen window and returns
+its actual `browser_window_id`. This does not promise the original profile.
 
 After `INSPECT_AND_SUPPLY_POSTCONDITION`, supply the discovered destination
 postcondition on a **future** action. Do not repeat an action whose effect is
@@ -280,6 +286,35 @@ and its `browser_window_id`, then call `scope=BROWSER, action=NAVIGATE,
 tab_id=<listed tab>, browser_window_id=<listed window>, url=https://example.com/,
 confirm=true`. The tool always validates the target's current CDP window
 before dispatch. `next_offset` means another read-only page is available.
+
+For a DOM button in a browser tab whose native HWND mapping is ambiguous,
+the same explicit browser window identity now works for inspection and
+element actions (without a second CDP connection):
+
+1. Use `windows.chrome_tab(action=LIST, scope=BROWSER, window_id=<anchor>,
+   expected_profile=<anchor profile>)` and select the intended exact
+   `browser_window_id` and `tab_id`. The list covers **all profiles** of the
+   consented Chrome process; verify your choice, including the unredacted
+   origin from a trusted context. Displayed URLs can omit query/fragment.
+2. Use `windows.inspect_window(window_id=<anchor>, scope=TAB,
+   browser_window_id=<selected window>, tab_id=<selected tab>,
+   expected_profile=<anchor profile>, expected_origin=https://example.com)`
+   to get fresh DOM `c1` element references. This opt-in route verifies the
+   exact CDP window/tab pair, not native window geometry or a tab title.
+3. Use `windows.invoke_element(window_id=<anchor>,
+   element_id=<fresh c1 reference>, action=CLICK,
+   browser_window_id=<selected window>, input_mode=CDP_ONLY,
+   expected_profile=<anchor profile>, expected_origin=https://example.com,
+   expected_name=<known control>, expected_change=...)`, with `confirm=true`
+   when required. Each dispatch rechecks the current native anchor profile,
+   tab ownership, URL and loader. Background-only CDP input never steals OS
+   pointer/keyboard focus or falls back to physical input.
+
+Here, `expected_profile` verifies the **native anchor** used to authorize
+the connection; it does **not** attest to the destination tab's Chrome profile.
+If a native window-to-tab mapping is required, keep the default route without
+`browser_window_id`. With an uncertain effect, perform a read-only check;
+do not automatically repeat the action.
 
 Internal Chrome pages, OS file pickers and privileged prompts may still require
 the existing native UIA/foreground consent policy rather than a CDP action.

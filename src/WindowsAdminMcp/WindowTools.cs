@@ -85,16 +85,17 @@ public sealed class WindowTools
         WindowRoleFilter? role_filter = null, int wait_ms = 0,
         WindowInspectScope scope = WindowInspectScope.WINDOW, string? tab_id = null,
         string? expected_profile = null, string? expected_origin = null, string? expected_url = null,
+        int? browser_window_id = null,
         CancellationToken cancellationToken = default)
     {
         if (!WindowInspector.ValidArguments(window_id, max_depth, max_elements,
             start_path, start_element_id, offset, include_details,
             name_contains, role_filter, wait_ms, scope, tab_id,
-            expected_profile, expected_origin, expected_url))
+            expected_profile, expected_origin, expected_url, browser_window_id))
             return new(WindowInspectCode.INVALID_ARGUMENT, [], Detail: WindowInspector.ArgumentError(
                 window_id, max_depth, max_elements, start_path, start_element_id, offset,
                 include_details, name_contains, role_filter, wait_ms, scope, tab_id,
-                expected_profile, expected_origin, expected_url));
+                expected_profile, expected_origin, expected_url, browser_window_id));
         var status = await AdminTools.Status(cancellationToken: cancellationToken);
         if (status.Status != StatusCode.OK)
             return new(WindowInspectCode.SERVICE_UNAVAILABLE, [], Detail: status.Status.ToString());
@@ -114,7 +115,7 @@ public sealed class WindowTools
         return await WindowInspector.RunIsolatedAsync(window_id, max_depth, max_elements,
             cancellationToken, start_path, start_element_id, offset, include_details,
             name_contains, role_filter, wait_ms, scope, tab_id,
-            expected_profile, expected_origin, expected_url);
+            expected_profile, expected_origin, expected_url, browser_window_id);
     }
 
     [McpServerTool(Name = "windows.capture_window", UseStructuredContent = true),
@@ -159,6 +160,7 @@ public sealed class WindowTools
         WindowRoleFilter? locator_role = null,
         WindowInputMode input_mode = WindowInputMode.BACKGROUND_ONLY,
         string? target_element_id = null, string[]? file_paths = null,
+        int? browser_window_id = null,
         CancellationToken cancellationToken = default)
     {
         var request = new WindowActionRequest(window_id, element_id, action, value,
@@ -167,7 +169,8 @@ public sealed class WindowTools
             expected_enabled_name, expected_enabled, virtual_key, ctrl, alt, shift, win,
             scroll_direction, scroll_units, target_x, target_y,
             locator_automation_id, locator_name, locator_role,
-            InputMode: input_mode, TargetElementId: target_element_id, FilePaths: file_paths);
+            InputMode: input_mode, TargetElementId: target_element_id, FilePaths: file_paths,
+            BrowserWindowId: browser_window_id);
         if (!WindowAction.Valid(request)) return new(WindowAction.InvalidCode(request));
         if (!confirm) return new(WindowActionCode.CONFIRMATION_REQUIRED);
 

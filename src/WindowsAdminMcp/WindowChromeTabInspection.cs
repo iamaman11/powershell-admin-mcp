@@ -16,18 +16,20 @@ internal static partial class WindowChromeCdp
     internal static WindowInspectResult InspectTab(IntPtr hwnd, string windowId,
         WindowInspectScope scope, string? tabId, int maxElements, int offset,
         string? nameFilter, WindowRoleFilter? roleFilter,
-        string? expectedProfile = null, string? expectedOrigin = null, string? expectedUrl = null)
+        string? expectedProfile = null, string? expectedOrigin = null, string? expectedUrl = null,
+        int? browserWindowId = null)
     {
         var clock=Stopwatch.StartNew();
         return InspectTabCore(hwnd,windowId,scope,tabId,maxElements,offset,nameFilter,
-            roleFilter,expectedProfile,expectedOrigin,expectedUrl) with
+            roleFilter,expectedProfile,expectedOrigin,expectedUrl,browserWindowId) with
             {ElapsedMs=clock.ElapsedMilliseconds};
     }
 
     private static WindowInspectResult InspectTabCore(IntPtr hwnd, string windowId,
         WindowInspectScope scope, string? tabId, int maxElements, int offset,
         string? nameFilter, WindowRoleFilter? roleFilter,
-        string? expectedProfile, string? expectedOrigin, string? expectedUrl)
+        string? expectedProfile, string? expectedOrigin, string? expectedUrl,
+        int? browserWindowId)
     {
         if (hwnd == IntPtr.Zero)
             return new(WindowInspectCode.CDP_UNAVAILABLE, [], Detail: "WINDOW_NOT_AVAILABLE");
@@ -51,7 +53,8 @@ internal static partial class WindowChromeCdp
             try
             {
                 return InspectTabAsync(endpoint!, hwnd, windowId, scope, tabId, maxElements,
-                    offset, nameFilter, roleFilter, expectedProfile, expectedOrigin, expectedUrl)
+                    offset, nameFilter, roleFilter, expectedProfile, expectedOrigin, expectedUrl,
+                    browserWindowId)
                     .GetAwaiter().GetResult();
             }
             catch (CdpWindowMappingException e)
@@ -89,13 +92,16 @@ internal static partial class WindowChromeCdp
     private static async Task<WindowInspectResult> InspectTabAsync(Uri endpoint, IntPtr hwnd,
         string windowId, WindowInspectScope scope, string? tabId, int maxElements, int offset,
         string? nameFilter, WindowRoleFilter? roleFilter,
-        string? expectedProfile, string? expectedOrigin, string? expectedUrl)
+        string? expectedProfile, string? expectedOrigin, string? expectedUrl,
+        int? browserWindowId)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(
             InspectTimeoutMs(TabConnected, tabId is not null)));
         var cdp = await TabSessionAsync(endpoint, timeout.Token);
-        var tabs = await TargetsForWindow(cdp, hwnd, windowId, timeout.Token,
-            expectedOrigin, expectedUrl, tabId, expectedProfile is not null);
+        var tabs = browserWindowId is { } selectedBrowserWindow
+            ? await BrowserTargets(cdp, selectedBrowserWindow, tabId)
+            : await TargetsForWindow(cdp, hwnd, windowId, timeout.Token,
+                expectedOrigin, expectedUrl, tabId, expectedProfile is not null);
         if (scope == WindowInspectScope.TABS)
         {
             tabs = tabs.Where(t => MatchesContext(t.Url, expectedOrigin, expectedUrl)).ToList();

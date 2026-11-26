@@ -26,6 +26,9 @@ public enum ChromeTabNextStep
     INSPECT_STATE_DO_NOT_RETRY
 }
 
+[JsonConverter(typeof(JsonStringEnumConverter<ChromeTabDestination>))]
+public enum ChromeTabDestination { VERIFIED_WINDOW, CHROME_SELECTED_UNVERIFIED }
+
 internal sealed record ChromeTabRequest(
     [property: JsonPropertyName("window_id")] string WindowId,
     [property: JsonPropertyName("expected_profile")] string ExpectedProfile,
@@ -56,7 +59,9 @@ public sealed record ChromeTabResult(
     [property: JsonPropertyName("cdp_fingerprint_candidates"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         int? CdpFingerprintCandidates = null,
     [property: JsonPropertyName("next_offset"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        int? NextOffset = null)
+        int? NextOffset = null,
+    [property: JsonPropertyName("destination"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        ChromeTabDestination? Destination = null)
 {
     [JsonPropertyName("effect_state")]
     public WindowEffectState EffectState => Status == ChromeTabCode.COMPLETED && Action != ChromeTabAction.LIST
@@ -386,7 +391,10 @@ internal static partial class WindowChromeCdp
                         return new(ChromeTabCode.COMPLETED, request.Action, targetId,
                             new(targetId, entry.GetProperty("title").GetString() ?? "",
                                 request.Url!, new Uri(request.Url!).GetLeftPart(UriPartial.Authority),
-                                actualBrowserWindowId));
+                                actualBrowserWindowId),
+                            Destination: request.Scope == ChromeTabScope.BROWSER
+                                ? ChromeTabDestination.CHROME_SELECTED_UNVERIFIED
+                                : ChromeTabDestination.VERIFIED_WINDOW);
                     return new(ChromeTabCode.EFFECT_UNKNOWN, request.Action, targetId,
                         Detail:"OPENED_IN_DIFFERENT_WINDOW");
                 }

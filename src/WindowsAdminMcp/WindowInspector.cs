@@ -84,7 +84,8 @@ internal sealed record WindowInspectRequest(
     string? StartPath, string? StartElementId, int Offset, bool IncludeDetails,
     string? NameContains, WindowRoleFilter? RoleFilter, int WaitMs,
     WindowInspectScope Scope = WindowInspectScope.WINDOW, string? TabId = null,
-    string? ExpectedProfile = null, string? ExpectedOrigin = null, string? ExpectedUrl = null);
+    string? ExpectedProfile = null, string? ExpectedOrigin = null, string? ExpectedUrl = null,
+    [property: JsonPropertyName("browser_window_id")] int? BrowserWindowId = null);
 
 // UI Automation can block inside a third-party provider. Run it in a bounded,
 // on-demand copy of this executable, never on the MCP request/USER worker thread.
@@ -152,10 +153,11 @@ internal static class WindowInspector
         bool includeDetails = false, string? nameContains = null,
         WindowRoleFilter? roleFilter = null, int waitMs = 0,
         WindowInspectScope scope = WindowInspectScope.WINDOW, string? tabId = null,
-        string? expectedProfile = null, string? expectedOrigin = null, string? expectedUrl = null) =>
+        string? expectedProfile = null, string? expectedOrigin = null, string? expectedUrl = null,
+        int? browserWindowId = null) =>
         ArgumentError(windowId, maxDepth, maxElements, startPath, startElementId,
             offset, includeDetails, nameContains, roleFilter, waitMs, scope, tabId,
-            expectedProfile, expectedOrigin, expectedUrl) is null;
+            expectedProfile, expectedOrigin, expectedUrl, browserWindowId) is null;
 
     // Report the offending typed field without exposing browser contents.
     internal static string? ArgumentError(string? windowId, int maxDepth, int maxElements,
@@ -163,7 +165,8 @@ internal static class WindowInspector
         bool includeDetails = false, string? nameContains = null,
         WindowRoleFilter? roleFilter = null, int waitMs = 0,
         WindowInspectScope scope = WindowInspectScope.WINDOW, string? tabId = null,
-        string? expectedProfile = null, string? expectedOrigin = null, string? expectedUrl = null)
+        string? expectedProfile = null, string? expectedOrigin = null, string? expectedUrl = null,
+        int? browserWindowId = null)
     {
         if (!WindowCatalog.TryParseId(windowId, out _)) return "window_id: invalid or missing window reference";
         if (!Enum.IsDefined(scope)) return "scope: expected WINDOW, TABS or TAB";
@@ -180,6 +183,10 @@ internal static class WindowInspector
             (tabId is not null && !WindowChromeCdp.ValidTargetId(tabId) ||
              tabId is null && expectedOrigin is null && expectedUrl is null))
             return "tab_id: provide a target ID or an exact expected_origin/expected_url";
+        if (browserWindowId is not null &&
+            (browserWindowId <= 0 || scope != WindowInspectScope.TAB ||
+             !WindowChromeCdp.ValidTargetId(tabId)))
+            return "browser_window_id: requires scope=TAB and an exact tab_id";
         if (scope != WindowInspectScope.WINDOW && expectedProfile is null)
             return "expected_profile: required for Chrome TABS/TAB";
         if (scope != WindowInspectScope.WINDOW && (startPath is not null || startElementId is not null || waitMs != 0))
@@ -214,14 +221,16 @@ internal static class WindowInspector
         bool includeDetails = false, string? nameContains = null,
         WindowRoleFilter? roleFilter = null, int waitMs = 0,
         WindowInspectScope scope = WindowInspectScope.WINDOW, string? tabId = null,
-        string? expectedProfile = null, string? expectedOrigin = null, string? expectedUrl = null)
+        string? expectedProfile = null, string? expectedOrigin = null, string? expectedUrl = null,
+        int? browserWindowId = null)
     {
         if (!ValidArguments(windowId, maxDepth, maxElements, startPath, startElementId,
             offset, includeDetails, nameContains, roleFilter, waitMs, scope, tabId,
-            expectedProfile, expectedOrigin, expectedUrl))
+            expectedProfile, expectedOrigin, expectedUrl, browserWindowId))
             return new(WindowInspectCode.INVALID_ARGUMENT, [], Detail: ArgumentError(windowId, maxDepth,
                 maxElements, startPath, startElementId, offset, includeDetails, nameContains,
-                roleFilter, waitMs, scope, tabId, expectedProfile, expectedOrigin, expectedUrl));
+                roleFilter, waitMs, scope, tabId, expectedProfile, expectedOrigin, expectedUrl,
+                browserWindowId));
         using var self = Process.GetCurrentProcess();
         var desktop = DesktopCapture.ObserveDesktop(self.SessionId);
         if (desktop.Code != CaptureCode.COMPLETED)
@@ -238,7 +247,8 @@ internal static class WindowInspector
             ? InspectCore(hwnd, maxDepth, maxElements, windowId, startPath, startElementId,
                 offset, includeDetails, nameContains, roleFilter, waitMs)
             : WindowChromeCdp.InspectTab(hwnd, windowId, scope, tabId, maxElements,
-                offset, nameContains, roleFilter, expectedProfile, expectedOrigin, expectedUrl);
+                offset, nameContains, roleFilter, expectedProfile, expectedOrigin, expectedUrl,
+                browserWindowId);
     }
 
     // Paths are never authority on their own. Callers must also provide the
@@ -431,18 +441,21 @@ internal static class WindowInspector
         int offset = 0, bool includeDetails = false, string? nameContains = null,
         WindowRoleFilter? roleFilter = null, int waitMs = 0,
         WindowInspectScope scope = WindowInspectScope.WINDOW, string? tabId = null,
-        string? expectedProfile = null, string? expectedOrigin = null, string? expectedUrl = null)
+        string? expectedProfile = null, string? expectedOrigin = null, string? expectedUrl = null,
+        int? browserWindowId = null)
     {
         if (!ValidArguments(windowId, maxDepth, maxElements, startPath, startElementId,
             offset, includeDetails, nameContains, roleFilter, waitMs, scope, tabId,
-            expectedProfile, expectedOrigin, expectedUrl))
+            expectedProfile, expectedOrigin, expectedUrl, browserWindowId))
             return new(WindowInspectCode.INVALID_ARGUMENT, [], Detail: ArgumentError(windowId, maxDepth,
                 maxElements, startPath, startElementId, offset, includeDetails, nameContains,
-                roleFilter, waitMs, scope, tabId, expectedProfile, expectedOrigin, expectedUrl));
+                roleFilter, waitMs, scope, tabId, expectedProfile, expectedOrigin, expectedUrl,
+                browserWindowId));
         if (scope != WindowInspectScope.WINDOW)
             return await WindowChromeBroker.InspectAsync(new(windowId, maxDepth, maxElements,
                 startPath, startElementId, offset, includeDetails, nameContains, roleFilter,
-                waitMs, scope, tabId, expectedProfile, expectedOrigin, expectedUrl), cancellationToken);
+                waitMs, scope, tabId, expectedProfile, expectedOrigin, expectedUrl,
+                browserWindowId), cancellationToken);
         var executable = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(executable)) return new(WindowInspectCode.WORKER_FAILED, []);
         var start = new ProcessStartInfo(executable)

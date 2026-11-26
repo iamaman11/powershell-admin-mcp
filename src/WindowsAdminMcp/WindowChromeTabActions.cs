@@ -285,11 +285,15 @@ internal static partial class WindowChromeCdp
         try
         {
             var cdp = await TabSessionAsync(endpoint, timeout.Token);
-            var tabs = await TargetsForWindow(cdp, hwnd, request.WindowId, timeout.Token,
-                request.ExpectedOrigin, request.ExpectedUrl, target.TargetId,
-                request.ExpectedProfile is not null);
+            var tabs = request.BrowserWindowId is { } browserWindowId
+                ? await BrowserTargets(cdp, browserWindowId, target.TargetId)
+                : await TargetsForWindow(cdp, hwnd, request.WindowId, timeout.Token,
+                    request.ExpectedOrigin, request.ExpectedUrl, target.TargetId,
+                    request.ExpectedProfile is not null);
             var selected = tabs.SingleOrDefault(t => t.Id == target.TargetId);
-            if (selected is null) return Rejected(WindowActionCode.CDP_TARGET_AMBIGUOUS);
+            if (selected is null) return request.BrowserWindowId is not null
+                ? Rejected(WindowActionCode.CDP_CONTEXT_MISMATCH, "BROWSER_TARGET_NOT_FOUND")
+                : Rejected(WindowActionCode.CDP_TARGET_AMBIGUOUS);
             if (!MatchesContext(selected.Url, request.ExpectedOrigin, request.ExpectedUrl))
                 return Rejected(WindowActionCode.CDP_CONTEXT_MISMATCH, "TAB_URL_MISMATCH");
             if (request.ExpectedProfile is not null &&

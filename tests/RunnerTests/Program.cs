@@ -46,7 +46,22 @@ if (args is ["--chrome-pipe-live-action", var liveWindow, var liveProfile, var l
         ExpectedProfile: liveProfile, ExpectedUrl: liveUrl),
         TraceId: Guid.NewGuid().ToString("N"));
     var inspect = await ChromeBrokerPipe.ExchangeAsync(inspectRequest, limit.Token);
-    var elements = inspect?.Inspect?.Elements.Where(e => e.ElementId.StartsWith("c1:",
+    var nativeTab = inspect?.Inspect?.Tabs?.SingleOrDefault();
+    string liveOrigin = new Uri(liveUrl).GetLeftPart(UriPartial.Authority);
+    ChromeBrokerRequest? directInspectRequest = null;
+    ChromeBrokerReply? directInspect = null;
+    if (nativeTab?.BrowserWindowId is > 0 &&
+        WindowChromeCdp.ValidTargetId(nativeTab.TabId))
+    {
+        directInspectRequest = new(Inspect: new WindowInspectRequest(liveWindow,
+            4, 20, null, null, 0, false, "CI_CDP_BUTTON", WindowRoleFilter.BUTTON,
+            0, WindowInspectScope.TAB, TabId: nativeTab.TabId,
+            ExpectedProfile: liveProfile, ExpectedOrigin: liveOrigin,
+            ExpectedUrl: liveUrl, BrowserWindowId: nativeTab.BrowserWindowId),
+            TraceId: Guid.NewGuid().ToString("N"));
+        directInspect = await ChromeBrokerPipe.ExchangeAsync(directInspectRequest, limit.Token);
+    }
+    var elements = directInspect?.Inspect?.Elements.Where(e => e.ElementId.StartsWith("c1:",
         StringComparison.Ordinal)).ToArray() ?? [];
     ChromeBrokerReply? action = null;
     ChromeBrokerRequest? actionRequest = null;
@@ -54,7 +69,10 @@ if (args is ["--chrome-pipe-live-action", var liveWindow, var liveProfile, var l
     {
         actionRequest = new(Action: new WindowActionRequest(liveWindow, elements[0].ElementId,
             WindowActionKind.CLICK, null, ExpectedProfile: liveProfile, ExpectedUrl: liveUrl,
-            ObservationTimeoutMs: 1500), TraceId: Guid.NewGuid().ToString("N"));
+            ExpectedOrigin: liveOrigin, ObservationTimeoutMs: 1500,
+            InputMode: WindowInputMode.CDP_ONLY,
+            BrowserWindowId: nativeTab!.BrowserWindowId),
+            TraceId: Guid.NewGuid().ToString("N"));
         action = await ChromeBrokerPipe.ExchangeAsync(actionRequest, limit.Token);
     }
     bool valid = status?.OwnerPid is > 0 &&
@@ -64,6 +82,12 @@ if (args is ["--chrome-pipe-live-action", var liveWindow, var liveProfile, var l
         inspect?.TraceId == inspectRequest.TraceId &&
         inspect?.Inspect?.Status == WindowInspectCode.COMPLETED &&
         inspect.Inspect.SessionGeneration == status.Connection.SessionGeneration &&
+        directInspect?.OwnerPid == status.OwnerPid &&
+        directInspect?.TraceId == directInspectRequest?.TraceId &&
+        directInspect?.Inspect?.Status == WindowInspectCode.COMPLETED &&
+        directInspect.Inspect.SessionGeneration == status.Connection.SessionGeneration &&
+        directInspect.Inspect.Tabs?.SingleOrDefault()?.BrowserWindowId ==
+            nativeTab?.BrowserWindowId &&
         action?.OwnerPid == status.OwnerPid &&
         action?.TraceId == actionRequest?.TraceId &&
         action?.Action is { Status: WindowActionCode.COMPLETED, EffectUnknown: false,
@@ -78,6 +102,8 @@ if (args is ["--chrome-pipe-live-action", var liveWindow, var liveProfile, var l
         connection_detail = status?.Connection?.Detail,
         inspect_code = inspect?.Inspect?.Status.ToString(),
         inspect_detail = inspect?.Inspect?.Detail,
+        direct_inspect_code = directInspect?.Inspect?.Status.ToString(),
+        direct_inspect_detail = directInspect?.Inspect?.Detail,
         status = action?.Action?.Status.ToString(),
         action_detail = action?.Action?.Detail,
         verified = valid
@@ -1084,6 +1110,29 @@ Check(!WindowInspector.ValidArguments(testWindowId, 16, 50,
         "max_elements", StringComparison.Ordinal) == true,
     "windows.typed_chrome_tab_scope_and_precise_invalid_argument");
 Check(WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.TAB, tabId: "0123456789abcdef0123456789abcdef",
+        expectedProfile: "Browser Anchor", browserWindowId: 13) &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.TAB, tabId: "0123456789abcdef0123456789abcdef",
+        expectedProfile: "Browser Anchor", browserWindowId: 0) &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.TAB, expectedProfile: "Browser Anchor",
+        expectedOrigin: "https://example.com", browserWindowId: 13) &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.TABS, expectedProfile: "Browser Anchor",
+        browserWindowId: 13) &&
+    !WindowInspector.ValidArguments(testWindowId, 16, 50,
+        scope: WindowInspectScope.WINDOW, browserWindowId: 13) &&
+    WindowInspector.ArgumentError(testWindowId, 16, 50,
+        scope: WindowInspectScope.TABS, expectedProfile: "Browser Anchor",
+        browserWindowId: 13)?.StartsWith("browser_window_id:") == true &&
+    System.Text.Json.JsonSerializer.Serialize(new WindowInspectRequest(testWindowId,
+        16, 50, null, null, 0, false, null, null, 0, WindowInspectScope.TAB,
+        "0123456789abcdef0123456789abcdef", "Browser Anchor",
+        BrowserWindowId: 13), PipeWire.Json).Contains("\"browser_window_id\":13",
+        StringComparison.Ordinal),
+    "chrome.exact_browser_window_tab_inspection_contract");
+Check(WindowInspector.ValidArguments(testWindowId, 16, 50,
         scope: WindowInspectScope.TABS, expectedProfile: "Valer",
         expectedOrigin: "https://example.com") &&
     WindowInspector.ValidArguments(testWindowId, 16, 50,
@@ -1406,6 +1455,13 @@ Check(WindowChromeCdp.ValidTabRequest(chromeTabRequest) &&
         WindowEffectState.EFFECT_VERIFIED &&
     new ChromeTabResult(ChromeTabCode.COMPLETED, ChromeTabAction.LIST).EffectState ==
         WindowEffectState.NO_EFFECT &&
+    new ChromeTabResult(ChromeTabCode.COMPLETED, ChromeTabAction.OPEN,
+        Destination:ChromeTabDestination.CHROME_SELECTED_UNVERIFIED).Destination ==
+        ChromeTabDestination.CHROME_SELECTED_UNVERIFIED &&
+    System.Text.Json.JsonSerializer.Serialize(new ChromeTabResult(
+        ChromeTabCode.COMPLETED,ChromeTabAction.OPEN,
+        Destination:ChromeTabDestination.CHROME_SELECTED_UNVERIFIED),PipeWire.Json)
+        .Contains("\"destination\":\"CHROME_SELECTED_UNVERIFIED\"",StringComparison.Ordinal) &&
     !new ChromeTabResult(ChromeTabCode.EFFECT_UNKNOWN, ChromeTabAction.NAVIGATE).SafeToRetry &&
     new ChromeTabResult(ChromeTabCode.EFFECT_UNKNOWN, ChromeTabAction.NAVIGATE).NextStep ==
         ChromeTabNextStep.INSPECT_STATE_DO_NOT_RETRY &&
@@ -1524,6 +1580,24 @@ string freshTabRef = "c1:" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToSt
 string secondTabRef = freshTabRef.Replace(":1:loader:", ":2:loader:", StringComparison.Ordinal);
 var chromeAction = new WindowActionRequest(testWindowId, freshTabRef,
     WindowActionKind.CLICK, null, ExpectedProfile: "Valer");
+var browserScopedAction = chromeAction with
+{
+    BrowserWindowId = 13, InputMode = WindowInputMode.CDP_ONLY,
+    ExpectedOrigin = "https://example.com"
+};
+Check(WindowAction.Valid(browserScopedAction) &&
+    !WindowAction.Valid(browserScopedAction with { BrowserWindowId = 0 }) &&
+    !WindowAction.Valid(browserScopedAction with { InputMode = WindowInputMode.BACKGROUND_ONLY }) &&
+    !WindowAction.Valid(browserScopedAction with { InputMode = WindowInputMode.ALLOW_FOREGROUND_INPUT }) &&
+    !WindowAction.Valid(browserScopedAction with { ExpectedProfile = null }) &&
+    !WindowAction.Valid(browserScopedAction with { ExpectedOrigin = null }) &&
+    !WindowAction.Valid(browserScopedAction with { ElementId = freshElementId }) &&
+    WindowAction.Valid(browserScopedAction with { ExpectedOrigin = null,
+        ExpectedUrl = "https://example.com/form" }) &&
+    new ChromeBrokerRequest(Action: browserScopedAction).Valid &&
+    System.Text.Json.JsonSerializer.Serialize(browserScopedAction, PipeWire.Json)
+        .Contains("\"browser_window_id\":13", StringComparison.Ordinal),
+    "chrome.browser_scoped_action_is_exact_background_and_context_gated");
 string fixtureUploadPath = Path.Combine(Path.GetTempPath(), "wmcp-upload-fixture.txt");
 Check(WindowAction.Valid(chromeAction with { Action = WindowActionKind.DRAG,
         InputMode = WindowInputMode.CDP_ONLY, TargetElementId = secondTabRef }) &&
@@ -3394,6 +3468,35 @@ try
 }
 finally{Directory.Delete(drainRoot,true);}
 
+
+// A list/status caller can decide the next read-only step without guessing
+// whether a cancelled or timed-out command actually affected Windows.
+var jobGuidance = new JobInfo("test-job", "test-key", JobState.QUEUED, new string('a',64),
+    "2026-11-26T00:00:00Z", "2026-11-26T00:00:00Z");
+var unknownReconciliation = new ReconciliationRecord(ReconciliationDecision.UNKNOWN,
+    "Observed logs only; external effect cannot be established.", "2026-11-26T00:00:00Z",
+    "S-1-5-18", "fixture");
+Check(jobGuidance.NextStep == JobNextStep.CHECK_QUEUE_STATUS &&
+    (jobGuidance with { State=JobState.RUNNING }).NextStep == JobNextStep.POLL_STATUS &&
+    (jobGuidance with { State=JobState.CANCEL_REQUESTED }).NextStep == JobNextStep.POLL_STATUS &&
+    (jobGuidance with { State=JobState.WAITING_FOR_RESUME }).NextStep == JobNextStep.RESUME_FROM_CHECKPOINT &&
+    (jobGuidance with { State=JobState.WAITING_FOR_REBOOT }).NextStep == JobNextStep.VERIFY_REBOOT &&
+    (jobGuidance with { State=JobState.NEEDS_RECONCILIATION }).NextStep == JobNextStep.INSPECT_LOGS_AND_RECONCILE &&
+    (jobGuidance with { State=JobState.NEEDS_RECONCILIATION }).EffectUncertain &&
+    !(jobGuidance with { State=JobState.COMPLETED }).EffectUncertain &&
+    !(jobGuidance with { State=JobState.RECONCILED }).EffectUncertain &&
+    (jobGuidance with { State=JobState.RECONCILED, Reconciliation=unknownReconciliation }).EffectUncertain &&
+    (jobGuidance with { State=JobState.RECONCILED, Reconciliation=unknownReconciliation with
+        { Decision=ReconciliationDecision.EFFECT_CONFIRMED } }).NextStep == JobNextStep.NONE &&
+    !(jobGuidance with { State=JobState.RECONCILED, Reconciliation=unknownReconciliation with
+        { Decision=ReconciliationDecision.NO_EFFECT_CONFIRMED } }).EffectUncertain &&
+    System.Text.Json.JsonSerializer.Serialize(jobGuidance with
+        { State=JobState.NEEDS_RECONCILIATION },PipeWire.Json)
+        .Contains("\"next_step\":\"INSPECT_LOGS_AND_RECONCILE\"",StringComparison.Ordinal) &&
+    System.Text.Json.JsonSerializer.Serialize(jobGuidance with
+        { State=JobState.RECONCILED, Reconciliation=unknownReconciliation },PipeWire.Json)
+        .Contains("\"effect_uncertain\":true",StringComparison.Ordinal),
+    "job.typed_next_step_and_unknown_reconciliation_never_claim_verified_effect");
 
 // Schema 3 fixture: migrate encrypted legacy results and retain permanent job keys.
 string retentionRoot=Path.Combine(Path.GetTempPath(),"WindowsAdminMCP-retention-"+Guid.NewGuid().ToString("N"));
