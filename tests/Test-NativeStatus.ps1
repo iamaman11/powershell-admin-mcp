@@ -674,8 +674,8 @@ try{
         $doctor.externalAcceptanceStatus -eq 'NOT_TESTED') 'r6.doctor_operational_ready_despite_historical_reconciliation'
     Assert (@($doctor.checks|Where-Object {$_.component -eq 'Remote' -and $_.status -eq 'NOT_TESTED'}).Count -eq 1) 'r6.doctor_no_false_remote_acceptance'
     Assert ($doctor.toolCatalog.source -eq 'SERVER_ASSEMBLY_METADATA' -and
-        $doctor.toolCatalog.tool_count -eq 23 -and $doctor.toolCatalog.structured_tool_count -eq 22 -and
-        $doctor.toolCatalog.native_dto_result_count -eq 21 -and
+        $doctor.toolCatalog.tool_count -eq 25 -and $doctor.toolCatalog.structured_tool_count -eq 24 -and
+        $doctor.toolCatalog.native_dto_result_count -eq 23 -and
         @($doctor.toolCatalog.tool_names|Where-Object {$_ -eq 'windows.tcp_connections'}).Count -eq 1) 'r6.doctor_v2_declared_native_tool_inventory'
     Assert (@($doctor.checks|Where-Object {$_.component -eq 'ToolCatalog' -and $_.status -eq 'OK'}).Count -eq 1 -and
         @($doctor.checks|Where-Object {$_.component -eq 'PublishedClientSchema' -and $_.status -eq 'NOT_TESTED'}).Count -eq 1 -and

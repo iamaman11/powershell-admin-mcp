@@ -949,14 +949,14 @@ var doctorStatus = new AdminStatus(StatusCode.OK, "ci", Diagnostics: doctorSnaps
 var doctorWire = System.Text.Json.JsonSerializer.Serialize(doctorStatus, PipeWire.Json);
 Check(System.Text.Json.JsonSerializer.Deserialize<AdminStatus>(doctorWire, PipeWire.Json)?.Diagnostics is
     { Status: DoctorState.DEGRADED, ReconciliationCount: 17, LocalOperationalReady: true,
-      RollbackPending: true, ToolCatalog: { ToolCount: 23, StructuredToolCount: 22,
-          NativeDtoResultCount: 21 },
+      RollbackPending: true, ToolCatalog: { ToolCount: 25, StructuredToolCount: 24,
+          NativeDtoResultCount: 23 },
       Checks: [{ Reason: DoctorReason.RECONCILIATION_REQUIRED }] } &&
     !System.Text.Json.JsonSerializer.Serialize(new AdminStatus(StatusCode.OK, "ci"), PipeWire.Json)
         .Contains("diagnostics", StringComparison.Ordinal),
     "status.optional_typed_doctor_without_changing_default_status");
 var doctorCatalog = DoctorCatalog.Observe();
-Check(DoctorCatalog.IsComplete(doctorCatalog) && doctorCatalog.ToolCount == 23 &&
+Check(DoctorCatalog.IsComplete(doctorCatalog) && doctorCatalog.ToolCount == 25 &&
     doctorCatalog.ToolNames.Contains("windows.tcp_connections") &&
     doctorCatalog.ToolNames.Contains("windows.file_acl") &&
     doctorCatalog.ToolNames.Contains("windows.process_wait_chain") &&
@@ -964,11 +964,13 @@ Check(DoctorCatalog.IsComplete(doctorCatalog) && doctorCatalog.ToolCount == 23 &
     doctorCatalog.ToolNames.Contains("windows.admin_action") &&
     doctorCatalog.ToolNames.Contains("windows.chrome_connection") &&
     doctorCatalog.ToolNames.Contains("windows.chrome_tab") &&
+    doctorCatalog.ToolNames.Contains("windows.click_element") &&
+    doctorCatalog.ToolNames.Contains("windows.set_text") &&
     doctorCatalog.Source == DoctorCatalogSource.SERVER_ASSEMBLY_METADATA,
     "doctor.v2_declared_typed_catalog_without_claiming_published_client_schema");
 string doctorCatalogJson=System.Text.Json.JsonSerializer.Serialize(doctorCatalog,PipeWire.Json);
-Check(doctorCatalogJson.Contains("\"tool_count\":23", StringComparison.Ordinal) &&
-    doctorCatalogJson.Contains("\"native_dto_result_count\":21", StringComparison.Ordinal) &&
+Check(doctorCatalogJson.Contains("\"tool_count\":25", StringComparison.Ordinal) &&
+    doctorCatalogJson.Contains("\"native_dto_result_count\":23", StringComparison.Ordinal) &&
     doctorWire.Contains("\"rollback_pending\":true", StringComparison.Ordinal),
     "doctor.v2_strict_catalog_and_update_trial_wire");
 string missingRollbackRoot=Path.Combine(Path.GetTempPath(), "wmcp-doctor-test-" + Guid.NewGuid().ToString("N"));
@@ -1138,6 +1140,15 @@ var invalidInspect = await WindowTools.InspectWindow("invalid");
 Check(invalidInspect.Status == WindowInspectCode.INVALID_ARGUMENT, "windows.inspect_reject_bad_ref_before_ipc");
 string freshElementId = "e1:" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString("x") +
     ":0123456789abcdef0123456789abcdef";
+var unconfirmedClick = await WindowTools.ClickElement(testWindowId, freshElementId, confirm:false);
+var unconfirmedText = await WindowTools.SetText(testWindowId, freshElementId, "fixture", confirm:false);
+var invalidText = await WindowTools.SetText(testWindowId, freshElementId, new string('x',4097));
+Check(unconfirmedClick.Status == WindowActionCode.CONFIRMATION_REQUIRED &&
+    unconfirmedText.Status == WindowActionCode.CONFIRMATION_REQUIRED &&
+    invalidText.Status == WindowActionCode.INVALID_ARGUMENT &&
+    unconfirmedClick.EffectState == WindowEffectState.NO_EFFECT &&
+    unconfirmedText.EffectState == WindowEffectState.NO_EFFECT,
+    "windows.simple_typed_click_and_set_text_reuse_pre_dispatch_validation");
 Check(WindowInspector.TryParseElementRef(freshElementId, out _) &&
     !WindowInspector.TryParseElementRef("bad", out _) &&
     !WindowInspector.TryParseElementRef("e1:1:0123456789abcdef0123456789abcdef", out _),
@@ -1406,6 +1417,13 @@ Check(WindowChromeCdp.ValidTabRequest(chromeTabRequest) &&
         WindowEffectState.EFFECT_VERIFIED &&
     new ChromeTabResult(ChromeTabCode.COMPLETED, ChromeTabAction.LIST).EffectState ==
         WindowEffectState.NO_EFFECT &&
+    new ChromeTabResult(ChromeTabCode.COMPLETED, ChromeTabAction.OPEN,
+        Destination:ChromeTabDestination.CHROME_SELECTED_UNVERIFIED).Destination ==
+        ChromeTabDestination.CHROME_SELECTED_UNVERIFIED &&
+    System.Text.Json.JsonSerializer.Serialize(new ChromeTabResult(
+        ChromeTabCode.COMPLETED,ChromeTabAction.OPEN,
+        Destination:ChromeTabDestination.CHROME_SELECTED_UNVERIFIED),PipeWire.Json)
+        .Contains("\"destination\":\"CHROME_SELECTED_UNVERIFIED\"",StringComparison.Ordinal) &&
     !new ChromeTabResult(ChromeTabCode.EFFECT_UNKNOWN, ChromeTabAction.NAVIGATE).SafeToRetry &&
     new ChromeTabResult(ChromeTabCode.EFFECT_UNKNOWN, ChromeTabAction.NAVIGATE).NextStep ==
         ChromeTabNextStep.INSPECT_STATE_DO_NOT_RETRY &&
@@ -3394,6 +3412,35 @@ try
 }
 finally{Directory.Delete(drainRoot,true);}
 
+
+// A list/status caller can decide the next read-only step without guessing
+// whether a cancelled or timed-out command actually affected Windows.
+var jobGuidance = new JobInfo("test-job", "test-key", JobState.QUEUED, new string('a',64),
+    "2026-11-26T00:00:00Z", "2026-11-26T00:00:00Z");
+var unknownReconciliation = new ReconciliationRecord(ReconciliationDecision.UNKNOWN,
+    "Observed logs only; external effect cannot be established.", "2026-11-26T00:00:00Z",
+    "S-1-5-18", "fixture");
+Check(jobGuidance.NextStep == JobNextStep.CHECK_QUEUE_STATUS &&
+    (jobGuidance with { State=JobState.RUNNING }).NextStep == JobNextStep.POLL_STATUS &&
+    (jobGuidance with { State=JobState.CANCEL_REQUESTED }).NextStep == JobNextStep.POLL_STATUS &&
+    (jobGuidance with { State=JobState.WAITING_FOR_RESUME }).NextStep == JobNextStep.RESUME_FROM_CHECKPOINT &&
+    (jobGuidance with { State=JobState.WAITING_FOR_REBOOT }).NextStep == JobNextStep.VERIFY_REBOOT &&
+    (jobGuidance with { State=JobState.NEEDS_RECONCILIATION }).NextStep == JobNextStep.INSPECT_LOGS_AND_RECONCILE &&
+    (jobGuidance with { State=JobState.NEEDS_RECONCILIATION }).EffectUncertain &&
+    !(jobGuidance with { State=JobState.COMPLETED }).EffectUncertain &&
+    !(jobGuidance with { State=JobState.RECONCILED }).EffectUncertain &&
+    (jobGuidance with { State=JobState.RECONCILED, Reconciliation=unknownReconciliation }).EffectUncertain &&
+    (jobGuidance with { State=JobState.RECONCILED, Reconciliation=unknownReconciliation with
+        { Decision=ReconciliationDecision.EFFECT_CONFIRMED } }).NextStep == JobNextStep.NONE &&
+    !(jobGuidance with { State=JobState.RECONCILED, Reconciliation=unknownReconciliation with
+        { Decision=ReconciliationDecision.NO_EFFECT_CONFIRMED } }).EffectUncertain &&
+    System.Text.Json.JsonSerializer.Serialize(jobGuidance with
+        { State=JobState.NEEDS_RECONCILIATION },PipeWire.Json)
+        .Contains("\"next_step\":\"INSPECT_LOGS_AND_RECONCILE\"",StringComparison.Ordinal) &&
+    System.Text.Json.JsonSerializer.Serialize(jobGuidance with
+        { State=JobState.RECONCILED, Reconciliation=unknownReconciliation },PipeWire.Json)
+        .Contains("\"effect_uncertain\":true",StringComparison.Ordinal),
+    "job.typed_next_step_and_unknown_reconciliation_never_claim_verified_effect");
 
 // Schema 3 fixture: migrate encrypted legacy results and retain permanent job keys.
 string retentionRoot=Path.Combine(Path.GetTempPath(),"WindowsAdminMCP-retention-"+Guid.NewGuid().ToString("N"));

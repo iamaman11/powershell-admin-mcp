@@ -26,13 +26,15 @@ are needed for the native operations below.
 | Find a window | `windows.list_windows` |
 | Inspect window controls or Chrome tabs | `windows.inspect_window` |
 | Capture a single covered window | `windows.capture_window` |
+| Click a freshly inspected element | `windows.click_element` |
+| Set text in a freshly inspected field | `windows.set_text` |
 | Act on a freshly inspected element | `windows.invoke_element` |
 | Find one element and act without a preceding inspection | `windows.invoke_locator` |
 | Activate, move, resize, minimize, or close an exact window | `windows.manage_window` |
 | Find and connect a Chrome profile through its own consent dialog | `windows.chrome_connection` |
 | List, open, navigate, reload or close exact Chrome tabs | `windows.chrome_tab` |
 
-These 23 tools share native Windows identities and typed results. There is no
+These 25 tools share native Windows identities and typed results. There is no
 arbitrary path, UI-role or administrator-cmdlet allowlist. Windows ACLs, desktop
 sessions, Chrome's permission dialog, and exact resource identity still apply.
 
@@ -142,6 +144,10 @@ always means a new action. File receipts share the same 100,000-row and
 1. `windows.list_windows` returns an exact, reusable *window* identity.
 2. `windows.inspect_window` returns fresh UIA element IDs; `windows.invoke_locator`
    can resolve one exact locator and act in a single request.
+   For common actions, `windows.click_element` accepts `window_id` and fresh
+   `element_id`, and `windows.set_text` also requires `value`. Both retain
+   `input_mode`, page-context and effect-verification guards without exposing
+   the advanced action-specific parameters of `windows.invoke_element`.
 3. Choose `INVOKE`, `CLICK`, `DOUBLE_CLICK`, `RIGHT_CLICK`, `SCROLL`, `HOVER`,
    `DRAG`, `KEY_PRESS` or an available semantic pattern. Provide an expected
    postcondition for verification. `input_mode=BACKGROUND_ONLY` is the default:
@@ -187,6 +193,9 @@ The following fields have separate meanings:
 | `effect_state=EFFECT_UNKNOWN`, `effect_evidence=PROVIDER_ACK_ONLY` | No independently verified effect; do a fresh **read-only** inspection |
 | `effect_evidence=POSTCONDITION_NOT_OBSERVED` | A requested postcondition was checked but not seen; still no blind retry |
 | `safe_to_retry=false` | Do not re-dispatch the same state-changing action without independent evidence |
+| `next_step` | Typed guidance such as `INSPECT_AND_SUPPLY_POSTCONDITION` or `INSPECT_STATE_DO_NOT_RETRY` |
+| `focus_behavior=UIA_PROVIDER_MAY_ACTIVATE` | Even with `BACKGROUND_ONLY`, a third-party UIA provider may momentarily change foreground |
+| `focus_behavior=UNKNOWN_METHOD_MAY_ACTIVATE` | The action outcome/method is uncertain; do not infer that focus stayed unchanged |
 
 `windows.chrome_tab` and `windows.inspect_window(scope=TABS|TAB)` intentionally
 omit query strings and fragments from displayed URLs. A tab with omitted
@@ -195,10 +204,9 @@ URL as an exact `expected_url` for a web action: use the fresh `c1` identity and
 `expected_origin`, or an independently known complete URL. With several Chrome
 windows, use the existing `chrome_tab(scope=BROWSER)` interface and its exact
 `browser_window_id`; opening a tab into a particular native HWND cannot be
-guaranteed through CDP alone.
-| `next_step` | Typed guidance such as `INSPECT_AND_SUPPLY_POSTCONDITION` or `INSPECT_STATE_DO_NOT_RETRY` |
-| `focus_behavior=UIA_PROVIDER_MAY_ACTIVATE` | Even with `BACKGROUND_ONLY`, a third-party UIA provider may momentarily change foreground |
-| `focus_behavior=UNKNOWN_METHOD_MAY_ACTIVATE` | The action outcome/method is uncertain; do not infer that focus stayed unchanged |
+guaranteed through CDP alone. `windows.chrome_tab(OPEN, scope=BROWSER)` reports
+`destination=CHROME_SELECTED_UNVERIFIED` for a Chrome-chosen window and returns
+its actual `browser_window_id`. This does not promise the original profile.
 
 After `INSPECT_AND_SUPPLY_POSTCONDITION`, supply the discovered destination
 postcondition on a **future** action. Do not repeat an action whose effect is

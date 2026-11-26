@@ -5,6 +5,14 @@ public enum JobAction { submit, status, list, logs, cancel, resume, reconcile, p
 [JsonConverter(typeof(JsonStringEnumConverter<JobState>))]
 public enum JobState { QUEUED, RUNNING, CANCEL_REQUESTED, WAITING_FOR_RESUME, WAITING_FOR_REBOOT, COMPLETED, FAILED, CANCELLED, NEEDS_RECONCILIATION, RECONCILED }
 
+// Guidance only: these values never trigger replay, resume or reconciliation.
+[JsonConverter(typeof(JsonStringEnumConverter<JobNextStep>))]
+public enum JobNextStep
+{
+    NONE, CHECK_QUEUE_STATUS, POLL_STATUS, RESUME_FROM_CHECKPOINT,
+    VERIFY_REBOOT, INSPECT_LOGS_AND_RECONCILE
+}
+
 [JsonConverter(typeof(JsonStringEnumConverter<ReconciliationDecision>))]
 public enum ReconciliationDecision { EFFECT_CONFIRMED, NO_EFFECT_CONFIRMED, UNKNOWN }
 
@@ -43,7 +51,24 @@ public sealed record JobInfo(
     [property:JsonPropertyName("waiting_for_user")] bool? WaitingForUser = null,
     [property:JsonPropertyName("interrupted_command")] string? InterruptedCommand = null,
     [property:JsonPropertyName("resource_key")] string? ResourceKey = null,
-    [property:JsonPropertyName("queue_reason")] QueueWaitReason? QueueReason = null);
+    [property:JsonPropertyName("queue_reason")] QueueWaitReason? QueueReason = null)
+{
+    [JsonPropertyName("next_step")]
+    public JobNextStep NextStep => State switch
+    {
+        JobState.QUEUED => JobNextStep.CHECK_QUEUE_STATUS,
+        JobState.RUNNING or JobState.CANCEL_REQUESTED => JobNextStep.POLL_STATUS,
+        JobState.WAITING_FOR_RESUME => JobNextStep.RESUME_FROM_CHECKPOINT,
+        JobState.WAITING_FOR_REBOOT => JobNextStep.VERIFY_REBOOT,
+        JobState.NEEDS_RECONCILIATION => JobNextStep.INSPECT_LOGS_AND_RECONCILE,
+        _ => JobNextStep.NONE
+    };
+
+    // An UNKNOWN reconciliation closes the workflow, not the factual uncertainty.
+    [JsonPropertyName("effect_uncertain")]
+    public bool EffectUncertain => State == JobState.NEEDS_RECONCILIATION ||
+        State == JobState.RECONCILED && Reconciliation?.Decision == ReconciliationDecision.UNKNOWN;
+}
 
 public sealed record JobReply(
     [property:JsonPropertyName("status")] StatusCode Status,

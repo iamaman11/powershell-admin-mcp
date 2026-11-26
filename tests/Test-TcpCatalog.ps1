@@ -58,6 +58,17 @@ try {
     Assert ($kindSchema.Contains('TCP_CONNECTIONS',[StringComparison]::Ordinal)) 'tcp_schema.output_discriminator_is_tcp_only'
     $chrome=@($list.tools|Where-Object {$_.name -eq 'windows.chrome_tab'})
     $invoke=@($list.tools|Where-Object {$_.name -eq 'windows.invoke_element'})
+    $click=@($list.tools|Where-Object {$_.name -eq 'windows.click_element'})
+    $text=@($list.tools|Where-Object {$_.name -eq 'windows.set_text'})
+    Assert ($click.Count -eq 1 -and $text.Count -eq 1 -and
+        $click[0].inputSchema.properties.Contains('element_id') -and
+        $click[0].inputSchema.properties.Contains('input_mode') -and
+        -not $click[0].inputSchema.properties.Contains('action') -and
+        $text[0].inputSchema.properties.Contains('value') -and
+        $text[0].inputSchema.properties.Contains('expected_url') -and
+        -not $text[0].inputSchema.properties.Contains('action') -and
+        $click[0].Contains('outputSchema') -and $text[0].Contains('outputSchema')) `
+        'windows_schema.short_typed_click_and_text_without_action_overload'
     Assert ($chrome.Count -eq 1 -and $invoke.Count -eq 1 -and
         $chrome[0].inputSchema.properties.Contains('scope') -and
         $chrome[0].inputSchema.properties.Contains('browser_window_id') -and

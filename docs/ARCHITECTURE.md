@@ -24,7 +24,7 @@ frontend, not a separate permanent browser manager. No extra HTTP API.
 
 ## Code boundaries and public schemas
 
-The registered MCP surface lives only in `Program.cs` (`stdio`): **23 tools**.
+The registered MCP surface lives only in `Program.cs` (`stdio`): **25 tools**.
 Each tool declares typed arguments and a result DTO. `powershell_screenshot`
 deliberately returns image content; the other 22 tools expose structured
 output schemas. CI reads the *actual* SDK-generated `tools/list` and checks
