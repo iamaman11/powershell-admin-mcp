@@ -85,7 +85,7 @@ internal sealed record WindowInspectRequest(
     string? NameContains, WindowRoleFilter? RoleFilter, int WaitMs,
     WindowInspectScope Scope = WindowInspectScope.WINDOW, string? TabId = null,
     string? ExpectedProfile = null, string? ExpectedOrigin = null, string? ExpectedUrl = null,
-    int? BrowserWindowId = null);
+    [property: JsonPropertyName("browser_window_id")] int? BrowserWindowId = null);
 
 // UI Automation can block inside a third-party provider. Run it in a bounded,
 // on-demand copy of this executable, never on the MCP request/USER worker thread.
