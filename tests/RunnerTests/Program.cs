@@ -949,14 +949,14 @@ var doctorStatus = new AdminStatus(StatusCode.OK, "ci", Diagnostics: doctorSnaps
 var doctorWire = System.Text.Json.JsonSerializer.Serialize(doctorStatus, PipeWire.Json);
 Check(System.Text.Json.JsonSerializer.Deserialize<AdminStatus>(doctorWire, PipeWire.Json)?.Diagnostics is
     { Status: DoctorState.DEGRADED, ReconciliationCount: 17, LocalOperationalReady: true,
-      RollbackPending: true, ToolCatalog: { ToolCount: 25, StructuredToolCount: 24,
-          NativeDtoResultCount: 23 },
+      RollbackPending: true, ToolCatalog: { ToolCount: 23, StructuredToolCount: 22,
+          NativeDtoResultCount: 21 },
       Checks: [{ Reason: DoctorReason.RECONCILIATION_REQUIRED }] } &&
     !System.Text.Json.JsonSerializer.Serialize(new AdminStatus(StatusCode.OK, "ci"), PipeWire.Json)
         .Contains("diagnostics", StringComparison.Ordinal),
     "status.optional_typed_doctor_without_changing_default_status");
 var doctorCatalog = DoctorCatalog.Observe();
-Check(DoctorCatalog.IsComplete(doctorCatalog) && doctorCatalog.ToolCount == 25 &&
+Check(DoctorCatalog.IsComplete(doctorCatalog) && doctorCatalog.ToolCount == 23 &&
     doctorCatalog.ToolNames.Contains("windows.tcp_connections") &&
     doctorCatalog.ToolNames.Contains("windows.file_acl") &&
     doctorCatalog.ToolNames.Contains("windows.process_wait_chain") &&
@@ -964,13 +964,11 @@ Check(DoctorCatalog.IsComplete(doctorCatalog) && doctorCatalog.ToolCount == 25 &
     doctorCatalog.ToolNames.Contains("windows.admin_action") &&
     doctorCatalog.ToolNames.Contains("windows.chrome_connection") &&
     doctorCatalog.ToolNames.Contains("windows.chrome_tab") &&
-    doctorCatalog.ToolNames.Contains("windows.click_element") &&
-    doctorCatalog.ToolNames.Contains("windows.set_text") &&
     doctorCatalog.Source == DoctorCatalogSource.SERVER_ASSEMBLY_METADATA,
     "doctor.v2_declared_typed_catalog_without_claiming_published_client_schema");
 string doctorCatalogJson=System.Text.Json.JsonSerializer.Serialize(doctorCatalog,PipeWire.Json);
-Check(doctorCatalogJson.Contains("\"tool_count\":25", StringComparison.Ordinal) &&
-    doctorCatalogJson.Contains("\"native_dto_result_count\":23", StringComparison.Ordinal) &&
+Check(doctorCatalogJson.Contains("\"tool_count\":23", StringComparison.Ordinal) &&
+    doctorCatalogJson.Contains("\"native_dto_result_count\":21", StringComparison.Ordinal) &&
     doctorWire.Contains("\"rollback_pending\":true", StringComparison.Ordinal),
     "doctor.v2_strict_catalog_and_update_trial_wire");
 string missingRollbackRoot=Path.Combine(Path.GetTempPath(), "wmcp-doctor-test-" + Guid.NewGuid().ToString("N"));
@@ -1140,15 +1138,6 @@ var invalidInspect = await WindowTools.InspectWindow("invalid");
 Check(invalidInspect.Status == WindowInspectCode.INVALID_ARGUMENT, "windows.inspect_reject_bad_ref_before_ipc");
 string freshElementId = "e1:" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString("x") +
     ":0123456789abcdef0123456789abcdef";
-var unconfirmedClick = await WindowTools.ClickElement(testWindowId, freshElementId, confirm:false);
-var unconfirmedText = await WindowTools.SetText(testWindowId, freshElementId, "fixture", confirm:false);
-var invalidText = await WindowTools.SetText(testWindowId, freshElementId, new string('x',4097));
-Check(unconfirmedClick.Status == WindowActionCode.CONFIRMATION_REQUIRED &&
-    unconfirmedText.Status == WindowActionCode.CONFIRMATION_REQUIRED &&
-    invalidText.Status == WindowActionCode.INVALID_ARGUMENT &&
-    unconfirmedClick.EffectState == WindowEffectState.NO_EFFECT &&
-    unconfirmedText.EffectState == WindowEffectState.NO_EFFECT,
-    "windows.simple_typed_click_and_set_text_reuse_pre_dispatch_validation");
 Check(WindowInspector.TryParseElementRef(freshElementId, out _) &&
     !WindowInspector.TryParseElementRef("bad", out _) &&
     !WindowInspector.TryParseElementRef("e1:1:0123456789abcdef0123456789abcdef", out _),

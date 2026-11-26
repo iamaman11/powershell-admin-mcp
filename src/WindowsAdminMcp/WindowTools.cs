@@ -141,33 +141,6 @@ public sealed class WindowTools
         return await WindowCapture.RunIsolatedAsync(window_id, max_width, cancellationToken);
     }
 
-    [McpServerTool(Name = "windows.click_element", UseStructuredContent = true),
-     Description("Click one fresh UIA or consented Chrome element with a short typed contract. No implicit foreground input. expected_profile is required for a Chrome c1 element; expected_origin/expected_url optionally protect the exact page. Observe effect_state and next_step; never replay an unknown effect.")]
-    public static Task<WindowActionResult> ClickElement(string window_id, string element_id,
-        bool confirm = true, string? expected_profile = null,
-        string? expected_origin = null, string? expected_url = null,
-        string? expected_name = null, WindowExpectedChange? expected_change = null,
-        int observation_timeout_ms = 8000,
-        WindowInputMode input_mode = WindowInputMode.BACKGROUND_ONLY,
-        CancellationToken cancellationToken = default) =>
-        InvokeElement(window_id, element_id, WindowActionKind.CLICK, confirm: confirm,
-            expected_profile: expected_profile, expected_origin: expected_origin,
-            expected_url: expected_url, expected_name: expected_name,
-            expected_change: expected_change, observation_timeout_ms: observation_timeout_ms,
-            input_mode: input_mode, cancellationToken: cancellationToken);
-
-    [McpServerTool(Name = "windows.set_text", UseStructuredContent = true),
-     Description("Set text on one fresh accessible field with native ValuePattern or consented Chrome DOM. The value is limited to 4096 UTF-16 characters. No keyboard injection or foreground activation in the default BACKGROUND_ONLY mode. Verify returned effect_state; never retry unknown effects.")]
-    public static Task<WindowActionResult> SetText(string window_id, string element_id,
-        string value, bool confirm = true, string? expected_profile = null,
-        string? expected_origin = null, string? expected_url = null,
-        WindowInputMode input_mode = WindowInputMode.BACKGROUND_ONLY,
-        CancellationToken cancellationToken = default) =>
-        InvokeElement(window_id, element_id, WindowActionKind.SET_VALUE, value: value,
-            confirm: confirm, expected_profile: expected_profile,
-            expected_origin: expected_origin, expected_url: expected_url,
-            input_mode: input_mode, cancellationToken: cancellationToken);
-
     [McpServerTool(Name = "windows.invoke_element", UseStructuredContent = true),
      Description("Act on a fresh UIA/Chrome element. Supply expected_name and expected_change for independently verified navigation. CDP_ONLY supports DRAG between two fresh DOM element IDs (target_element_id) and SET_FILES on an HTML file input (file_paths, 1..16 local absolute paths); these never use OS input. BACKGROUND_ONLY forbids our own OS input/activation but a UIA provider may briefly focus its window. CDP_ONLY requires consented Chrome and never falls back to UIA/SendInput. ALLOW_FOREGROUND_INPUT explicitly permits native pointer/keyboard input. EFFECT_UNKNOWN means inspect state, never replay blindly; inspect effect_evidence, next_step and focus_behavior.")]
     public static async Task<WindowActionResult> InvokeElement(string window_id, string element_id,

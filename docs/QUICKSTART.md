@@ -26,15 +26,13 @@ are needed for the native operations below.
 | Find a window | `windows.list_windows` |
 | Inspect window controls or Chrome tabs | `windows.inspect_window` |
 | Capture a single covered window | `windows.capture_window` |
-| Click a freshly inspected element | `windows.click_element` |
-| Set text in a freshly inspected field | `windows.set_text` |
 | Act on a freshly inspected element | `windows.invoke_element` |
 | Find one element and act without a preceding inspection | `windows.invoke_locator` |
 | Activate, move, resize, minimize, or close an exact window | `windows.manage_window` |
 | Find and connect a Chrome profile through its own consent dialog | `windows.chrome_connection` |
 | List, open, navigate, reload or close exact Chrome tabs | `windows.chrome_tab` |
 
-These 25 tools share native Windows identities and typed results. There is no
+These 23 tools share native Windows identities and typed results. There is no
 arbitrary path, UI-role or administrator-cmdlet allowlist. Windows ACLs, desktop
 sessions, Chrome's permission dialog, and exact resource identity still apply.
 
@@ -144,10 +142,10 @@ always means a new action. File receipts share the same 100,000-row and
 1. `windows.list_windows` returns an exact, reusable *window* identity.
 2. `windows.inspect_window` returns fresh UIA element IDs; `windows.invoke_locator`
    can resolve one exact locator and act in a single request.
-   For common actions, `windows.click_element` accepts `window_id` and fresh
-   `element_id`, and `windows.set_text` also requires `value`. Both retain
-   `input_mode`, page-context and effect-verification guards without exposing
-   the advanced action-specific parameters of `windows.invoke_element`.
+   For common `CLICK` actions, supply only `window_id`, fresh `element_id` and
+   `action=CLICK` to `windows.invoke_element`. For text, also supply `value` with
+   `action=SET_VALUE`. Advanced typed options remain available when needed;
+   unused optional fields need not be supplied.
 3. Choose `INVOKE`, `CLICK`, `DOUBLE_CLICK`, `RIGHT_CLICK`, `SCROLL`, `HOVER`,
    `DRAG`, `KEY_PRESS` or an available semantic pattern. Provide an expected
    postcondition for verification. `input_mode=BACKGROUND_ONLY` is the default:

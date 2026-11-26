@@ -65,10 +65,10 @@ try{
         Send $p 1 'tools/list' @{_meta=$meta}
         $list=Receive $p 1
         $names=@($list.tools|ForEach-Object {$_.name})
-        $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.click_element','windows.set_text','windows.invoke_element','windows.invoke_locator','windows.manage_window','windows.chrome_connection','windows.chrome_tab','powershell_update','windows.file_query','windows.file_read_chunk','windows.file_write','windows.file_manage','windows.system_query','windows.tcp_connections','windows.file_acl','windows.process_wait_chain','windows.network_probe','windows.admin_action')
+        $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element','windows.invoke_locator','windows.manage_window','windows.chrome_connection','windows.chrome_tab','powershell_update','windows.file_query','windows.file_read_chunk','windows.file_write','windows.file_manage','windows.system_query','windows.tcp_connections','windows.file_acl','windows.process_wait_chain','windows.network_probe','windows.admin_action')
         Assert (@($required|Where-Object {$_ -notin $names}).Count -eq 0 -and
             $names.Count -eq $required.Count -and
-            $names.Count -eq @($names|Select-Object -Unique).Count) 'native_schema.exact_25_tool_inventory'
+            $names.Count -eq @($names|Select-Object -Unique).Count) 'native_schema.exact_23_tool_inventory'
         $structured=@($list.tools|Where-Object {$_.name -ne 'powershell_screenshot'})
         Assert (@($structured|Where-Object {
             -not $_.Contains('outputSchema') -or
@@ -674,8 +674,8 @@ try{
         $doctor.externalAcceptanceStatus -eq 'NOT_TESTED') 'r6.doctor_operational_ready_despite_historical_reconciliation'
     Assert (@($doctor.checks|Where-Object {$_.component -eq 'Remote' -and $_.status -eq 'NOT_TESTED'}).Count -eq 1) 'r6.doctor_no_false_remote_acceptance'
     Assert ($doctor.toolCatalog.source -eq 'SERVER_ASSEMBLY_METADATA' -and
-        $doctor.toolCatalog.tool_count -eq 25 -and $doctor.toolCatalog.structured_tool_count -eq 24 -and
-        $doctor.toolCatalog.native_dto_result_count -eq 23 -and
+        $doctor.toolCatalog.tool_count -eq 23 -and $doctor.toolCatalog.structured_tool_count -eq 22 -and
+        $doctor.toolCatalog.native_dto_result_count -eq 21 -and
         @($doctor.toolCatalog.tool_names|Where-Object {$_ -eq 'windows.tcp_connections'}).Count -eq 1) 'r6.doctor_v2_declared_native_tool_inventory'
     Assert (@($doctor.checks|Where-Object {$_.component -eq 'ToolCatalog' -and $_.status -eq 'OK'}).Count -eq 1 -and
         @($doctor.checks|Where-Object {$_.component -eq 'PublishedClientSchema' -and $_.status -eq 'NOT_TESTED'}).Count -eq 1 -and
