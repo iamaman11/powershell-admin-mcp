@@ -1107,7 +1107,10 @@ internal static class ChromeAcceptanceFixture
                     "e.target.setAttribute('aria-label','CI_CDP_DROP_COMPLETE');" +
                     "e.target.textContent='CI_CDP_DROP_COMPLETE';" +
                     "fetch('/REPLACE/report?drag=1')}});</script></body></html>";
-                body = body.Replace("REPLACE", nonce, StringComparison.Ordinal);
+                // Substitute only the URL route token. Replacing a generic
+                // word throughout the HTML corrupts unrelated aria-labels.
+                body = body.Replace("/REPLACE/report", $"/{nonce}/report",
+                    StringComparison.Ordinal);
             }
             else if (route.StartsWith($"/{nonce}/report?", StringComparison.Ordinal))
             {
