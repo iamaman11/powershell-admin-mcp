@@ -3,8 +3,9 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 // Native UIA2 uses the same Windows UI Automation provider as the managed
-// inspector, but lets this *client* disable the default SetFocus before actions.
-// Deliberately no new NuGet dependency, input injection, or persistent worker.
+// inspector. AutoSetFocus=false prevents client-side focus, but does not
+// constrain arbitrary provider code. Native actions require explicit foreground
+// opt-in; no new NuGet dependency, input injection, or persistent worker.
 internal static class WindowActionNoFocus
 {
     private static readonly Guid ClassId = new("e22ad333-b25f-460c-83d0-0581107395c9"); // CUIAutomation8
@@ -57,6 +58,8 @@ internal static class WindowActionNoFocus
     internal static WindowActionResult Invoke(IntPtr hwnd, int[] path, int[] expectedRuntimeId,
         WindowActionRequest request, Stopwatch clock, bool radioInvoke = false)
     {
+        var denied = WindowAction.BlockProviderFocusRisk(request, clock);
+        if (denied is not null) return denied;
         if (path.Length > WindowInspector.MaxDepth || expectedRuntimeId.Length is < 1 or > 128)
             return new(WindowActionCode.STALE_ELEMENT,
                 FailureStage: WindowFailureStage.RESOLVE_ELEMENT,
