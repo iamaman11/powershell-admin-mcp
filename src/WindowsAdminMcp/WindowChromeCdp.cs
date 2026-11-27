@@ -280,9 +280,16 @@ internal static partial class WindowChromeCdp
                     }
                     if (responseSession != waiter.SessionId)
                         throw new JsonException("CDP_RESPONSE_SESSION_MISMATCH");
-                    if (message.TryGetProperty("error", out _))
-                        waiter.Completion.TrySetException(
-                            new InvalidOperationException("CDP_COMMAND_REJECTED"));
+                    if (message.TryGetProperty("error", out var error))
+                    {
+                        var rejected = new InvalidOperationException("CDP_COMMAND_REJECTED");
+                        if (error.ValueKind == JsonValueKind.Object &&
+                            error.TryGetProperty("code", out var code) &&
+                            code.ValueKind == JsonValueKind.Number &&
+                            code.TryGetInt32(out int errorCode))
+                            rejected.Data["cdp_error_code"] = errorCode;
+                        waiter.Completion.TrySetException(rejected);
+                    }
                     else if (message.TryGetProperty("result", out var result))
                         waiter.Completion.TrySetResult(result.Clone());
                     else throw new JsonException("CDP_RESPONSE_RESULT_MISSING");

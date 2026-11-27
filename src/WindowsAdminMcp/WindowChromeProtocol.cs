@@ -86,6 +86,13 @@ internal static partial class WindowChromeCdp
     private static string? _protocolSchemaGeneration;
     private static Uri? _protocolSchemaEndpoint;
     private static JsonElement _protocolSchema;
+    private static string? _protocolMetadataGeneration;
+    private static Uri? _protocolMetadataEndpoint;
+    private static ProtocolMetadata? _protocolMetadata;
+    internal sealed record ProtocolMetadata(JsonElement? FullSchema, JsonElement? LiveDomains)
+    {
+        internal bool HasFullSchema => FullSchema is not null;
+    }
     private sealed record ProtocolSubscriptionBinding(string WindowId, string ExpectedProfile,
         string? TabId, int? BrowserWindowId, string? ExpectedOrigin, string? ExpectedUrl,
         string? SessionGeneration, bool BrowserScope);
@@ -231,18 +238,26 @@ internal static partial class WindowChromeCdp
                     ChromeTabDestination.VERIFIED_WINDOW));
         }
 
-        JsonElement? schema = null;
+        // Authorization does not depend on optional HTTP metadata. Reject
+        // browser-wide/focus-changing operations before any schema discovery.
+        if (request.Action is ChromeProtocolAction.CALL or ChromeProtocolAction.SUBSCRIBE &&
+            request.TabId is null && !request.AllowBrowserScope)
+            return new(ChromeProtocolCode.BROWSER_SCOPE_NOT_ALLOWED, request.Action,
+                Detail: "EXPLICIT_ALLOW_BROWSER_SCOPE_REQUIRED");
+        if (request.Action == ChromeProtocolAction.CALL && !request.AllowForeground &&
+            (MayActivateForeground(request.Method!) || ProtocolCanRunArbitraryCode(request.Method!)))
+            return new(ChromeProtocolCode.FOREGROUND_NOT_ALLOWED, request.Action,
+                Detail: "METHOD_MAY_ACTIVATE_WINDOW_OR_ARBITRARY_CODE");
+
+        ProtocolMetadata? metadata = null;
         if (request.Action is ChromeProtocolAction.DESCRIBE or ChromeProtocolAction.CALL or
             ChromeProtocolAction.SUBSCRIBE)
-        {
-            schema = await RuntimeProtocolSchema(endpoint, timeout.Token);
-            if (schema is null)
-                return new(ChromeProtocolCode.CDP_UNAVAILABLE, request.Action,
-                    Detail: "RUNTIME_PROTOCOL_SCHEMA_UNAVAILABLE");
-        }
+            metadata = await ResolveProtocolMetadataAsync(endpoint, cdp, timeout.Token);
+        JsonElement? schema = metadata?.FullSchema;
 
         if (request.Action == ChromeProtocolAction.DESCRIBE)
-            return DescribeProtocol(schema!.Value, request);
+            return schema is { } full ? DescribeProtocol(full, request) :
+                DescribeLiveDomains(metadata!.LiveDomains, request);
 
         if (request.Action == ChromeProtocolAction.TARGETS)
         {
@@ -269,8 +284,9 @@ internal static partial class WindowChromeCdp
         string eventMethod = isEvent && request.Domain is not null
             ? request.Domain + ".*" : request.Method!;
         JsonElement command = default;
-        if (isEvent ? !EventSubscriptionExists(schema!.Value, eventMethod) :
-            !TryFindCommand(schema!.Value, request.Method!, out command))
+        if (schema is { } verifiedSchema &&
+            (isEvent ? !EventSubscriptionExists(verifiedSchema, eventMethod) :
+            !TryFindCommand(verifiedSchema, request.Method!, out command)))
             return new(ChromeProtocolCode.METHOD_NOT_SUPPORTED, request.Action,
                 Detail: isEvent ? "EVENT_NOT_IN_CONNECTED_CHROME_PROTOCOL" :
                     "NOT_IN_CONNECTED_CHROME_PROTOCOL", Method: eventMethod);
@@ -278,11 +294,6 @@ internal static partial class WindowChromeCdp
         // A target-session CALL is always bound to one proven HWND and exact tab.
         // Browser-scoped commands can modify other profiles, so require an
         // explicit opt-in except clearly observational queries.
-        if (!request.AllowForeground && (MayActivateForeground(request.Method ?? "") ||
-            ProtocolCanRunArbitraryCode(request.Method ?? "")))
-            return new(ChromeProtocolCode.FOREGROUND_NOT_ALLOWED, request.Action,
-                Detail: "METHOD_MAY_ACTIVATE_WINDOW_OR_ARBITRARY_CODE");
-
         string? sessionId = null;
         string? selectedUrl = null;
         int? selectedWindow = request.BrowserWindowId;
@@ -328,14 +339,20 @@ internal static partial class WindowChromeCdp
                 CurrentGeneration, request.AllowBrowserScope);
             return new(ChromeProtocolCode.COMPLETED, request.Action,
                 Method: eventMethod, SubscriptionId: id,
+                Detail: schema is null ? "EVENT_FILTER_REGISTERED_WITHOUT_HTTP_SCHEMA" : null,
                 Destination: request.AllowBrowserScope ? ChromeTabDestination.CHROME_SELECTED_UNVERIFIED :
                     ChromeTabDestination.VERIFIED_WINDOW);
         }
 
-        if (!TryParseAndValidateParameters(schema.Value, command, request.Method!,
-            request.ParametersJson, out var parameters, out string? error))
+        JsonElement parametersFromSchema;
+        string? schemaError;
+        bool validParameters = schema is { } typedSchema
+            ? TryParseAndValidateParameters(typedSchema, command, request.Method!,
+                request.ParametersJson, out parametersFromSchema, out schemaError)
+            : TryParseProtocolObject(request.ParametersJson, out parametersFromSchema, out schemaError);
+        if (!validParameters)
             return new(ChromeProtocolCode.PARAMETERS_INVALID, request.Action,
-                Detail: error, Method: request.Method);
+                Detail: schemaError, Method: request.Method);
 
         // CDP dynamic commands may change focus indirectly (e.g. arbitrary
         // JavaScript). There is no honest universal foreground guarantee.
@@ -343,17 +360,21 @@ internal static partial class WindowChromeCdp
         JsonElement response;
         try
         {
-            response = await cdp.Call(request.Method!, parameters, sessionId);
+            response = await cdp.Call(request.Method!, parametersFromSchema, sessionId);
         }
         catch (InvalidOperationException rejected) when (rejected.Message == "CDP_COMMAND_REJECTED")
         {
+            if (rejected.Data["cdp_error_code"] is int code && code == -32601)
+                return new(ChromeProtocolCode.METHOD_NOT_SUPPORTED, request.Action,
+                    Detail: "CHROME_REJECTED_UNKNOWN_METHOD", Method: request.Method);
             // Chrome rejected a *dispatched* request. The generic bridge cannot
             // prove whether any side effect preceded that rejection.
             return new(ChromeProtocolCode.EFFECT_UNKNOWN, request.Action,
                 Detail: "CDP_COMMAND_REJECTED", Method: request.Method);
         }
         return Bounded(new(ChromeProtocolCode.COMPLETED, request.Action,
-            Detail: "CDP_ACK_NOT_APPLICATION_VERIFICATION", Method: request.Method,
+            Detail: schema is null ? "CDP_ACK_CHROME_VALIDATED_PARAMETERS_NO_HTTP_SCHEMA" :
+                "CDP_ACK_NOT_APPLICATION_VERIFICATION", Method: request.Method,
             Data: response.Clone(),
             Destination: request.AllowBrowserScope ? ChromeTabDestination.CHROME_SELECTED_UNVERIFIED :
                 ChromeTabDestination.VERIFIED_WINDOW));
@@ -375,8 +396,44 @@ internal static partial class WindowChromeCdp
             MatchesContextIfSpecified(url, expectedOrigin, expectedUrl);
     }
 
-    // Includes all methods advertised by the actual running browser, not a
-    // curated domain/command allowlist. The schema is refreshed each generation.
+    // Newer approval-based Chrome sessions expose the consented browser WebSocket
+    // but return HTTP 404 for every /json/* endpoint. HTTP metadata is optional:
+    // querying it must never disable commands on an otherwise healthy CDP socket.
+    // Both discovery paths reuse the ONE already connected Session.
+    internal static async Task<ProtocolMetadata> ResolveProtocolMetadataAsync(Uri endpoint,
+        Session session, CancellationToken cancellation)
+    {
+        if (_protocolMetadataGeneration == CurrentGeneration &&
+            _protocolMetadataEndpoint == endpoint && _protocolMetadata is { } cached)
+            return cached;
+
+        JsonElement? full = await RuntimeProtocolSchema(endpoint, cancellation);
+        JsonElement? liveDomains = null;
+        if (full is null)
+        {
+            try
+            {
+                var observed = await session.Call("Schema.getDomains", new { });
+                if (observed.ValueKind == JsonValueKind.Object &&
+                    observed.TryGetProperty("domains", out var domains) &&
+                    domains.ValueKind == JsonValueKind.Array)
+                    liveDomains = observed.Clone();
+            }
+            catch (InvalidOperationException error) when (error.Message == "CDP_COMMAND_REJECTED")
+            {
+                // Schema is an optional CDP domain, even on a healthy browser.
+                // In that case Chrome itself remains authoritative for CALL.
+            }
+        }
+        var metadata = new ProtocolMetadata(full, liveDomains);
+        _protocolMetadataGeneration = CurrentGeneration;
+        _protocolMetadataEndpoint = endpoint;
+        _protocolMetadata = metadata;
+        return metadata;
+    }
+
+    // Standard remote debugging offers full metadata. Approval-based debugging
+    // may return 404 here while its WebSocket remains fully operational.
     private static async Task<JsonElement?> RuntimeProtocolSchema(Uri endpoint, CancellationToken cancellation)
     {
         if (_protocolSchemaGeneration == CurrentGeneration && _protocolSchemaEndpoint == endpoint &&
@@ -393,29 +450,91 @@ internal static partial class WindowChromeCdp
         using var httpClient = new HttpClient(httpHandler);
         using var schemaRequest = new HttpRequestMessage(HttpMethod.Get, uri);
         schemaRequest.Headers.ConnectionClose = true;
-        using var response = await httpClient.SendAsync(schemaRequest,
-            HttpCompletionOption.ResponseHeadersRead, probe.Token);
-        if (!response.IsSuccessStatusCode || response.Content.Headers.ContentLength > ProtocolMaxSchemaBytes)
-            return null;
-        await using var stream = await response.Content.ReadAsStreamAsync(probe.Token);
-        using var memory = new MemoryStream();
-        var buffer = new byte[32768];
-        while (true)
+        try
         {
-            int received = await stream.ReadAsync(buffer, probe.Token);
-            if (received == 0) break;
-            if (memory.Length + received > ProtocolMaxSchemaBytes) return null;
-            memory.Write(buffer, 0, received);
+            using var response = await httpClient.SendAsync(schemaRequest,
+                HttpCompletionOption.ResponseHeadersRead, probe.Token);
+            if (!response.IsSuccessStatusCode || response.Content.Headers.ContentLength > ProtocolMaxSchemaBytes)
+                return null;
+            await using var stream = await response.Content.ReadAsStreamAsync(probe.Token);
+            using var memory = new MemoryStream();
+            var buffer = new byte[32768];
+            while (true)
+            {
+                int received = await stream.ReadAsync(buffer, probe.Token);
+                if (received == 0) break;
+                if (memory.Length + received > ProtocolMaxSchemaBytes) return null;
+                memory.Write(buffer, 0, received);
+            }
+            using var parsed = JsonDocument.Parse(memory.ToArray());
+            var root = parsed.RootElement;
+            if (root.ValueKind != JsonValueKind.Object ||
+                !root.TryGetProperty("domains", out var domains) || domains.ValueKind != JsonValueKind.Array)
+                return null;
+            _protocolSchema = root.Clone();
+            _protocolSchemaGeneration = CurrentGeneration;
+            _protocolSchemaEndpoint = endpoint;
+            return _protocolSchema;
         }
-        using var parsed = JsonDocument.Parse(memory.ToArray());
-        var root = parsed.RootElement;
-        if (root.ValueKind != JsonValueKind.Object ||
-            !root.TryGetProperty("domains", out var domains) || domains.ValueKind != JsonValueKind.Array)
+        catch (HttpRequestException) { return null; }
+        catch (IOException) { return null; }
+        catch (JsonException) { return null; }
+        catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
+        {
             return null;
-        _protocolSchema = root.Clone();
-        _protocolSchemaGeneration = CurrentGeneration;
-        _protocolSchemaEndpoint = endpoint;
-        return _protocolSchema;
+        }
+    }
+
+    private static ChromeProtocolResult DescribeLiveDomains(JsonElement? live,
+        ChromeProtocolRequest request)
+    {
+        if (live is not { } schema || schema.ValueKind != JsonValueKind.Object ||
+            !schema.TryGetProperty("domains", out var domains) ||
+            domains.ValueKind != JsonValueKind.Array)
+            return new(ChromeProtocolCode.CDP_UNAVAILABLE, request.Action,
+                Detail: "PROTOCOL_METADATA_UNAVAILABLE_CALL_STILL_SUPPORTED");
+
+        var available = domains.EnumerateArray().ToArray();
+        if (request.Method is { } method)
+        {
+            string domain = method[..method.IndexOf('.')];
+            if (!available.Any(x => StringProperty(x, "name") == domain))
+                return new(ChromeProtocolCode.METHOD_NOT_SUPPORTED, request.Action,
+                    Detail: "DOMAIN_NOT_IN_CONNECTED_CHROME_PROTOCOL");
+            return new(ChromeProtocolCode.COMPLETED, request.Action,
+                Detail: "WEBSOCKET_DOMAINS_ONLY_METHOD_SIGNATURE_UNAVAILABLE",
+                Method: method, Data: JsonSerializer.SerializeToElement(new
+                {
+                    method, domain, schema_level = "DOMAINS_ONLY",
+                    method_support_verified = false, parameters_schema_available = false
+                }));
+        }
+        if (request.Domain is { } domainName)
+        {
+            var matched = available.FirstOrDefault(x => StringProperty(x, "name") == domainName);
+            if (matched.ValueKind == JsonValueKind.Undefined)
+                return new(ChromeProtocolCode.METHOD_NOT_SUPPORTED, request.Action,
+                    Detail: "DOMAIN_NOT_IN_CONNECTED_CHROME_PROTOCOL");
+            return new(ChromeProtocolCode.COMPLETED, request.Action,
+                Detail: "WEBSOCKET_DOMAINS_ONLY_METHOD_SIGNATURE_UNAVAILABLE",
+                Data: JsonSerializer.SerializeToElement(new
+                {
+                    domain = domainName, version = StringProperty(matched, "version"),
+                    schema_level = "DOMAINS_ONLY", commands = (object?)null,
+                    events = (object?)null, method_signatures_available = false
+                }));
+        }
+        return Bounded(new(ChromeProtocolCode.COMPLETED, request.Action,
+            Detail: "WEBSOCKET_DOMAINS_ONLY_METHOD_SIGNATURE_UNAVAILABLE",
+            Data: JsonSerializer.SerializeToElement(new
+            {
+                schema_level = "DOMAINS_ONLY",
+                domains = available.Skip(request.Offset).Take(request.PageSize)
+                    .Select(x => new { name = StringProperty(x, "name"),
+                        version = StringProperty(x, "version") }),
+                next_offset = available.Length > request.Offset + request.PageSize
+                    ? request.Offset + request.PageSize : (int?)null
+            })));
     }
 
     private static ChromeProtocolResult DescribeProtocol(JsonElement schema, ChromeProtocolRequest request)
@@ -544,6 +663,33 @@ internal static partial class WindowChromeCdp
             if (!ValidateProtocolObject(schema, domain, command, input, "parameters", 0, out error))
                 return false;
             parameters = input.Clone();
+            return true;
+        }
+        catch (JsonException)
+        {
+            error = "PARAMETERS_JSON_INVALID";
+            return false;
+        }
+    }
+
+    // On approval-based Chrome, the HTTP method schema is deliberately absent.
+    // Preserve bounded/typed JSON input; Chrome's actual CDP dispatcher checks
+    // the method and its arguments. Do not invent a stale local allowlist.
+    internal static bool TryParseProtocolObject(string? parametersJson,
+        out JsonElement parameters, out string? error)
+    {
+        parameters = default;
+        error = null;
+        try
+        {
+            using var document = JsonDocument.Parse(parametersJson ?? "{}",
+                new JsonDocumentOptions { MaxDepth = 32 });
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                error = "PARAMETERS_MUST_BE_JSON_OBJECT";
+                return false;
+            }
+            parameters = document.RootElement.Clone();
             return true;
         }
         catch (JsonException)
