@@ -387,8 +387,13 @@ internal static partial class WindowChromeCdp
             "/json/protocol").Uri;
         using var probe = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         probe.CancelAfter(TimeSpan.FromSeconds(8));
-        using var response = await ProtocolHttp.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead,
-            probe.Token);
+        // Discovery uses a short HTTP GET, not another CDP WebSocket. Disable
+        // keep-alive so the schema probe cannot leave a second established
+        // TCP socket alongside the one authorized long-lived CDP connection.
+        using var schemaRequest = new HttpRequestMessage(HttpMethod.Get, uri);
+        schemaRequest.Headers.ConnectionClose = true;
+        using var response = await ProtocolHttp.SendAsync(schemaRequest,
+            HttpCompletionOption.ResponseHeadersRead, probe.Token);
         if (!response.IsSuccessStatusCode || response.Content.Headers.ContentLength > ProtocolMaxSchemaBytes)
             return null;
         await using var stream = await response.Content.ReadAsStreamAsync(probe.Token);
