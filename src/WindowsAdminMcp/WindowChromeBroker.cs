@@ -172,14 +172,22 @@ internal static class WindowChromeBroker
             string binding = Binding(request);
             if (request.Connection?.Action == ChromeConnectionAction.STATUS &&
                 (_worker is null || _worker.HasExited || _binding != binding))
-                return new(Connection: new(ChromeConnectionCode.OK,
-                    _hadConnected && _lastConnectedBinding == binding ? ChromeConnectionState.CONNECTION_LOST :
-                        ChromeConnectionState.NOT_REQUESTED,
-                    ChromeConnectionNextAction.RETRY_CONNECTION,
-                    FailureReason: _hadConnected && _lastConnectedBinding == binding
-                        ? ChromeConnectionFailureReason.BROKER_EXITED : null,
-                    LastLossReason: _hadConnected && _lastConnectedBinding == binding
-                        ? ChromeConnectionFailureReason.BROKER_EXITED : null));
+            {
+                // STATUS is deliberately read-only: do not launch a worker or
+                // attempt a new Chrome handshake. Still return the same native
+                // consent guidance as a running worker, so an upgrade cannot
+                // hide SHOW_CHROME_FOR_CONSENT behind a generic RETRY_CONNECTION.
+                bool lost = _hadConnected && _lastConnectedBinding == binding;
+                var state = WindowChromeCdp.MissingConnectionState(lost);
+                ChromeConnectionFailureReason? reason = lost
+                    ? ChromeConnectionFailureReason.BROKER_EXITED : null;
+                bool consentWindowReady = request.Connection.Mode != ChromeConnectionMode.USER_BROWSER ||
+                    WindowChromeCdp.NativeConsentWindowReady(request.WindowId);
+                return new(Connection: new(ChromeConnectionCode.OK, state,
+                    WindowChromeCdp.RecoveryNextAction(state, reason,
+                        request.Connection.Mode, consentWindowReady),
+                    FailureReason: reason, LastLossReason: reason));
+            }
             if (_worker is null || _worker.HasExited || _binding != binding)
             {
                 if (_binding is not null && _binding != binding)
