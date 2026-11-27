@@ -1808,6 +1808,22 @@ using (var contexts = System.Text.Json.JsonDocument.Parse("""
 }
 var matchingCdpWindow = WindowChromeCdp.UniqueWindowId(new (int WindowId, string? ContextId)[]
     { (12, "profile5"), (12, "profile5") });
+string otherNativeWindow = WindowCatalog.FormatId(testWindowIdentity with { Handle = 0x12346 });
+WindowChromeCdp.ClearSessionWindowBindings();
+WindowChromeCdp.RememberSessionWindow(testWindowId, "consented-generation-1", 12);
+Check(WindowChromeCdp.SessionWindowFromTitle(testWindowId, "consented-generation-1",
+        new[] { 12, 13 }) == 12 &&
+    WindowChromeCdp.SessionWindowFromTitle(testWindowId, "consented-generation-1",
+        new[] { 13 }) is null &&
+    WindowChromeCdp.SessionWindowFromTitle(otherNativeWindow, "consented-generation-1",
+        new[] { 12 }) is null &&
+    WindowChromeCdp.SessionWindowFromTitle(testWindowId, "consented-generation-2",
+        new[] { 12 }) is null,
+    "chrome.session_proven_hwnd_mapping_survives_geometry_change_but_not_identity_change");
+WindowChromeCdp.ClearSessionWindowBindings();
+Check(WindowChromeCdp.SessionWindowFromTitle(testWindowId, "consented-generation-1",
+        new[] { 12 }) is null,
+    "chrome.session_proven_hwnd_mapping_invalidated_on_disconnect");
 var normalCdpWindow = WindowChromeCdp.UniqueWindowId(new (int WindowId, string? ContextId)[]
     { (12, null), (12, null) }, out int normalCount);
 var sameWindowMixedContexts = WindowChromeCdp.UniqueWindowId(new (int WindowId, string? ContextId)[]

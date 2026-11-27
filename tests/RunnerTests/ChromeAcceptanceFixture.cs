@@ -240,6 +240,10 @@ internal static class ChromeAcceptanceFixture
             if (preflight?.Status != WindowInspectCode.COMPLETED)
                 throw new InvalidOperationException($"CI_CDP_READ_ONLY_PREFLIGHT " +
                     $"status={preflight?.Status} detail={preflight?.Detail}");
+            var verifiedTab = preflight.Tabs?.SingleOrDefault();
+            if (verifiedTab is null || verifiedTab.BrowserWindowId is not > 0 ||
+                !WindowChromeCdp.ValidTargetId(verifiedTab.TabId))
+                throw new InvalidOperationException("CI_CDP_NATIVE_WINDOW_BINDING_MISSING");
 
             int rejectedBeforeDispatch = 0;
             for (int iteration = 0; iteration < Cycles; iteration++)
@@ -340,13 +344,50 @@ internal static class ChromeAcceptanceFixture
                 var reply = await ExchangeAsync(new(Inspect: new WindowInspectRequest(
                     windowId!, 5, 30, null, null, 0, false, name,
                     null, 0, WindowInspectScope.TAB,
-                    ExpectedProfile: selector, ExpectedUrl: url)));
+                    TabId: verifiedTab.TabId, ExpectedProfile: selector, ExpectedUrl: url,
+                    BrowserWindowId: verifiedTab.BrowserWindowId)));
                 var matches = reply.Inspect?.Elements.Where(e =>
                     e.Name == name && e.ElementId.StartsWith("c1:", StringComparison.Ordinal)).ToArray();
                 if (reply.Inspect?.Status != WindowInspectCode.COMPLETED || matches?.Length != 1)
                     throw new InvalidOperationException($"CI_CDP_ELEMENT_{name}_{reply.Inspect?.Status}");
                 return matches[0].ElementId;
             }
+            // Exercise a complete background React-like confirmation flow:
+            // the opening click is only confirmed once the dialog appears;
+            // the confirm click is only confirmed once it disappears AND the
+            // independent loopback server records exactly one completion.
+            string modalOpen = await FindOwnedElement("CI_CDP_MODAL_OPEN");
+            var openDialog = (await ExchangeAsync(new(Action: new WindowActionRequest(
+                windowId!, modalOpen, WindowActionKind.CLICK, null,
+                ExpectedName: "CI_CDP_MODAL_CONFIRM",
+                ExpectedChange: WindowExpectedChange.APPEARS,
+                ExpectedProfile: selector, ExpectedUrl: url,
+                InputMode: WindowInputMode.CDP_ONLY,
+                BrowserWindowId: verifiedTab.BrowserWindowId,
+                ObservationTimeoutMs: 3000)))).Action;
+            if (openDialog?.Status != WindowActionCode.COMPLETED ||
+                openDialog.EffectEvidence != WindowEffectEvidence.POSTCONDITION_VERIFIED ||
+                openDialog.FocusBehavior != WindowFocusBehavior.CDP_NO_NATIVE_ACTIVATION ||
+                state.Confirmations != 0)
+                throw new InvalidOperationException($"CI_CDP_MODAL_OPEN_{openDialog?.Status}_" +
+                    $"{openDialog?.EffectEvidence}");
+            string modalConfirm = await FindOwnedElement("CI_CDP_MODAL_CONFIRM");
+            var confirmed = (await ExchangeAsync(new(Action: new WindowActionRequest(
+                windowId!, modalConfirm, WindowActionKind.CLICK, null,
+                ExpectedName: "CI_CDP_MODAL_CONFIRM",
+                ExpectedChange: WindowExpectedChange.DISAPPEARS,
+                ExpectedProfile: selector, ExpectedUrl: url,
+                InputMode: WindowInputMode.CDP_ONLY,
+                BrowserWindowId: verifiedTab.BrowserWindowId,
+                ObservationTimeoutMs: 3000)))).Action;
+            if (confirmed?.Status != WindowActionCode.COMPLETED ||
+                confirmed.EffectEvidence != WindowEffectEvidence.POSTCONDITION_VERIFIED ||
+                confirmed.FocusBehavior != WindowFocusBehavior.CDP_NO_NATIVE_ACTIVATION ||
+                !await UntilAsync(() => state.Confirmations == 1, TimeSpan.FromSeconds(3)))
+                throw new InvalidOperationException($"CI_CDP_MODAL_CONFIRM_{confirmed?.Status}_" +
+                    $"{confirmed?.EffectEvidence}_confirmations={state.Confirmations}");
+            Console.WriteLine("PASS chrome_ci.background_dialog_confirm_and_server_effect_verified");
+
             string fileInput = await FindOwnedElement("CI_CDP_FILE_INPUT");
             var fileReply = await ExchangeAsync(new(Action: new WindowActionRequest(
                 windowId!, fileInput, WindowActionKind.SET_FILES, null,
@@ -894,6 +935,7 @@ internal static class ChromeAcceptanceFixture
         internal int Clicks;
         internal int Inputs;
         internal int Drops;
+        internal int Confirmations;
         internal string LastText = "";
     }
 
@@ -917,6 +959,8 @@ internal static class ChromeAcceptanceFixture
                     "<input aria-label='CI_CDP_VALUE' id='value'>" +
                     "<input type='file' aria-label='CI_CDP_FILE_INPUT' id='file'>" +
                     "<button aria-label='CI_CDP_BUTTON' id='button'>CI_CDP_BUTTON</button>" +
+                    "<button aria-label='CI_CDP_MODAL_OPEN' id='modal-open'>Open dialog</button>" +
+                    "<div id='modal-host'></div>" +
                     "<div role='button' tabindex='0' draggable='true' aria-label='CI_CDP_DRAG_SOURCE' " +
                     "id='drag' style='width:140px;height:50px;background:#ddd;margin:15px'>Drag</div>" +
                     "<div role='button' tabindex='0' aria-label='CI_CDP_DROP_TARGET' " +
@@ -926,6 +970,14 @@ internal static class ChromeAcceptanceFixture
                     "fetch('/REPLACE/report?text='+encodeURIComponent(e.target.value)));" +
                     "document.getElementById('button').addEventListener('click',()=>" +
                     "fetch('/REPLACE/report?click=1'));" +
+                    "document.getElementById('modal-open').addEventListener('click',()=>{" +
+                    "const modal=document.createElement('div');modal.setAttribute('role','dialog');" +
+                    "const confirm=document.createElement('button');" +
+                    "confirm.setAttribute('aria-label','CI_CDP_MODAL_CONFIRM');" +
+                    "confirm.textContent='Confirm';modal.append(confirm);" +
+                    "document.getElementById('modal-host').append(modal);" +
+                    "confirm.addEventListener('click',()=>{modal.remove();" +
+                    "fetch('/REPLACE/report?confirm=1')})});" +
                     "document.getElementById('drag').addEventListener('dragstart',e=>" +
                     "e.dataTransfer.setData('text/plain','WMCP'));" +
                     "document.getElementById('drop').addEventListener('dragover',e=>e.preventDefault());" +
@@ -941,6 +993,7 @@ internal static class ChromeAcceptanceFixture
                 string query = route[(route.IndexOf('?') + 1)..];
                 if (query == "click=1") Interlocked.Increment(ref state.Clicks);
                 else if (query == "drag=1") Interlocked.Increment(ref state.Drops);
+                else if (query == "confirm=1") Interlocked.Increment(ref state.Confirmations);
                 else if (query.StartsWith("text=", StringComparison.Ordinal))
                 {
                     Volatile.Write(ref state.LastText, Uri.UnescapeDataString(query[5..]));

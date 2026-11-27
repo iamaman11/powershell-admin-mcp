@@ -92,6 +92,7 @@ internal static partial class WindowChromeCdp
     internal static void CloseTabConnection()
     {
         CancelPendingConnection();
+        ClearSessionWindowBindings();
         AttachedTabs.Clear();
         _tabSession?.Dispose();
         _tabSession = null;
