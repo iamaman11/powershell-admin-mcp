@@ -53,9 +53,10 @@ public enum WindowFocusBehavior
 [JsonConverter(typeof(JsonStringEnumConverter<WindowExecutionMethod>))]
 public enum WindowExecutionMethod { UIA_PATTERN, WIN32_SENDINPUT, CHROME_CDP }
 
-// BACKGROUND_ONLY forbids our own foreground activation and OS input, but an
-// arbitrary UIA provider can still activate its window. CDP_ONLY forbids UIA
-// action dispatch too; it is available only for consented Chrome web targets.
+// BACKGROUND_ONLY never dispatches input through a UIA provider: even with
+// AutoSetFocus disabled the provider may activate its window. It permits only
+// consented, addressed CDP web actions. CDP_ONLY has the same dispatch boundary
+// and refuses targets that cannot be mapped to a consented Chrome tab.
 [JsonConverter(typeof(JsonStringEnumConverter<WindowInputMode>))]
 public enum WindowInputMode { BACKGROUND_ONLY, ALLOW_FOREGROUND_INPUT, CDP_ONLY }
 
@@ -674,6 +675,8 @@ internal static class WindowAction
     private static WindowActionResult ScrollTarget(IntPtr hwnd,AutomationElement element,
         WindowActionRequest request,Stopwatch clock)
     {
+        var denied = BlockProviderFocusRisk(request, clock);
+        if (denied is not null) return denied;
         try
         {
             if(element.TryGetCurrentPattern(ScrollPattern.Pattern,out var observed) && observed is ScrollPattern scroll)
@@ -844,6 +847,20 @@ internal static class WindowAction
             Detail:"CDP_ONLY_REQUIRES_CONSENTED_CHROME_WEB_TARGET",
             FailureStage:WindowFailureStage.CDP_TARGET,
             ElapsedMs:clock.ElapsedMilliseconds);
+
+    // UIA client-side AutoSetFocus=false is not a guarantee about an arbitrary
+    // provider's own focus behavior. Reject before COM pattern dispatch; the
+    // caller can select ALLOW_FOREGROUND_INPUT explicitly or use addressed CDP.
+    internal static WindowActionResult? BlockProviderFocusRisk(WindowActionRequest request,
+        Stopwatch clock) => request.InputMode switch
+        {
+            WindowInputMode.BACKGROUND_ONLY => new(WindowActionCode.FOREGROUND_INPUT_DISALLOWED,
+                Detail:"UIA_PROVIDER_FOCUS_NOT_GUARANTEED",
+                FailureStage:WindowFailureStage.PREPARE_UIA,
+                ForegroundChanged:false, ElapsedMs:clock.ElapsedMilliseconds),
+            WindowInputMode.CDP_ONLY => CdpOnlyResult(null, clock),
+            _ => null
+        };
 
     internal static bool PreferPhysicalWebClick(WindowActionKind? semantic, bool insideDocument) =>
         insideDocument && semantic == WindowActionKind.INVOKE;

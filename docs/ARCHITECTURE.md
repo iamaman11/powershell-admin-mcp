@@ -114,11 +114,13 @@ output is a contract regression.
   effect with `execution_method=CHROME_CDP`. An unrelated foreground window
   remains unaffected when CDP supports the action.
 - **Desktop input policy:** `BACKGROUND_ONLY` is the default for both UI
-  action tools; CDP and native UIA may dispatch, but no physical OS
-  mouse/keyboard input or foreground activation is permitted. Native input
-  requires explicit `ALLOW_FOREGROUND_INPUT`. Initial Chrome permission
-  requests likewise do not activate a window without a separate opt-in;
-  consent is still granted only by Chrome/the user.
+  action tools. Only consented, addressed CDP effects can dispatch; native
+  UIA patterns and OS mouse/keyboard input are rejected before dispatch because
+  third-party UIA providers can activate windows even with `AutoSetFocus=false`.
+  Native UIA and OS input require explicit `ALLOW_FOREGROUND_INPUT`; this is a
+  risk opt-in, not a promise that the operation will need to activate a window.
+  Initial Chrome permission requests likewise do not activate a window without
+  separate opt-in; consent is still granted only by Chrome/the user.
 - **Native file inspection (P0-A read-only):** MCP `windows.file_query` or
   `windows.file_read_chunk` → authenticated real elevated USER context, or
   existing SYSTEM SCM IPC with a bounded 30-second deadline → Win32 file

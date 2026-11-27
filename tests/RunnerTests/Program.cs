@@ -1227,6 +1227,21 @@ var foregroundOptIn = backgroundPolicyClick with { InputMode = WindowInputMode.A
 string foregroundWire = System.Text.Json.JsonSerializer.Serialize(foregroundOptIn, PipeWire.Json);
 var backgroundBlocked = new WindowActionResult(WindowActionCode.FOREGROUND_INPUT_DISALLOWED,
     Detail: "BACKGROUND_ONLY");
+var nativeUiaBlocked = WindowActionNoFocus.Invoke(IntPtr.Zero, [], [1],
+    backgroundPolicyClick with { Action = WindowActionKind.INVOKE }, Stopwatch.StartNew());
+var providerActions = new[] { WindowActionKind.INVOKE, WindowActionKind.SET_VALUE,
+    WindowActionKind.SELECT, WindowActionKind.TOGGLE, WindowActionKind.EXPAND,
+    WindowActionKind.COLLAPSE, WindowActionKind.SCROLL };
+bool everyNativeProviderActionBlocked = providerActions.All(action =>
+{
+    var request = backgroundPolicyClick with { Action = action,
+        Value = action == WindowActionKind.SET_VALUE ? "example" : null,
+        ScrollDirection = action == WindowActionKind.SCROLL ? WindowScrollDirection.DOWN : null };
+    var denied = WindowAction.BlockProviderFocusRisk(request, Stopwatch.StartNew());
+    return denied is { Status: WindowActionCode.FOREGROUND_INPUT_DISALLOWED,
+        ExecutionMethod: null, EffectUnknown: false, ForegroundChanged: false } &&
+        denied.EffectState == WindowEffectState.NO_EFFECT;
+});
 Check(backgroundPolicyClick.InputMode == WindowInputMode.BACKGROUND_ONLY &&
     !WindowPhysicalClick.ForegroundInputAllowed(backgroundPolicyClick) &&
     WindowPhysicalClick.ForegroundInputAllowed(foregroundOptIn) &&
@@ -1237,7 +1252,19 @@ Check(backgroundPolicyClick.InputMode == WindowInputMode.BACKGROUND_ONLY &&
         WindowInputMode.ALLOW_FOREGROUND_INPUT &&
     backgroundBlocked.EffectState == WindowEffectState.NO_EFFECT &&
     backgroundBlocked.ProviderOutcome == WindowProviderOutcome.NOT_DISPATCHED &&
-    !backgroundBlocked.EffectUnknown,
+    !backgroundBlocked.EffectUnknown &&
+    nativeUiaBlocked.Status == WindowActionCode.FOREGROUND_INPUT_DISALLOWED &&
+    nativeUiaBlocked.FailureStage == WindowFailureStage.PREPARE_UIA &&
+    nativeUiaBlocked.Detail == "UIA_PROVIDER_FOCUS_NOT_GUARANTEED" &&
+    nativeUiaBlocked.ForegroundChanged == false &&
+    nativeUiaBlocked.EffectState == WindowEffectState.NO_EFFECT &&
+    nativeUiaBlocked.ExecutionMethod is null && nativeUiaBlocked.SafeToRetry &&
+    nativeUiaBlocked.ProviderOutcome == WindowProviderOutcome.NOT_DISPATCHED &&
+    everyNativeProviderActionBlocked &&
+    WindowAction.BlockProviderFocusRisk(foregroundOptIn, Stopwatch.StartNew()) is null &&
+    WindowAction.BlockProviderFocusRisk(backgroundPolicyClick with
+        { InputMode = WindowInputMode.CDP_ONLY }, Stopwatch.StartNew())?.Status ==
+        WindowActionCode.CDP_ONLY_UNAVAILABLE,
     "windows.background_default_and_explicit_foreground_input_opt_in");
 var cdpOnly = backgroundPolicyClick with { InputMode = WindowInputMode.CDP_ONLY };
 var cdpOnlyWire = System.Text.Json.JsonSerializer.Serialize(cdpOnly, PipeWire.Json);
@@ -1377,13 +1404,18 @@ using (var profileFixture = System.Text.Json.JsonDocument.Parse("""
         new(WindowCatalog.FormatId(testWindowIdentity with { Handle = 0x22222 }),
             "Profile 9", "Valer", "other@domain.test",
             ChromeProfileEmailSource.SIGNED_IN_ACCOUNT, 4242, 1),
+        new(WindowCatalog.FormatId(testWindowIdentity with { Handle = 0x33333 }),
+            "Profile 10", "Team QA", "qa@domain.test",
+            ChromeProfileEmailSource.SIGNED_IN_ACCOUNT, 4242, 1),
         new(null, "Profile 8", "Closed", "closed@domain.test",
             ChromeProfileEmailSource.SIGNED_IN_ACCOUNT, null, null)
     };
     Check(ChromeProfileCatalog.OpenMatches(openProfiles, "pvisakp@gmail.com").Length == 1 &&
         ChromeProfileCatalog.OpenMatches(openProfiles, "Valer").Length == 2 &&
+        ChromeProfileCatalog.OpenMatches(openProfiles, "Team QA").Length == 1 &&
+        ChromeProfileCatalog.OpenMatches(openProfiles, "qa@domain.test").Length == 1 &&
         ChromeProfileCatalog.OpenMatches(openProfiles, "closed@domain.test").Length == 0,
-        "chrome.email_selector_only_uses_unique_open_windows");
+        "chrome.all_profile_selectors_use_unique_open_windows_without_special_cases");
 }
 Check(ChromeConnectionTools.ValidArguments(ChromeConnectionAction.LIST, null, null) &&
     !ChromeConnectionTools.ValidArguments(ChromeConnectionAction.LIST, null, null, true) &&
@@ -2452,7 +2484,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             "windows.wait_for_changed_react_style_element_without_focus");
         var located=await Task.Run(()=>WindowAction.InvokeInWorker(new WindowActionRequest(
             realWindowId,"locator",WindowActionKind.INVOKE,null,
-            LocatorName:"CI_UIA_DELAYED_READY",LocatorRole:WindowRoleFilter.BUTTON)))
+            LocatorName:"CI_UIA_DELAYED_READY",LocatorRole:WindowRoleFilter.BUTTON,
+            InputMode:WindowInputMode.ALLOW_FOREGROUND_INPUT)))
             .WaitAsync(TimeSpan.FromSeconds(8));
         Check(located.Status==WindowActionCode.COMPLETED && located.TargetVerified,
             "windows.locator_unique_match_dispatches_only_once");
@@ -2541,7 +2574,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         else Console.WriteLine("NOT_TESTED windows.capture_owned_occluded_winforms_png wgc_unsupported");
         var buttonTarget = result.Elements.Single(e => e.Name == "CI_UIA_OWNED_BUTTON");
         var click = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
-            new WindowActionRequest(realWindowId, buttonTarget.ElementId, WindowActionKind.INVOKE, null)))
+            new WindowActionRequest(realWindowId, buttonTarget.ElementId, WindowActionKind.INVOKE, null,
+                InputMode:WindowInputMode.ALLOW_FOREGROUND_INPUT)))
             .WaitAsync(TimeSpan.FromSeconds(5));
         Check(click.Status == WindowActionCode.COMPLETED &&
             Volatile.Read(ref clickCount) == 1 &&
@@ -2556,7 +2590,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         var asyncResult = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, asyncTarget.ElementId, WindowActionKind.INVOKE,
                 null, ExpectedName: "CI_UIA_ASYNC_DONE", ExpectedChange: WindowExpectedChange.APPEARS,
-                ObservationTimeoutMs: 5000))).WaitAsync(TimeSpan.FromSeconds(7));
+                ObservationTimeoutMs: 5000,
+                InputMode:WindowInputMode.ALLOW_FOREGROUND_INPUT))).WaitAsync(TimeSpan.FromSeconds(7));
         Check(asyncResult.EffectState == WindowEffectState.EFFECT_VERIFIED &&
             asyncResult.ObservationState == WindowObservationState.OBSERVED &&
             asyncClock.ElapsedMilliseconds >= 1300 && Volatile.Read(ref asyncDispatchCount) == 1,
@@ -2573,7 +2608,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         var titleResult = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, titleTarget.ElementId, WindowActionKind.INVOKE,
                 null, ExpectedName: "CI_UIA_TITLE_READY", ExpectedChange: WindowExpectedChange.APPEARS,
-                ExpectedKind: WindowExpectedKind.WINDOW_TITLE, ObservationTimeoutMs: 4000)))
+                ExpectedKind: WindowExpectedKind.WINDOW_TITLE, ObservationTimeoutMs: 4000,
+                InputMode:WindowInputMode.ALLOW_FOREGROUND_INPUT)))
             .WaitAsync(TimeSpan.FromSeconds(6));
         Check(titleResult.EffectState == WindowEffectState.EFFECT_VERIFIED &&
             titleResult.ObservationState == WindowObservationState.OBSERVED &&
@@ -2609,7 +2645,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         Check(nativeDisabled is not null && !nativeDisabled.Current.IsEnabled,
             "windows.disabled_native_button_reports_current_isenabled_false");
         var providerDisabled = await Task.Run(() => WindowActionNoFocus.Invoke(created.Handle,
-            disabledPath, nativeDisabled!.GetRuntimeId(), disabledRequest, Stopwatch.StartNew()))
+            disabledPath, nativeDisabled!.GetRuntimeId(), disabledRequest with
+                { InputMode = WindowInputMode.ALLOW_FOREGROUND_INPUT }, Stopwatch.StartNew()))
             .WaitAsync(TimeSpan.FromSeconds(5));
         // Actual WinForms providers can report success AND dispatch a Click
         // even with IsEnabled=false. This is why the production preflight
@@ -2659,7 +2696,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
                 ExpectedChange: WindowExpectedChange.APPEARS,
                 ExpectedKind: WindowExpectedKind.UIA_VALUE,
                 ExpectedValue: "CI_UIA_UPDATED_VALUE", ObservationTimeoutMs: 3500,
-                ExpectedEnabledName: "CI_UIA_SAVE"))).WaitAsync(TimeSpan.FromSeconds(6));
+                ExpectedEnabledName: "CI_UIA_SAVE",
+                InputMode:WindowInputMode.ALLOW_FOREGROUND_INPUT))).WaitAsync(TimeSpan.FromSeconds(6));
         var edited = (string)created.Form.Invoke(new Func<string>(() => created.Input.Text));
         Check(edit.Status == WindowActionCode.COMPLETED && edited == "CI_UIA_UPDATED_VALUE" &&
             edit.EffectState == WindowEffectState.EFFECT_VERIFIED &&
@@ -2680,7 +2718,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             "windows.value_precondition_prevents_repeated_dispatch");
         var checkboxTarget = result.Elements.Single(e => e.Role.Contains("CheckBox", StringComparison.Ordinal));
         var toggle = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
-            new WindowActionRequest(realWindowId, checkboxTarget.ElementId, WindowActionKind.TOGGLE, null)))
+            new WindowActionRequest(realWindowId, checkboxTarget.ElementId, WindowActionKind.TOGGLE,
+                null, InputMode:WindowInputMode.ALLOW_FOREGROUND_INPUT)))
             .WaitAsync(TimeSpan.FromSeconds(5));
         bool checkedAfter = (bool)created.Form.Invoke(new Func<bool>(() =>
             created.Form.Controls.OfType<System.Windows.Forms.CheckBox>().Single().Checked));
@@ -2689,7 +2728,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             checkedAfter, "windows.action_toggle_occluded_checkbox_without_focus");
         var radioTarget = result.Elements.Single(e => e.Role.Contains("RadioButton", StringComparison.Ordinal));
         var select = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
-            new WindowActionRequest(realWindowId, radioTarget.ElementId, WindowActionKind.SELECT, null)))
+            new WindowActionRequest(realWindowId, radioTarget.ElementId, WindowActionKind.SELECT,
+                null, InputMode:WindowInputMode.ALLOW_FOREGROUND_INPUT)))
             .WaitAsync(TimeSpan.FromSeconds(5));
         bool selectedAfter = (bool)created.Form.Invoke(new Func<bool>(() =>
             created.Form.Controls.OfType<System.Windows.Forms.RadioButton>().Single().Checked));
@@ -2703,7 +2743,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             "windows.expand_collapse_native_pattern_available_on_combo_box");
         var expanded = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, expandTarget.ElementId, WindowActionKind.EXPAND,
-                null, ObservationTimeoutMs: 3000))).WaitAsync(TimeSpan.FromSeconds(5));
+                null, ObservationTimeoutMs: 3000,
+                InputMode:WindowInputMode.ALLOW_FOREGROUND_INPUT))).WaitAsync(TimeSpan.FromSeconds(5));
         Check(expanded.EffectState == WindowEffectState.EFFECT_VERIFIED &&
             expanded.ObservationState == WindowObservationState.OBSERVED &&
             expanded.Status == WindowActionCode.COMPLETED,
@@ -2715,14 +2756,16 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             "windows.expand_precondition_rejects_duplicate_dispatch");
         var collapsed = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, expandTarget.ElementId, WindowActionKind.COLLAPSE,
-                null, ObservationTimeoutMs: 3000))).WaitAsync(TimeSpan.FromSeconds(5));
+                null, ObservationTimeoutMs: 3000,
+                InputMode:WindowInputMode.ALLOW_FOREGROUND_INPUT))).WaitAsync(TimeSpan.FromSeconds(5));
         Check(collapsed.EffectState == WindowEffectState.EFFECT_VERIFIED &&
             collapsed.ObservationState == WindowObservationState.OBSERVED &&
             collapsed.Status == WindowActionCode.COMPLETED,
             "windows.collapse_native_uia_pattern_with_verified_state");
         var clickExpanded = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, expandTarget.ElementId, WindowActionKind.CLICK,
-                null, expandTarget.Path, ObservationTimeoutMs: 3000))).WaitAsync(TimeSpan.FromSeconds(5));
+                null, expandTarget.Path, ObservationTimeoutMs: 3000,
+                InputMode:WindowInputMode.ALLOW_FOREGROUND_INPUT))).WaitAsync(TimeSpan.FromSeconds(5));
         Check(clickExpanded.Status == WindowActionCode.COMPLETED &&
             clickExpanded.EffectState == WindowEffectState.EFFECT_VERIFIED &&
             clickExpanded.ObservationState == WindowObservationState.OBSERVED,
@@ -2732,7 +2775,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         var expandedClickTarget = expandedClickTree.Elements.Single(e => e.Name == "CI_UIA_EXPANDABLE");
         var clickCollapsed = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, expandedClickTarget.ElementId, WindowActionKind.CLICK,
-                null, expandedClickTarget.Path, ObservationTimeoutMs: 3000))).WaitAsync(TimeSpan.FromSeconds(5));
+                null, expandedClickTarget.Path, ObservationTimeoutMs: 3000,
+                InputMode:WindowInputMode.ALLOW_FOREGROUND_INPUT))).WaitAsync(TimeSpan.FromSeconds(5));
         Check(clickCollapsed.Status == WindowActionCode.COMPLETED &&
             clickCollapsed.EffectState == WindowEffectState.EFFECT_VERIFIED &&
             clickCollapsed.ObservationState == WindowObservationState.OBSERVED,
@@ -2751,7 +2795,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         Check(deepTree.Status == WindowInspectCode.COMPLETED && deepTarget is { Depth: > 5 },
             "windows.inspect_deep_controls_under_bounded_tree");
         var deepInvoke = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
-            new WindowActionRequest(realWindowId, deepTarget!.ElementId, WindowActionKind.INVOKE, null)))
+            new WindowActionRequest(realWindowId, deepTarget!.ElementId, WindowActionKind.INVOKE,
+                null, InputMode:WindowInputMode.ALLOW_FOREGROUND_INPUT)))
             .WaitAsync(TimeSpan.FromSeconds(5));
         Check(deepInvoke.Status == WindowActionCode.COMPLETED &&
             deepInvoke.ForegroundChanged == false && deepInvoke.TargetActivated == false &&
@@ -2771,7 +2816,8 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         if (paged is null) throw new InvalidOperationException("PAGED_TARGET_MISSING");
         var pathInvoke = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
             new WindowActionRequest(realWindowId, paged.ElementId, WindowActionKind.INVOKE,
-                null, paged.Path))).WaitAsync(TimeSpan.FromSeconds(5));
+                null, paged.Path, InputMode:WindowInputMode.ALLOW_FOREGROUND_INPUT)))
+            .WaitAsync(TimeSpan.FromSeconds(5));
         Console.WriteLine($"PAGED_ACTION status={pathInvoke.Status} detail={pathInvoke.Detail} " +
             $"focus={pathInvoke.ForegroundChanged} clicks={Volatile.Read(ref pagedClickCount)} " +
             $"path={paged.Path}");
@@ -2845,11 +2891,24 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
             new WindowActionRequest(realWindowId, freshButton.ElementId, WindowActionKind.CLICK,
                 null, freshButton.Path, ExpectedName: "CI_UIA_CLICKED",
                 ExpectedChange: WindowExpectedChange.APPEARS))).WaitAsync(TimeSpan.FromSeconds(5));
-        Check(backgroundClick.Status == WindowActionCode.COMPLETED &&
-            backgroundClick.EffectState == WindowEffectState.EFFECT_VERIFIED &&
-            backgroundClick.TargetVerified && Volatile.Read(ref clickCount) == 2 &&
+        Check(backgroundClick.Status == WindowActionCode.FOREGROUND_INPUT_DISALLOWED &&
+            backgroundClick.EffectState == WindowEffectState.NO_EFFECT &&
+            backgroundClick.ProviderOutcome == WindowProviderOutcome.NOT_DISPATCHED &&
+            backgroundClick.FailureStage == WindowFailureStage.PREPARE_UIA &&
+            backgroundClick.ExecutionMethod is null &&
+            backgroundClick.ForegroundChanged == false &&
+            Volatile.Read(ref clickCount) == 1,
+            "windows.background_click_denies_native_uia_provider_without_focus_or_effect");
+        var authorizedSemanticClick = await Task.Run(() => WindowAction.InvokeCore(created.Handle,
+            new WindowActionRequest(realWindowId, freshButton.ElementId, WindowActionKind.CLICK,
+                null, freshButton.Path, ExpectedName: "CI_UIA_CLICKED",
+                ExpectedChange: WindowExpectedChange.APPEARS,
+                InputMode: WindowInputMode.ALLOW_FOREGROUND_INPUT))).WaitAsync(TimeSpan.FromSeconds(5));
+        Check(authorizedSemanticClick.Status == WindowActionCode.COMPLETED &&
+            authorizedSemanticClick.EffectState == WindowEffectState.EFFECT_VERIFIED &&
+            authorizedSemanticClick.TargetVerified && Volatile.Read(ref clickCount) == 2 &&
             (bool)created.Form.Invoke(new Func<bool>(() => testCover!.Visible)),
-            "windows.click_invokes_occluded_uia_button_once_without_foreground_precondition");
+            "windows.explicit_uiA_click_invokes_occluded_button_once");
         var renamedTree = await Task.Run(() => WindowInspector.InspectCore(
             created.Handle, 3, 40, realWindowId, nameContains: "CI_UIA_CLICKED"));
         var renamedButton = renamedTree.Elements.Single(e => e.Name == "CI_UIA_CLICKED");

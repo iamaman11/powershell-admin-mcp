@@ -149,16 +149,16 @@ always means a new action. File receipts share the same 100,000-row and
 3. Choose `INVOKE`, `CLICK`, `DOUBLE_CLICK`, `RIGHT_CLICK`, `SCROLL`, `HOVER`,
    `DRAG`, `KEY_PRESS` or an available semantic pattern. Provide an expected
    postcondition for verification. `input_mode=BACKGROUND_ONLY` is the default:
-   it prohibits **our** OS mouse/keyboard injection and calls to activate a
-   window. The UIA provider of another application can nevertheless briefly
-   raise its window. `foreground_changed=false` compares snapshots; it is not
-   proof that no transient activation happened. For consented Chrome web
-   controls, use `input_mode=CDP_ONLY` to prohibit both native UIA actions and
-   physical input; unsupported controls then return `CDP_ONLY_UNAVAILABLE`
-   without dispatching an effect. A physical-input-only action in the default
-   mode returns `FOREGROUND_INPUT_DISALLOWED` with `effect_state=NO_EFFECT`.
-   Explicit `input_mode=ALLOW_FOREGROUND_INPUT` permits the verified native
-   pointer/keyboard path, subject to Windows foreground restrictions.
+   it permits only addressed effects through an already consented Chrome CDP
+   session. Native UIA patterns and OS mouse/keyboard are blocked **before**
+   dispatch because third-party providers may independently activate windows.
+   An unsupported control returns `FOREGROUND_INPUT_DISALLOWED` with
+   `effect_state=NO_EFFECT`, `provider_outcome=NOT_DISPATCHED` and
+   `next_step=CHANGE_INPUT_MODE`. `input_mode=CDP_ONLY` also forbids UIA/OS
+   fallback and reports `CDP_ONLY_UNAVAILABLE` if no Chrome web target is
+   available. Explicit `input_mode=ALLOW_FOREGROUND_INPUT` permits native UIA
+   and verified pointer/keyboard actions, subject to Windows foreground policy.
+   It may change the foreground; choose it only with an explicit opt-in.
    For a Chrome web page, `input_mode=CDP_ONLY` also supports `DRAG` between
    two **fresh** `c1` DOM references using `target_element_id`; neither endpoint
    is a screen coordinate. `SET_FILES` selects 1–16 existing local files in an
@@ -192,7 +192,8 @@ The following fields have separate meanings:
 | `effect_evidence=POSTCONDITION_NOT_OBSERVED` | A requested postcondition was checked but not seen; still no blind retry |
 | `safe_to_retry=false` | Do not re-dispatch the same state-changing action without independent evidence |
 | `next_step` | Typed guidance such as `INSPECT_AND_SUPPLY_POSTCONDITION` or `INSPECT_STATE_DO_NOT_RETRY` |
-| `focus_behavior=UIA_PROVIDER_MAY_ACTIVATE` | Even with `BACKGROUND_ONLY`, a third-party UIA provider may momentarily change foreground |
+| `focus_behavior=UIA_PROVIDER_MAY_ACTIVATE` | Explicitly authorized native UIA action; provider may change foreground even with automatic focus disabled |
+| `status=FOREGROUND_INPUT_DISALLOWED`, `detail=UIA_PROVIDER_FOCUS_NOT_GUARANTEED` | `BACKGROUND_ONLY` rejected native UIA before dispatch, with `effect_state=NO_EFFECT` |
 | `focus_behavior=UNKNOWN_METHOD_MAY_ACTIVATE` | The action outcome/method is uncertain; do not infer that focus stayed unchanged |
 
 `windows.chrome_tab` and `windows.inspect_window(scope=TABS|TAB)` intentionally
