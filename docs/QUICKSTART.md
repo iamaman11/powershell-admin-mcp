@@ -213,6 +213,13 @@ still unknown merely to add the missing expected-state fields.
 `CDP_ONLY` does not imply that arbitrary website JavaScript can never call
 focus APIs; it guarantees only that the MCP tool does not fall back to native
 UIA dispatch, OS foreground activation or synthetic keyboard/mouse input.
+For a Chrome control outside the viewport, CDP first attempts one native
+`DOM.scrollIntoViewIfNeeded`, then rechecks the same node's identity, viewport
+position, hit test and tab loader before dispatching the pointer action.
+Scrolling may trigger page events or lazy rendering: if subsequent verification
+fails, the result remains `EFFECT_UNKNOWN`, **not** proof of no effect. For a
+`STALE_ELEMENT` returned before any dispatch, inspect again to obtain a fresh
+`c1` element ID; never automatically click a replacement found merely by name.
 
 For Chrome, first use `windows.chrome_connection` with the exact profile and
 window. `REQUEST` does not raise Chrome by default: an already foreground
@@ -222,6 +229,9 @@ window can display the native consent dialog; otherwise it returns
 attempt *for the permission prompt only*. After user consent, inspect
 `scope=TABS` and `scope=TAB`; ordinary CDP actions remain background-only.
 The application never silently approves Chrome permissions.
+An already authorized `MANAGED_BROWSER` connection may be restored on `STATUS`
+only for the exact same managed profile and CDP endpoint. `USER_BROWSER`
+continues to require Chrome's native consent after its socket is lost.
 
 ### Two supported Chrome connection modes
 

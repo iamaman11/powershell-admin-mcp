@@ -461,6 +461,73 @@ internal static class ChromeAcceptanceFixture
             Console.WriteLine($"PASS chrome_ci.one_shared_cdp_worker_and_websocket " +
                 $"worker_pid={children[0]} owner_pid={self.Id} socket_count={established}");
 
+            // A DOM rerender must invalidate the old c1 identity *before* the
+            // first input dispatch. The caller may inspect again and perform
+            // one new action; the stale attempt itself must have no effect.
+            string oldStaleElement = await FindOwnedElement("CI_CDP_STALE_ACTION");
+            string replaceElement = await FindOwnedElement("CI_CDP_STALE_REPLACE");
+            var replaceReply = (await ExchangeAsync(new(Action: new WindowActionRequest(
+                windowId!, replaceElement, WindowActionKind.CLICK, null,
+                ExpectedName: "CI_CDP_STALE_REPLACED",
+                ExpectedChange: WindowExpectedChange.APPEARS,
+                ExpectedProfile: selector, ExpectedUrl: url,
+                InputMode: WindowInputMode.CDP_ONLY,
+                BrowserWindowId: verifiedTab.BrowserWindowId)))).Action;
+            if (replaceReply?.Status != WindowActionCode.COMPLETED ||
+                replaceReply.EffectEvidence != WindowEffectEvidence.POSTCONDITION_VERIFIED ||
+                state.StaleClicks != 0)
+                throw new InvalidOperationException($"CI_CDP_STALE_SETUP_{replaceReply?.Status}");
+            var staleReply = (await ExchangeAsync(new(Action: new WindowActionRequest(
+                windowId!, oldStaleElement, WindowActionKind.CLICK, null,
+                ExpectedProfile: selector, ExpectedUrl: url,
+                InputMode: WindowInputMode.CDP_ONLY,
+                BrowserWindowId: verifiedTab.BrowserWindowId)))).Action;
+            if (staleReply?.Status != WindowActionCode.STALE_ELEMENT ||
+                staleReply.EffectState != WindowEffectState.NO_EFFECT ||
+                staleReply.ProviderOutcome != WindowProviderOutcome.NOT_DISPATCHED ||
+                staleReply.EffectEvidence != WindowEffectEvidence.NOT_DISPATCHED ||
+                staleReply.NextStep != WindowNextStep.REFRESH_ELEMENT ||
+                state.StaleClicks != 0)
+                throw new InvalidOperationException($"CI_CDP_STALE_REJECTION_{staleReply?.Status}_" +
+                    $"effect={staleReply?.EffectState}_clicks={state.StaleClicks}");
+            string freshStaleElement = await FindOwnedElement("CI_CDP_STALE_ACTION");
+            if (freshStaleElement == oldStaleElement)
+                throw new InvalidOperationException("CI_CDP_RERENDER_REUSED_STALE_IDENTITY");
+            var freshReply = (await ExchangeAsync(new(Action: new WindowActionRequest(
+                windowId!, freshStaleElement, WindowActionKind.CLICK, null,
+                ExpectedName: "CI_CDP_STALE_DONE",
+                ExpectedChange: WindowExpectedChange.APPEARS,
+                ExpectedProfile: selector, ExpectedUrl: url,
+                InputMode: WindowInputMode.CDP_ONLY,
+                BrowserWindowId: verifiedTab.BrowserWindowId)))).Action;
+            if (freshReply?.Status != WindowActionCode.COMPLETED ||
+                freshReply.EffectEvidence != WindowEffectEvidence.POSTCONDITION_VERIFIED ||
+                freshReply.FocusBehavior != WindowFocusBehavior.CDP_NO_NATIVE_ACTIVATION ||
+                !await UntilAsync(() => state.StaleClicks == 1, TimeSpan.FromSeconds(3)))
+                throw new InvalidOperationException($"CI_CDP_RERENDER_REFRESH_{freshReply?.Status}_" +
+                    $"clicks={state.StaleClicks}");
+            Console.WriteLine("PASS chrome_ci.stale_dom_rejected_before_dispatch_then_one_fresh_effect");
+
+            // The button starts far below the browser viewport. The single
+            // consented CDP owner must scroll it into view, verify hit testing,
+            // then dispatch exactly one background click with server evidence.
+            string offscreenButton = await FindOwnedElement("CI_CDP_OFFSCREEN_BUTTON");
+            var offscreenReply = (await ExchangeAsync(new(Action: new WindowActionRequest(
+                windowId!, offscreenButton, WindowActionKind.CLICK, null,
+                ExpectedName: "CI_CDP_OFFSCREEN_DONE",
+                ExpectedChange: WindowExpectedChange.APPEARS,
+                ExpectedProfile: selector, ExpectedUrl: url,
+                InputMode: WindowInputMode.CDP_ONLY,
+                BrowserWindowId: verifiedTab.BrowserWindowId,
+                ObservationTimeoutMs: 3000)))).Action;
+            if (offscreenReply?.Status != WindowActionCode.COMPLETED ||
+                offscreenReply.EffectEvidence != WindowEffectEvidence.POSTCONDITION_VERIFIED ||
+                offscreenReply.FocusBehavior != WindowFocusBehavior.CDP_NO_NATIVE_ACTIVATION ||
+                !await UntilAsync(() => state.OffscreenClicks == 1, TimeSpan.FromSeconds(3)))
+                throw new InvalidOperationException($"CI_CDP_OFFSCREEN_{offscreenReply?.Status}_" +
+                    $"evidence={offscreenReply?.EffectEvidence}_clicks={state.OffscreenClicks}");
+            Console.WriteLine("PASS chrome_ci.offscreen_button_scrolled_and_clicked_in_background_once");
+
             // The new typed tab lifecycle shares the exact same owner and
             // consented socket; each effect is independently read back.
             RefreshOwnedProfile();
@@ -936,6 +1003,8 @@ internal static class ChromeAcceptanceFixture
         internal int Inputs;
         internal int Drops;
         internal int Confirmations;
+        internal int StaleClicks;
+        internal int OffscreenClicks;
         internal string LastText = "";
     }
 
@@ -961,10 +1030,15 @@ internal static class ChromeAcceptanceFixture
                     "<button aria-label='CI_CDP_BUTTON' id='button'>CI_CDP_BUTTON</button>" +
                     "<button aria-label='CI_CDP_MODAL_OPEN' id='modal-open'>Open dialog</button>" +
                     "<div id='modal-host'></div>" +
+                    "<button aria-label='CI_CDP_STALE_ACTION' id='stale-action'>Action</button>" +
+                    "<button aria-label='CI_CDP_STALE_REPLACE' id='stale-replace'>Replace</button>" +
+                    "<div id='stale-status'></div>" +
                     "<div role='button' tabindex='0' draggable='true' aria-label='CI_CDP_DRAG_SOURCE' " +
                     "id='drag' style='width:140px;height:50px;background:#ddd;margin:15px'>Drag</div>" +
                     "<div role='button' tabindex='0' aria-label='CI_CDP_DROP_TARGET' " +
                     "id='drop' style='width:140px;height:50px;background:#aaa;margin:15px'>Drop</div>" +
+                    "<div style='height:2600px' aria-hidden='true'></div>" +
+                    "<button aria-label='CI_CDP_OFFSCREEN_BUTTON' id='offscreen'>Offscreen</button>" +
                     "<script>" +
                     "document.getElementById('value').addEventListener('input',e=>" +
                     "fetch('/REPLACE/report?text='+encodeURIComponent(e.target.value)));" +
@@ -978,6 +1052,22 @@ internal static class ChromeAcceptanceFixture
                     "document.getElementById('modal-host').append(modal);" +
                     "confirm.addEventListener('click',()=>{modal.remove();" +
                     "fetch('/REPLACE/report?confirm=1')})});" +
+                    "function wireStale(button){button.addEventListener('click',()=>{" +
+                    "button.setAttribute('aria-label','CI_CDP_STALE_DONE');" +
+                    "fetch('/REPLACE/report?stale=1')})}" +
+                    "wireStale(document.getElementById('stale-action'));" +
+                    "document.getElementById('stale-replace').addEventListener('click',()=>{" +
+                    "const old=document.getElementById('stale-action');" +
+                    "const fresh=document.createElement('button');fresh.id='stale-action';" +
+                    "fresh.setAttribute('aria-label','CI_CDP_STALE_ACTION');" +
+                    "fresh.textContent='Action';wireStale(fresh);old.replaceWith(fresh);" +
+                    "const notice=document.createElement('div');notice.setAttribute('role','status');" +
+                    "notice.setAttribute('aria-label','CI_CDP_STALE_REPLACED');" +
+                    "notice.textContent='Replacement ready';" +
+                    "document.getElementById('stale-status').replaceChildren(notice)});" +
+                    "document.getElementById('offscreen').addEventListener('click',e=>{" +
+                    "e.target.setAttribute('aria-label','CI_CDP_OFFSCREEN_DONE');" +
+                    "fetch('/REPLACE/report?offscreen=1')});" +
                     "document.getElementById('drag').addEventListener('dragstart',e=>" +
                     "e.dataTransfer.setData('text/plain','WMCP'));" +
                     "document.getElementById('drop').addEventListener('dragover',e=>e.preventDefault());" +
@@ -994,6 +1084,8 @@ internal static class ChromeAcceptanceFixture
                 if (query == "click=1") Interlocked.Increment(ref state.Clicks);
                 else if (query == "drag=1") Interlocked.Increment(ref state.Drops);
                 else if (query == "confirm=1") Interlocked.Increment(ref state.Confirmations);
+                else if (query == "stale=1") Interlocked.Increment(ref state.StaleClicks);
+                else if (query == "offscreen=1") Interlocked.Increment(ref state.OffscreenClicks);
                 else if (query.StartsWith("text=", StringComparison.Ordinal))
                 {
                     Volatile.Write(ref state.LastText, Uri.UnescapeDataString(query[5..]));

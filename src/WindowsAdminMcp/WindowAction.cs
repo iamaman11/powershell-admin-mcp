@@ -198,6 +198,7 @@ public sealed record WindowActionResult(
         : Status switch
         {
             WindowActionCode.STALE_ELEMENT or WindowActionCode.STALE_WINDOW or
+                WindowActionCode.CDP_TARGET_NOT_VISIBLE or WindowActionCode.TARGET_OCCLUDED or
                 WindowActionCode.LOCATOR_NOT_FOUND or WindowActionCode.LOCATOR_AMBIGUOUS =>
                 WindowNextStep.REFRESH_ELEMENT,
             WindowActionCode.CDP_UNAVAILABLE or WindowActionCode.CDP_CONSENT_PENDING =>
@@ -906,7 +907,7 @@ internal static class WindowAction
     internal static async Task<WindowActionResult> RunIsolatedAsync(WindowActionRequest request,
         CancellationToken cancellationToken)
     {
-        if (!Valid(request)) return new(WindowActionCode.INVALID_ARGUMENT);
+        if (!Valid(request)) return new(InvalidCode(request));
         var auditId = Guid.NewGuid().ToString("N");
         if (!WriteAudit(auditId, "INTENT", request, null))
             return new(WindowActionCode.AUDIT_UNAVAILABLE, AuditId: auditId);
