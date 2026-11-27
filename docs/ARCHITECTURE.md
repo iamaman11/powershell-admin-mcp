@@ -62,12 +62,16 @@ mode switch is rejected while the prior connection is active. `OPEN` has no
 CDP-native target-window selector, so it requires one Chrome window and
 verifies the new target's browser window identity after creation.
 
-The generic `windows.chrome_cdp` entry point derives command/event definitions
-from the running browser's `/json/protocol` schema, cached only for the current
-broker generation. No separate CDP transport or static method whitelist is
-maintained. `DESCRIBE`, `TARGETS`, `CALL`, `SUBSCRIBE`, `EVENTS` and `UNSUBSCRIBE`
-are one typed contract; CDP arguments remain a bounded JSON object checked
-against the live protocol signature. By default target selection requires a
+The generic `windows.chrome_cdp` entry point prefers the running browser's
+`/json/protocol` schema. Approval-based Chrome may return HTTP 404 for `/json/*`
+despite a fully working consented WebSocket; in that mode it discovers domains
+through `Schema.getDomains` on the **same socket**, and lets Chrome validate
+individual commands and JSON parameters. `DESCRIBE` explicitly labels the
+result `DOMAINS_ONLY` when complete method signatures are unavailable. Metadata
+is cached per broker generation; no extra CDP transport or static method
+whitelist is maintained. `DESCRIBE`, `TARGETS`, `CALL`, `SUBSCRIBE`, `EVENTS`
+and `UNSUBSCRIBE` remain one typed contract, and arguments are bounded JSON
+objects regardless of the metadata source. By default target selection requires a
 unique native window mapping. An explicit browser-scoped opt-in may select
 an exact `(browser_window_id, tab_id)` pair through CDP even when native HWND
 geometry is ambiguous; the verified native window/profile remains the

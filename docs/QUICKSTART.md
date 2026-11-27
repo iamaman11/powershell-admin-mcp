@@ -340,21 +340,23 @@ returns a typed failure instead of requesting foreground focus.
 
 | `action` | Purpose |
 | --- | --- |
-| `DESCRIBE` | Page through available CDP domains, or supply `domain` for its command/event names. Supply `method` for its full schema, including argument definitions. |
+| `DESCRIBE` | Page through CDP domains. When Chrome exposes `/json/protocol`, `domain` lists commands/events and `method` returns parameter definitions; approval-based HTTP 404 yields clearly marked `DOMAINS_ONLY` information via the same WebSocket. |
 | `TARGETS` | List exact target IDs and CDP window IDs for a confirmed browser/window; paginate with `offset` and `page_size`. |
-| `CALL` | Call a command advertised by that Chrome version, with a JSON object in `parameters_json`, optionally scoped to exact `tab_id`, `browser_window_id`, `expected_origin` and `expected_url`. |
-| `SUBSCRIBE` | Subscribe to a schema-defined CDP event, or to a domain wildcard such as `Page.*`. |
+| `CALL` | Call any Chrome CDP method with a bounded JSON object in `parameters_json`, optionally scoped to exact `tab_id`, `browser_window_id`, `expected_origin` and `expected_url`. With complete HTTP metadata arguments are prevalidated; otherwise Chrome validates them during dispatch. |
+| `SUBSCRIBE` | Subscribe to a CDP event, or to a domain wildcard such as `Page.*`. With `DOMAINS_ONLY`, registration acknowledges a filter, not proof that the event is supported or emitted. |
 | `EVENTS` | Read a bounded event page using `subscription_id` and `after_sequence`; `dropped=true` warns of overflow. |
 | `UNSUBSCRIBE` | Release the subscription. |
 
-For example, `DESCRIBE` with `domain=Browser` lists its methods; `CALL` with
+For example, `DESCRIBE` with `domain=Browser` lists its methods when complete
+HTTP metadata is available; in approval-based Chrome the result honestly
+indicates `DOMAINS_ONLY` and missing signatures. `CALL` with
 `method=Browser.getVersion, parameters_json={}, allow_browser_scope=true`
 reads the browser version. Any `CALL` or `SUBSCRIBE` without `tab_id` requires
 this explicit browser-wide authority, including read-only browser methods.
 `CALL` with `method=Page.getNavigationHistory, tab_id=<verified tab>,
 parameters_json={}` reads navigation history from that target session.
-Use `DESCRIBE(method=...)` to inspect the actual method's parameters, rather
-than guessing what a different Chrome version supports. Each result embeds
+Use `DESCRIBE(method=...)` to inspect the method's parameters when the full
+protocol is exposed; otherwise Chrome itself validates `CALL`. Each result embeds
 the CDP response in typed `data`; event records are bounded and paginated.
 
 The default is background-oriented and fail-closed: commands known to bring a

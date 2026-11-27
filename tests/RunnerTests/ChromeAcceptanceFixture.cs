@@ -19,6 +19,8 @@ internal static class ChromeAcceptanceFixture
         await VerifyOversizedMessagesAsync();
         await VerifyEventSubscriptionsAsync();
         await VerifyFrameTreeFallbackAsync();
+        VerifyProtocolFallbackParameters();
+        await VerifyProtocolHttp404WebSocketFallbackAsync();
 
         string? chrome = new[]
         {
@@ -838,6 +840,113 @@ internal static class ChromeAcceptanceFixture
 
     private static void Blocked(string reason) =>
         Console.WriteLine($"NOT_TESTED / EXTERNAL_BLOCKER chrome_ci.100_cycles reason={reason}");
+
+    private static void VerifyProtocolFallbackParameters()
+    {
+        // Without an HTTP method schema, the input contract remains bounded
+        // JSON object, with exact syntax and depth limits. Invalid objects
+        // must be rejected BEFORE anything can be sent to the CDP socket.
+        bool Good(string? json) => WindowChromeCdp.TryParseProtocolObject(json,
+            out var parsed, out var error) && parsed.ValueKind == JsonValueKind.Object &&
+            error is null;
+        bool Bad(string json, string expectedError) =>
+            !WindowChromeCdp.TryParseProtocolObject(json, out _, out var error) &&
+            error == expectedError;
+        string overlyNested = string.Concat(Enumerable.Repeat("{\"x\":", 40)) +
+            "0" + new string('}', 40);
+        string windowId = WindowCatalog.FormatId(new WindowIdentity(
+            12345, 4242, 133700000000000000, 1));
+        var request = new ChromeProtocolRequest(windowId, "Profile 5",
+            ChromeProtocolAction.CALL, Method: "Browser.getVersion", ParametersJson: "{}");
+        if (!Good(null) || !Good("{}") || !Good("{\"params\":{\"nested\":[true,2]}}") ||
+            !Bad("[]", "PARAMETERS_MUST_BE_JSON_OBJECT") ||
+            !Bad("null", "PARAMETERS_MUST_BE_JSON_OBJECT") ||
+            !Bad("{", "PARAMETERS_JSON_INVALID") ||
+            !Bad(overlyNested, "PARAMETERS_JSON_INVALID") ||
+            !WindowChromeCdp.ValidProtocolRequest(request) ||
+            WindowChromeCdp.ValidProtocolRequest(request with
+            { ParametersJson = new string('x', 16 * 1024 + 1) }))
+            throw new InvalidOperationException("CI_CDP_SCHEMALESS_PARAMETERS_NOT_BOUNDED");
+        Console.WriteLine("PASS chrome_ci.protocol_schema_fallback_json_object " +
+            "invalid_null_array_syntax_depth_size_rejected_before_dispatch");
+    }
+
+    private static async Task VerifyProtocolHttp404WebSocketFallbackAsync()
+    {
+        // Chrome can expose an approved DevTools WebSocket while returning
+        // HTTP 404 for /json/protocol (and the other /json/* endpoints). The
+        // universal bridge must use the already-owned CDP Session rather than
+        // interpreting that HTTP response as a lost browser connection.
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            var endpoint = new Uri($"ws://127.0.0.1:{port}/devtools/browser/owned-fixture");
+            Task http404 = Task.Run(async () =>
+            {
+                using var incoming = await listener.AcceptTcpClientAsync(deadline.Token);
+                using var stream = incoming.GetStream();
+                var request = new byte[4096];
+                int count = 0;
+                while (count < request.Length)
+                {
+                    int got = await stream.ReadAsync(request.AsMemory(count), deadline.Token);
+                    if (got == 0) break;
+                    count += got;
+                    if (Encoding.ASCII.GetString(request, 0, count).Contains("\r\n\r\n",
+                        StringComparison.Ordinal)) break;
+                }
+                if (!Encoding.ASCII.GetString(request, 0, count)
+                    .StartsWith("GET /json/protocol ", StringComparison.Ordinal))
+                    throw new InvalidOperationException("CI_CDP_SCHEMA_404_WRONG_HTTP_REQUEST");
+                byte[] reply = Encoding.ASCII.GetBytes(
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                await stream.WriteAsync(reply, deadline.Token);
+            }, deadline.Token);
+
+            using var wire = new ScriptedWebSocket();
+            using var session = new WindowChromeCdp.Session(wire);
+            session.SetDeadline(deadline.Token);
+            Task<WindowChromeCdp.ProtocolMetadata> resolving =
+                WindowChromeCdp.ResolveProtocolMetadataAsync(endpoint, session, deadline.Token);
+            var command = await wire.NextCommandAsync(deadline.Token);
+            if (command.GetProperty("method").GetString() != "Schema.getDomains" ||
+                command.TryGetProperty("sessionId", out _))
+                throw new InvalidOperationException("CI_CDP_SCHEMA_404_DID_NOT_USE_OWNED_BROWSER_SESSION");
+            int id = command.GetProperty("id").GetInt32();
+            wire.Reply(JsonSerializer.Serialize(new
+            {
+                id,
+                result = new
+                {
+                    domains = new[]
+                    {
+                        new { name = "Browser", version = "1.3" },
+                        new { name = "Page", version = "1.2" }
+                    }
+                }
+            }));
+            var metadata = await resolving.WaitAsync(deadline.Token);
+            await http404.WaitAsync(deadline.Token);
+            // A second lookup in the same Chrome generation must reuse the
+            // observed metadata; no new HTTP request or CDP discovery call.
+            var cached = await WindowChromeCdp.ResolveProtocolMetadataAsync(
+                endpoint, session, deadline.Token);
+            if (metadata.FullSchema is not null ||
+                metadata.LiveDomains is not { } live ||
+                !live.GetRawText().Contains("Browser", StringComparison.Ordinal) ||
+                !live.GetRawText().Contains("Page", StringComparison.Ordinal) ||
+                !ReferenceEquals(cached, metadata) ||
+                wire.Aborted || wire.MaxConcurrentReads != 1 || wire.SentCount != 1)
+                throw new InvalidOperationException(
+                    "CI_CDP_SCHEMA_404_FALLBACK_LOST_DOMAINS_OR_SECOND_SOCKET");
+            Console.WriteLine("PASS chrome_ci.protocol_schema_http_404 " +
+                "live_domains_via_same_websocket_no_second_owner");
+        }
+        finally { listener.Stop(); }
+    }
 
     private static async Task VerifyReceivePumpAsync()
     {
