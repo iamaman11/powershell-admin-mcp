@@ -84,7 +84,7 @@ internal sealed record UpdateTaskWire(
 public sealed class UpdateTools
 {
     [McpServerTool(Name = "powershell_update", UseStructuredContent = true),
-     Description("Verified Scheduler update and exact-commit acceptance. PREVIEW_BACKUPS gives a read-only typed retention plan; CLEANUP_BACKUPS requires its exact plan_sha256 and installed commit, preserves active files and rollback, and runs through the durable Scheduler operator without restarting the service. STATUS reads the outcome.")]
+     Description("Scheduler update, exact-commit acceptance, STATUS, backup preview/cleanup. CLEANUP_BACKUPS requires plan_sha256 and installed commit; preserves active files/rollback.")]
     public static async Task<UpdateToolResult> Update(UpdateToolAction action,
         bool remote_acceptance_confirmed = false, string? expected_commit = null,
         string? plan_sha256 = null,

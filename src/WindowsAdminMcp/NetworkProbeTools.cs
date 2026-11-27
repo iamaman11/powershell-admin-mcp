@@ -345,7 +345,7 @@ internal static class NativeNetworkProbe
 public sealed class NetworkProbeTools
 {
     [McpServerTool(Name = "windows.network_probe", UseStructuredContent = true),
-     Description("Bounded active native DNS, TCP connect, certificate-validated TLS and HTTP/HTTPS HEAD or explicitly opted-in GET. Makes network requests to the explicitly provided host; HTTP GET may cause server-side effects. No Windows credentials, cookies, proxy, redirects, request body or returned response body. Timeout 250..30000 ms; GET samples at most 4096 bytes without revealing content.")]
+     Description("Bounded native DNS/TCP/TLS/HTTPS probe to exact host. GET requires opt-in and can cause effects. No credentials, cookies, proxy, redirects or response body. Timeout 250..30000 ms.")]
     public static Task<NetworkProbeResult> Probe(NetworkProbeKind kind, string host,
         int? port = null, string path_and_query = "/", int timeout_ms = 5000,
         bool allow_http_get = false, int max_response_bytes = 4096,

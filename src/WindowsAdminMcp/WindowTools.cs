@@ -143,7 +143,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.invoke_element", UseStructuredContent = true),
-     Description("Act on a fresh UIA/Chrome element. Supply expected_name and expected_change for verified navigation. CDP_ONLY supports DRAG between fresh DOM IDs (target_element_id) and SET_FILES on an HTML file input (file_paths, 1..16 absolute paths). BACKGROUND_ONLY uses consented CDP only; native UIA and input that may steal focus are rejected before dispatch. ALLOW_FOREGROUND_INPUT opts into native UIA and pointer/keyboard input. EFFECT_UNKNOWN means inspect state, never replay; read effect_evidence, next_step and focus_behavior.")]
+     Description("Act on a fresh UIA/Chrome element. Supply expected_name/change for verification. CDP_ONLY supports DOM DRAG and SET_FILES. BACKGROUND_ONLY uses consented CDP only; native UIA/input requires ALLOW_FOREGROUND_INPUT. Never retry EFFECT_UNKNOWN; inspect effect_evidence and next_step.")]
     public static async Task<WindowActionResult> InvokeElement(string window_id, string element_id,
         WindowActionKind action, string? value = null, bool confirm = true,
         string? element_path = null, string? expected_name = null,
@@ -194,7 +194,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name="windows.invoke_locator",UseStructuredContent=true),
-     Description("Find one exact accessible element and act once. For navigation supply expected_name/expected_change. BACKGROUND_ONLY and CDP_ONLY never invoke a UIA provider; unsupported background actions fail before dispatch. ALLOW_FOREGROUND_INPUT permits native UIA or pointer/keyboard input. Read effect_evidence, next_step and focus_behavior; never replay EFFECT_UNKNOWN.")]
+     Description("Resolve one exact accessible locator and act once. BACKGROUND_ONLY/CDP_ONLY forbid native UIA dispatch; ALLOW_FOREGROUND_INPUT permits it. Supply expected_name/change for verification; never retry EFFECT_UNKNOWN.")]
     public static Task<WindowActionResult> InvokeLocator(string window_id,WindowActionKind action,
         string? automation_id=null,string? name=null,WindowRoleFilter? role=null,
         string? value=null,bool confirm=true,

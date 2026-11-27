@@ -16,6 +16,8 @@ internal static class ChromeAcceptanceFixture
             Environment.GetEnvironmentVariable("RUNNER_OS") != "Windows") return;
 
         await VerifyReceivePumpAsync();
+        await VerifyOversizedMessagesAsync();
+        await VerifyEventSubscriptionsAsync();
         await VerifyFrameTreeFallbackAsync();
 
         string? chrome = new[]
@@ -253,6 +255,161 @@ internal static class ChromeAcceptanceFixture
             if (verifiedTab is null || verifiedTab.BrowserWindowId is not > 0 ||
                 !WindowChromeCdp.ValidTargetId(verifiedTab.TabId))
                 throw new InvalidOperationException("CI_CDP_NATIVE_WINDOW_BINDING_MISSING");
+
+            // The universal protocol uses the same HWND/profile-bound owner
+            // and existing consented socket as the high-level UI operations.
+            // No developer-port discovery, second browser owner, or native
+            // focus activation is permitted in this path.
+            async Task<ChromeProtocolResult> Protocol(ChromeProtocolRequest request)
+            {
+                var reply = await ExchangeAsync(new(Protocol: request));
+                return reply.Protocol ??
+                    throw new InvalidOperationException("CI_CDP_PROTOCOL_REPLY_MISSING");
+            }
+            ChromeProtocolRequest ProtocolRequest(ChromeProtocolAction action,
+                string? method = null, string? parameters = null, string? tab = null,
+                string? domain = null, bool allowBrowserScope = false) => new(
+                    windowId!, selector, action, Method: method,
+                    ParametersJson: parameters, TabId: tab,
+                    BrowserWindowId: tab is null ? null : verifiedTab.BrowserWindowId,
+                    ExpectedUrl: tab is null ? null : url, Domain: domain,
+                    AllowBrowserScope: allowBrowserScope);
+
+            RefreshOwnedProfile();
+            var schema = await Protocol(ProtocolRequest(ChromeProtocolAction.DESCRIBE,
+                domain: "Browser"));
+            if (schema.Status != ChromeProtocolCode.COMPLETED ||
+                schema.Data is not { } schemaData ||
+                !schemaData.GetRawText().Contains("getVersion", StringComparison.Ordinal))
+                throw new InvalidOperationException($"CI_CDP_SCHEMA_DISCOVERY_{schema.Status}_" +
+                    $"{schema.Detail}");
+            var targets = await Protocol(ProtocolRequest(ChromeProtocolAction.TARGETS));
+            if (targets.Status != ChromeProtocolCode.COMPLETED ||
+                targets.Data is not { } targetData ||
+                !targetData.GetRawText().Contains(verifiedTab.TabId, StringComparison.Ordinal))
+                throw new InvalidOperationException($"CI_CDP_PROTOCOL_TARGETS_{targets.Status}_" +
+                    $"{targets.Detail}");
+            var browserTargets = await Protocol(ProtocolRequest(ChromeProtocolAction.TARGETS,
+                allowBrowserScope: true));
+            if (browserTargets.Status != ChromeProtocolCode.COMPLETED ||
+                browserTargets.Data is not { } browserTargetData ||
+                !browserTargetData.GetRawText().Contains(verifiedTab.TabId,
+                    StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    $"CI_CDP_BROWSER_SCOPED_TARGETS_{browserTargets.Status}_{browserTargets.Detail}");
+            var unconsentedBrowserRead = await Protocol(ProtocolRequest(ChromeProtocolAction.CALL,
+                method: "Browser.getVersion", parameters: "{}"));
+            if (unconsentedBrowserRead.Status != ChromeProtocolCode.BROWSER_SCOPE_NOT_ALLOWED)
+                throw new InvalidOperationException(
+                    $"CI_CDP_UNCONSENTED_BROWSER_READ_{unconsentedBrowserRead.Status}");
+            var version = await Protocol(ProtocolRequest(ChromeProtocolAction.CALL,
+                method: "Browser.getVersion", parameters: "{}", allowBrowserScope: true));
+            if (version.Status != ChromeProtocolCode.COMPLETED ||
+                version.Data is not { } versionData ||
+                !versionData.GetRawText().Contains("Chrome", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"CI_CDP_PROTOCOL_GET_VERSION_{version.Status}_" +
+                    $"{version.Detail}");
+            var navigationHistory = await Protocol(ProtocolRequest(ChromeProtocolAction.CALL,
+                method: "Page.getNavigationHistory", parameters: "{}",
+                tab: verifiedTab.TabId));
+            if (navigationHistory.Status != ChromeProtocolCode.COMPLETED ||
+                navigationHistory.Data is not { } historyData ||
+                !historyData.GetRawText().Contains("entries", StringComparison.Ordinal))
+                throw new InvalidOperationException($"CI_CDP_PROTOCOL_PAGE_CALL_{navigationHistory.Status}_" +
+                    $"{navigationHistory.Detail}");
+            var explicitBrowserScope = await Protocol(ProtocolRequest(ChromeProtocolAction.CALL,
+                method: "Page.getNavigationHistory", parameters: "{}",
+                tab: verifiedTab.TabId, allowBrowserScope: true));
+            if (explicitBrowserScope.Status != ChromeProtocolCode.COMPLETED ||
+                explicitBrowserScope.Data is not { } browserScopeData ||
+                !browserScopeData.GetRawText().Contains("entries", StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    $"CI_CDP_EXPLICIT_BROWSER_SCOPE_PAGE_CALL_{explicitBrowserScope.Status}_" +
+                    $"{explicitBrowserScope.Detail}");
+            var unsupported = await Protocol(ProtocolRequest(ChromeProtocolAction.CALL,
+                method: "InventedMethod.nonexistent", parameters: "{}",
+                tab: verifiedTab.TabId));
+            if (unsupported.Status != ChromeProtocolCode.METHOD_NOT_SUPPORTED)
+                throw new InvalidOperationException($"CI_CDP_UNKNOWN_METHOD_NOT_REJECTED_{unsupported.Status}");
+            var invalidParameters = await Protocol(ProtocolRequest(ChromeProtocolAction.CALL,
+                method: "Page.getNavigationHistory", parameters: "{\"unknown_input\":true}",
+                tab: verifiedTab.TabId));
+            if (invalidParameters.Status != ChromeProtocolCode.PARAMETERS_INVALID)
+                throw new InvalidOperationException(
+                    $"CI_CDP_INVALID_PARAMETERS_DISPATCHED_{invalidParameters.Status}");
+            var browserWideDenied = await Protocol(ProtocolRequest(ChromeProtocolAction.CALL,
+                method: "Browser.grantPermissions", parameters: "{}"));
+            if (browserWideDenied.Status != ChromeProtocolCode.BROWSER_SCOPE_NOT_ALLOWED)
+                throw new InvalidOperationException(
+                    $"CI_CDP_BROWSER_WIDE_MUTATION_NOT_BLOCKED_{browserWideDenied.Status}");
+            var foregroundBlocked = await Protocol(ProtocolRequest(ChromeProtocolAction.CALL,
+                method: "Target.activateTarget",
+                parameters: JsonSerializer.Serialize(new { targetId = verifiedTab.TabId }),
+                tab: verifiedTab.TabId, allowBrowserScope: true));
+            if (foregroundBlocked.Status != ChromeProtocolCode.FOREGROUND_NOT_ALLOWED)
+                throw new InvalidOperationException($"CI_CDP_FOREGROUND_NOT_REJECTED_{foregroundBlocked.Status}");
+            var foreignProfile = await Protocol(ProtocolRequest(ChromeProtocolAction.CALL,
+                method: "Browser.getVersion", parameters: "{}", allowBrowserScope: true) with
+                { ExpectedProfile = selector + "-foreign-identity" });
+            if (foreignProfile.Status != ChromeProtocolCode.PROFILE_MISMATCH)
+                throw new InvalidOperationException($"CI_CDP_FOREIGN_PROFILE_NOT_REJECTED_{foreignProfile.Status}");
+            var foreignTarget = await Protocol(ProtocolRequest(ChromeProtocolAction.CALL,
+                method: "Page.getNavigationHistory", parameters: "{}",
+                tab: verifiedTab.TabId) with { BrowserWindowId = verifiedTab.BrowserWindowId + 1 });
+            if (foreignTarget.Status != ChromeProtocolCode.CONTEXT_MISMATCH)
+                throw new InvalidOperationException($"CI_CDP_FOREIGN_WINDOW_NOT_REJECTED_{foreignTarget.Status}");
+
+            // Event subscriptions are scoped to the currently verified target
+            // and delivered by the existing worker receive pump, not a new
+            // WebSocket or a focus-dependent native event listener.
+            var subscribed = await Protocol(ProtocolRequest(ChromeProtocolAction.SUBSCRIBE,
+                method: "Page.frameNavigated", tab: verifiedTab.TabId));
+            if (subscribed.Status != ChromeProtocolCode.COMPLETED ||
+                string.IsNullOrEmpty(subscribed.SubscriptionId))
+                throw new InvalidOperationException(
+                    $"CI_CDP_EVENT_SUBSCRIBE_{subscribed.Status}_{subscribed.Detail}");
+            var wildcard = await Protocol(ProtocolRequest(ChromeProtocolAction.SUBSCRIBE,
+                tab: verifiedTab.TabId, domain: "Page"));
+            if (wildcard.Status != ChromeProtocolCode.COMPLETED ||
+                wildcard.SubscriptionId == subscribed.SubscriptionId ||
+                wildcard.Method != "Page.*")
+                throw new InvalidOperationException(
+                    $"CI_CDP_DOMAIN_WILDCARD_SUBSCRIBE_{wildcard.Status}_{wildcard.Detail}");
+            var events = await Protocol(ProtocolRequest(ChromeProtocolAction.EVENTS) with
+            { SubscriptionId = subscribed.SubscriptionId });
+            if (events.Status != ChromeProtocolCode.COMPLETED || events.Events is null ||
+                events.LastSequence is null || events.Dropped is null)
+                throw new InvalidOperationException($"CI_CDP_EVENT_POLL_{events.Status}");
+            var foreignPoll = await Protocol(ProtocolRequest(ChromeProtocolAction.EVENTS) with
+            {
+                SubscriptionId = subscribed.SubscriptionId,
+                ExpectedProfile = selector + "-foreign-identity"
+            });
+            if (foreignPoll.Status != ChromeProtocolCode.PROFILE_MISMATCH)
+                throw new InvalidOperationException($"CI_CDP_EVENT_CROSS_PROFILE_{foreignPoll.Status}");
+            if (!WindowCatalog.TryParseId(windowId, out var ownedIdentity))
+                throw new InvalidOperationException("CI_CDP_OWNED_WINDOW_ID_INVALID");
+            var wrongWindowPoll = await Protocol(ProtocolRequest(ChromeProtocolAction.EVENTS) with
+            {
+                SubscriptionId = subscribed.SubscriptionId,
+                WindowId = WindowCatalog.FormatId(ownedIdentity with
+                    { Handle = ownedIdentity.Handle + 1 })
+            });
+            if (wrongWindowPoll.Status != ChromeProtocolCode.STALE_WINDOW)
+                throw new InvalidOperationException($"CI_CDP_EVENT_CROSS_WINDOW_{wrongWindowPoll.Status}");
+            var unsubscribed = await Protocol(ProtocolRequest(ChromeProtocolAction.UNSUBSCRIBE) with
+            { SubscriptionId = subscribed.SubscriptionId });
+            if (unsubscribed.Status != ChromeProtocolCode.COMPLETED)
+                throw new InvalidOperationException($"CI_CDP_EVENT_UNSUBSCRIBE_{unsubscribed.Status}");
+            var wildcardRemoved = await Protocol(ProtocolRequest(ChromeProtocolAction.UNSUBSCRIBE) with
+            { SubscriptionId = wildcard.SubscriptionId });
+            if (wildcardRemoved.Status != ChromeProtocolCode.COMPLETED)
+                throw new InvalidOperationException($"CI_CDP_EVENT_WILDCARD_UNSUBSCRIBE_{wildcardRemoved.Status}");
+            if (new[] { schema, targets, version, navigationHistory }
+                .Any(r => r.SessionGeneration != generation))
+                throw new InvalidOperationException("CI_CDP_PROTOCOL_CREATED_ANOTHER_SESSION");
+            Console.WriteLine("PASS chrome_ci.universal_protocol_browser_schema_targets_calls " +
+                "typed_failures_profile_isolation_foreground_block_one_socket");
 
             int rejectedBeforeDispatch = 0;
             for (int iteration = 0; iteration < Cycles; iteration++)
@@ -616,6 +773,26 @@ internal static class ChromeAcceptanceFixture
                     changed.EffectState != WindowEffectState.EFFECT_VERIFIED)
                     throw new InvalidOperationException($"CI_TAB_{action}_{changed.Status}_{changed.Detail}");
             }
+            // The generic protocol must address two independently identified
+            // targets through the same broker even after a second tab's own
+            // navigation history changes; there is no special-case profile
+            // name or hardcoded target identifier anywhere in this fixture.
+            RefreshOwnedProfile();
+            var secondTargetHistory = await Protocol(ProtocolRequest(ChromeProtocolAction.CALL,
+                method: "Page.getNavigationHistory", parameters: "{}",
+                tab: newTab, allowBrowserScope: true) with
+                { BrowserWindowId = openedWindowId, ExpectedUrl = secondUrl });
+            var initialTargetHistory = await Protocol(ProtocolRequest(ChromeProtocolAction.CALL,
+                method: "Page.getNavigationHistory", parameters: "{}",
+                tab: verifiedTab.TabId, allowBrowserScope: true));
+            if (secondTargetHistory.Status != ChromeProtocolCode.COMPLETED ||
+                initialTargetHistory.Status != ChromeProtocolCode.COMPLETED ||
+                secondTargetHistory.SessionGeneration != generation ||
+                initialTargetHistory.SessionGeneration != generation ||
+                secondTargetHistory.Data is null || initialTargetHistory.Data is null)
+                throw new InvalidOperationException($"CI_CDP_TWO_TARGETS_SAME_OWNER_" +
+                    $"second={secondTargetHistory.Status}_first={initialTargetHistory.Status}");
+            Console.WriteLine("PASS chrome_ci.generic_cdp_two_exact_targets_one_consent_socket");
             var closedReply = await ExchangeAsync(new(TabManage: new ChromeTabRequest(
                 windowId!, selector, ChromeTabAction.CLOSE, newTab,
                 Scope: ChromeTabScope.BROWSER,
@@ -755,6 +932,120 @@ internal static class ChromeAcceptanceFixture
         if (!brokenWire.Aborted)
             throw new InvalidOperationException("CI_CDP_PROTOCOL_FAILURE_NOT_CLOSED");
         Console.WriteLine("PASS chrome_ci.malformed_protocol_fails_closed");
+    }
+
+    private static async Task VerifyOversizedMessagesAsync()
+    {
+        // A malicious page or extension may emit a CDP event/result larger
+        // than our bounded receive buffer. Drain the WHOLE WebSocket message,
+        // fail the pending call with an explicit unknown outcome, then prove
+        // that a new small command still uses the same healthy socket. Never
+        // automatically replay the first command.
+        async Task VerifyOversizeAsync(bool oversizeEvent)
+        {
+            using var wire = new ScriptedWebSocket();
+            using var session = new WindowChromeCdp.Session(wire);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(7));
+            session.SetDeadline(deadline.Token);
+            Task<JsonElement> tooLarge = session.Call("Test.overflow", new { });
+            int firstId = (await wire.NextCommandAsync(deadline.Token)).GetProperty("id").GetInt32();
+            string payload = new string('x', 1_050_000);
+            wire.ReplyChunked(oversizeEvent
+                ? JsonSerializer.Serialize(new { method = "Page.frameNavigated",
+                    @params = new { payload } })
+                : JsonSerializer.Serialize(new { id = firstId,
+                    result = new { payload } }));
+            bool failedWithoutReplay = false;
+            try { _ = await tooLarge.WaitAsync(deadline.Token); }
+            catch (Exception e) when (e is JsonException or InvalidOperationException or IOException)
+            { failedWithoutReplay = true; }
+            if (!failedWithoutReplay || wire.Aborted || wire.SentCount != 1)
+                throw new InvalidOperationException("CI_CDP_OVERSIZE_FAILED_TO_DRAIN_" +
+                    (oversizeEvent ? "EVENT" : "RESULT"));
+
+            Task<JsonElement> recovered = session.Call("Test.afterOverflow", new { });
+            int afterId = (await wire.NextCommandAsync(deadline.Token)).GetProperty("id").GetInt32();
+            if (afterId == firstId)
+                throw new InvalidOperationException("CI_CDP_OVERSIZE_REUSED_COMMAND_ID");
+            wire.Reply(JsonSerializer.Serialize(new
+            { id = afterId, result = new { status = "recovered" } }));
+            if ((await recovered.WaitAsync(deadline.Token)).GetProperty("status").GetString() !=
+                "recovered" || wire.Aborted || wire.MaxConcurrentReads != 1 || wire.SentCount != 2)
+                throw new InvalidOperationException("CI_CDP_OVERSIZE_SOCKET_WAS_POISONED");
+        }
+        await VerifyOversizeAsync(oversizeEvent: false);
+        await VerifyOversizeAsync(oversizeEvent: true);
+        Console.WriteLine("PASS chrome_ci.oversized_event_and_result_drained " +
+            "pending_fail_closed_subsequent_command_same_socket_no_replay");
+    }
+
+    private static async Task VerifyEventSubscriptionsAsync()
+    {
+        using var wire = new ScriptedWebSocket();
+        using var session = new WindowChromeCdp.Session(wire);
+        const string first = "ci-profile-alpha-tab";
+        const string second = "ci-profile-beta-tab";
+        string alpha = session.Subscribe("Page.frameNavigated", first, 2);
+        string beta = session.Subscribe("Page.frameNavigated", second, 2);
+        string root = session.Subscribe("Browser.downloadProgress", null, 2);
+        string wildcard = session.Subscribe("Page.*", first, 2);
+
+        // Three CDP sessions share ONE physical receive loop. A tab-scoped
+        // observer must never see another tab's or browser's events.
+        wire.Reply("""{"method":"Page.frameNavigated","sessionId":"ci-profile-alpha-tab","params":{"step":1}}""");
+        wire.Reply("""{"method":"Page.frameNavigated","sessionId":"ci-profile-beta-tab","params":{"step":2}}""");
+        wire.Reply("""{"method":"Browser.downloadProgress","params":{"step":3}}""");
+        wire.Reply("""{"method":"Page.frameNavigated","sessionId":"ci-profile-alpha-tab","params":{"step":4}}""");
+        wire.Reply("""{"method":"Page.frameNavigated","sessionId":"ci-profile-alpha-tab","params":{"step":5}}""");
+        if (!await UntilAsync(() => session.ReadEvents(alpha, 0, 10).Events.Length == 2 &&
+            session.ReadEvents(beta, 0, 10).Events.Length == 1 &&
+            session.ReadEvents(root, 0, 10).Events.Length == 1 &&
+            session.ReadEvents(wildcard, 0, 10).Events.Length == 2,
+            TimeSpan.FromSeconds(3)))
+            throw new InvalidOperationException("CI_CDP_SUBSCRIPTION_DELIVERY_TIMEOUT");
+        var alphaPage = session.ReadEvents(alpha, 0, 2);
+        var betaPage = session.ReadEvents(beta, 0, 2);
+        var rootPage = session.ReadEvents(root, 0, 2);
+        var wildcardPage = session.ReadEvents(wildcard, 0, 2);
+        if (!alphaPage.Dropped || alphaPage.Events.Length != 2 ||
+            alphaPage.Events[0].Parameters?.GetProperty("step").GetInt32() != 4 ||
+            alphaPage.Events[1].Parameters?.GetProperty("step").GetInt32() != 5 ||
+            betaPage.Dropped || betaPage.Events[0].Parameters?.GetProperty("step").GetInt32() != 2 ||
+            rootPage.Dropped || rootPage.Events[0].Parameters?.GetProperty("step").GetInt32() != 3 ||
+            !wildcardPage.Dropped || wildcardPage.Events.Length != 2 ||
+            wildcardPage.Events[1].Method != "Page.frameNavigated" ||
+            rootPage.Events[0].SessionId is not null || wire.MaxConcurrentReads != 1 ||
+            wire.SentCount != 0)
+            throw new InvalidOperationException("CI_CDP_EVENT_PROFILE_ISOLATION_OR_OVERFLOW_FAILED");
+        var cursorPage = session.ReadEvents(alpha, alphaPage.Events[0].Sequence, 1);
+        if (cursorPage.Events.Length != 1 || cursorPage.Dropped ||
+            cursorPage.LastSequence != alphaPage.Events[1].Sequence)
+            throw new InvalidOperationException("CI_CDP_EVENT_CURSOR_PAGINATION_FAILED");
+
+        // Oversized event payloads drop with explicit gap evidence, not silent
+        // truncation that could be confused with a successful command result.
+        string giant = new string('x', 2200);
+        wire.Reply(JsonSerializer.Serialize(new
+        {
+            method = "Browser.downloadProgress", @params = new { content = giant }
+        }));
+        if (!await UntilAsync(() => session.ReadEvents(root, 0, 2).Dropped,
+            TimeSpan.FromSeconds(2)))
+            throw new InvalidOperationException("CI_CDP_OVERSIZED_EVENT_DROP_NOT_REPORTED");
+        if (!session.Unsubscribe(alpha) || session.Unsubscribe(alpha) ||
+            !session.Unsubscribe(beta) || !session.Unsubscribe(root) ||
+            !session.Unsubscribe(wildcard))
+            throw new InvalidOperationException("CI_CDP_SUBSCRIPTION_UNREGISTER_FAILED");
+        try
+        {
+            _ = session.ReadEvents(alpha, 0, 1);
+            throw new InvalidOperationException("CI_CDP_UNSUBSCRIBED_CURSOR_ACCEPTED");
+        }
+        catch (KeyNotFoundException) { }
+        if (wire.Aborted || wire.SentCount != 0 || wire.MaxConcurrentReads != 1)
+            throw new InvalidOperationException("CI_CDP_EVENTS_OPENED_SECOND_SOCKET");
+        Console.WriteLine("PASS chrome_ci.event_subscriptions_bounded_dropped_cursor " +
+            "two_scoped_sessions_one_socket_no_command_or_focus");
     }
 
     private static async Task VerifyFrameTreeFallbackAsync()
@@ -925,6 +1216,18 @@ internal static class ChromeAcceptanceFixture
             int midpoint = bytes.Length / 2;
             _inbox.Writer.TryWrite(new Frame(bytes[..midpoint], false));
             _inbox.Writer.TryWrite(new Frame(bytes[midpoint..], true));
+        }
+
+        internal void ReplyChunked(string json)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(json);
+            const int chunk = 8192; // Below the owned receive loop's buffer.
+            for (int offset = 0; offset < bytes.Length; offset += chunk)
+            {
+                int length = Math.Min(chunk, bytes.Length - offset);
+                _inbox.Writer.TryWrite(new Frame(bytes.AsSpan(offset, length).ToArray(),
+                    offset + length == bytes.Length));
+            }
         }
 
         public override async Task<WebSocketReceiveResult> ReceiveAsync(ArraySegment<byte> buffer,

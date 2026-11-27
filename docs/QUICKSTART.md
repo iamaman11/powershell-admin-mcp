@@ -31,8 +31,9 @@ are needed for the native operations below.
 | Activate, move, resize, minimize, or close an exact window | `windows.manage_window` |
 | Find and connect a Chrome profile through its own consent dialog | `windows.chrome_connection` |
 | List, open, navigate, reload or close exact Chrome tabs | `windows.chrome_tab` |
+| Discover and call any command supported by the connected Chrome CDP protocol, or read bounded event subscriptions | `windows.chrome_cdp` |
 
-These 23 tools share native Windows identities and typed results. There is no
+These 24 tools share native Windows identities and typed results. There is no
 arbitrary path, UI-role or administrator-cmdlet allowlist. Windows ACLs, desktop
 sessions, Chrome's permission dialog, and exact resource identity still apply.
 
@@ -326,6 +327,59 @@ the connection; it does **not** attest to the destination tab's Chrome profile.
 If a native window-to-tab mapping is required, keep the default route without
 `browser_window_id`. With an uncertain effect, perform a read-only check;
 do not automatically repeat the action.
+
+### Universal Chrome DevTools Protocol
+
+`windows.chrome_cdp` exposes the **runtime protocol of the already consented
+Chrome**, through the same USER-session broker and the same CDP WebSocket as
+`windows.chrome_tab`. It does not launch another debugger, use a different
+profile, or approve Chrome's native permission prompt. Begin with a successful
+`windows.chrome_connection(STATUS)`; provide an exact `window_id` and
+`expected_profile` for every subsequent call. An unavailable connection
+returns a typed failure instead of requesting foreground focus.
+
+| `action` | Purpose |
+| --- | --- |
+| `DESCRIBE` | Page through available CDP domains, or supply `domain` for its command/event names. Supply `method` for its full schema, including argument definitions. |
+| `TARGETS` | List exact target IDs and CDP window IDs for a confirmed browser/window; paginate with `offset` and `page_size`. |
+| `CALL` | Call a command advertised by that Chrome version, with a JSON object in `parameters_json`, optionally scoped to exact `tab_id`, `browser_window_id`, `expected_origin` and `expected_url`. |
+| `SUBSCRIBE` | Subscribe to a schema-defined CDP event, or to a domain wildcard such as `Page.*`. |
+| `EVENTS` | Read a bounded event page using `subscription_id` and `after_sequence`; `dropped=true` warns of overflow. |
+| `UNSUBSCRIBE` | Release the subscription. |
+
+For example, `DESCRIBE` with `domain=Browser` lists its methods; `CALL` with
+`method=Browser.getVersion, parameters_json={}, allow_browser_scope=true`
+reads the browser version. Any `CALL` or `SUBSCRIBE` without `tab_id` requires
+this explicit browser-wide authority, including read-only browser methods.
+`CALL` with `method=Page.getNavigationHistory, tab_id=<verified tab>,
+parameters_json={}` reads navigation history from that target session.
+Use `DESCRIBE(method=...)` to inspect the actual method's parameters, rather
+than guessing what a different Chrome version supports. Each result embeds
+the CDP response in typed `data`; event records are bounded and paginated.
+
+The default is background-oriented and fail-closed: commands known to bring a
+window forward, plus arbitrary JavaScript execution that can do so, require
+explicit `allow_foreground=true`. All unscoped browser commands require
+`allow_browser_scope=true`. These flags are **authority**, not a guarantee
+that an arbitrary web page or future CDP method cannot cause visible effects;
+for strict zero-focus automation, use read-only commands and methods with
+verified background semantics. `confirm=true` is required for `CALL` and
+subscription changes. CDP acknowledgement yields `effect_state=PROVIDER_ACK_ONLY`,
+not independently verified application state. `EFFECT_UNKNOWN` requires a
+fresh read-only check; never blindly reissue an effectful call.
+
+This release has bounded inline transfer: request parameters up to 16 KiB,
+serialized responses up to 64 KiB and event parameters up to 2048 characters.
+Oversized results return `RESULT_TOO_LARGE`; oversized events are flagged
+with `dropped=true`. A WebSocket message larger than 1 MiB is drained without
+tearing down the approved socket, but any affected pending command has an
+unknown effect. Bulk network bodies, traces, heap dumps and large DOM
+snapshots still need a future chunked transfer contract; this initial bridge
+is not lossless at those data volumes.
+
+The protocol schema and connection lifetime belong to the running Chrome.
+After its socket is lost, `USER_BROWSER` may require native consent again;
+neither the tool nor its update manager bypasses browser security.
 
 Internal Chrome pages, OS file pickers and privileged prompts may still require
 the existing native UIA/foreground consent policy rather than a CDP action.

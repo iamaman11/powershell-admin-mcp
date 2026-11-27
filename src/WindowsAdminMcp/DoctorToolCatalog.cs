@@ -20,7 +20,7 @@ internal static class DoctorCatalog
     private static readonly Type[] RegisteredTypes =
     [
         typeof(AdminTools), typeof(WindowTools), typeof(ChromeConnectionTools),
-        typeof(ChromeTabTools),
+        typeof(ChromeTabTools), typeof(ChromeProtocolTools),
         typeof(UpdateTools), typeof(FileTools), typeof(SystemTools),
         typeof(TcpConnectionTools), typeof(ExpertDiagnosticsTools),
         typeof(NetworkProbeTools), typeof(NativeAdminTools)
@@ -30,7 +30,7 @@ internal static class DoctorCatalog
     [
         "powershell_exec", "powershell_job", "powershell_screenshot",
         "powershell_status", "powershell_update", "windows.admin_action",
-        "windows.capture_window", "windows.chrome_connection", "windows.chrome_tab", "windows.file_acl",
+        "windows.capture_window", "windows.chrome_cdp", "windows.chrome_connection", "windows.chrome_tab", "windows.file_acl",
         "windows.file_manage", "windows.file_query", "windows.file_read_chunk",
         "windows.file_write", "windows.inspect_window", "windows.invoke_element",
         "windows.invoke_locator", "windows.list_windows", "windows.manage_window",
@@ -67,8 +67,8 @@ internal static class DoctorCatalog
     }
 
     internal static bool IsComplete(DoctorToolCatalog observed) =>
-        observed.ToolCount == ExpectedNames.Length && observed.StructuredToolCount == 22 &&
-        observed.NativeDtoResultCount == 21 &&
+        observed.ToolCount == ExpectedNames.Length && observed.StructuredToolCount == 23 &&
+        observed.NativeDtoResultCount == 22 &&
         observed.ToolNames.SequenceEqual(ExpectedNames, StringComparer.Ordinal) &&
         RegisteredTypes.All(type => type.GetCustomAttributesData().Any(a =>
             a.AttributeType.Name == "McpServerToolTypeAttribute"));

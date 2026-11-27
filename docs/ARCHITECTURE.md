@@ -7,7 +7,7 @@ acceptance matrix live in [Issue #56](https://github.com/iamaman11/powershell-ad
 
 | Owner | Responsibility | Implementation |
 | --- | --- | --- |
-| MCP frontend | Typed tool schemas, validation, dispatch and JSON results | `AdminTools`, `WindowTools`, `ChromeConnectionTools`, `ChromeTabTools`, `FileTools`, `SystemTools`, `TcpConnectionTools`, `ExpertDiagnosticsTools`, `NetworkProbeTools`, `NativeAdminTools`, `UpdateTools` |
+| MCP frontend | Typed tool schemas, validation, dispatch and JSON results | `AdminTools`, `WindowTools`, `ChromeConnectionTools`, `ChromeTabTools`, `ChromeProtocolTools`, `FileTools`, `SystemTools`, `TcpConnectionTools`, `ExpertDiagnosticsTools`, `NetworkProbeTools`, `NativeAdminTools`, `UpdateTools` |
 | SYSTEM service | SQLite admission, encrypted durable PowerShell queue, idempotency, cancellation and recovery | `AdminService`, `JobCoordinator`, `StoreSchema` |
 | USER worker | UIA, Win32, WGC, user desktop and session-bound operations | `UserWorker`, `WindowInspector`, `WindowAction`, `WindowCapture` |
 | Chrome child | Native consented CDP connection, browser context/window/profile binding and background tab actions | `WindowChromeBroker`, `WindowChromeCdp` and its partial-class modules |
@@ -24,9 +24,9 @@ frontend, not a separate permanent browser manager. No extra HTTP API.
 
 ## Code boundaries and public schemas
 
-The registered MCP surface lives only in `Program.cs` (`stdio`): **23 tools**.
+The registered MCP surface lives only in `Program.cs` (`stdio`): **24 tools**.
 Each tool declares typed arguments and a result DTO. `powershell_screenshot`
-deliberately returns image content; the other 22 tools expose structured
+deliberately returns image content; the other 23 tools expose structured
 output schemas. CI reads the *actual* SDK-generated `tools/list` and checks
 the exact inventory, structured outputs and a bounded 80-KiB catalog.
 
@@ -42,11 +42,12 @@ Keep these responsibilities separate when adding functionality:
 | `WindowChromeConnection.cs` | One authorized socket owner, Chrome consent and profile/endpoint checks |
 | `ChromeManagedProfile.cs` | Strict managed profile identifiers and per-user data-directory boundary |
 | `ChromeTabTools.cs`, `WindowChromeTabManagement.cs` | Typed tab lifecycle, audited intent, independent effect verification |
+| `ChromeProtocolTools.cs`, `WindowChromeProtocol.cs` | Version-aware generic CDP schema discovery, JSON schema checks, browser/tab scope, explicit focus authority, audited command dispatch, bounded subscription results |
 | `WindowChromeTabMapping.cs` | Exact native window-to-CDP target association |
 | `WindowChromeTabInspection.cs` | Read-only accessible document/tab snapshots |
 | `WindowChromeTabActions.cs` | Pre-dispatch identity checks, one effectful input and postcondition observation |
 | `WindowChromeUiaBridge.cs` | Optional semantic UIA-to-background-CDP bridge |
-| `WindowChromeCdp.cs` | Shared WebSocket reader, pending command map, per-call deadlines and late-reply discard |
+| `WindowChromeCdp.cs` | Shared WebSocket reader, pending command map, per-call deadlines, late-reply discard and bounded event subscription queues |
 
 `WindowChromeCdp` remains a *single partial class*, not multiple CDP owners.
 Splitting source files does not create another socket, process, state store or
@@ -60,6 +61,21 @@ fresh native window and profile identity for each operation. An explicit
 mode switch is rejected while the prior connection is active. `OPEN` has no
 CDP-native target-window selector, so it requires one Chrome window and
 verifies the new target's browser window identity after creation.
+
+The generic `windows.chrome_cdp` entry point derives command/event definitions
+from the running browser's `/json/protocol` schema, cached only for the current
+broker generation. No separate CDP transport or static method whitelist is
+maintained. `DESCRIBE`, `TARGETS`, `CALL`, `SUBSCRIBE`, `EVENTS` and `UNSUBSCRIBE`
+are one typed contract; CDP arguments remain a bounded JSON object checked
+against the live protocol signature. By default target selection requires a
+unique native window mapping. An explicit browser-scoped opt-in may select
+an exact `(browser_window_id, tab_id)` pair through CDP even when native HWND
+geometry is ambiguous; the verified native window/profile remains the
+**anchor**, not an assertion about a destination tab's different profile.
+Focus-changing commands require separate `allow_foreground` authority. The
+same ReceiveLoop handles subscription events with bounded queues, paging and
+overflow indicators. A CDP command acknowledgement is not external site-state
+verification; dropped or unknown effects are never automatically replayed.
 
 The legacy `windows.system_query(kind=TCP_CONNECTIONS)` wire result is unchanged. The
 dedicated `windows.tcp_connections` result projects exactly seven fields and
