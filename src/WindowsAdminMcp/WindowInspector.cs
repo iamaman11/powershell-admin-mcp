@@ -77,7 +77,16 @@ public sealed record WindowInspectResult(
     [property: JsonPropertyName("session_generation"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? SessionGeneration = null,
     [property: JsonPropertyName("cdp_mapping_failure"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] WindowCdpMappingFailure? CdpMappingFailure = null,
     [property: JsonPropertyName("cdp_title_candidates"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? CdpTitleCandidates = null,
-    [property: JsonPropertyName("cdp_fingerprint_candidates"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? CdpFingerprintCandidates = null);
+    [property: JsonPropertyName("cdp_fingerprint_candidates"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? CdpFingerprintCandidates = null)
+{
+    // A failed native HWND-to-CDP mapping is not a lost connection. Advertise
+    // the already-supported explicit, read-only browser-scoped discovery path.
+    [JsonPropertyName("next_step")]
+    public ChromeTabNextStep NextStep =>
+        (Status is WindowInspectCode.CDP_TARGET_NOT_FOUND or WindowInspectCode.CDP_TARGET_AMBIGUOUS) &&
+        (Detail is "CDP_WINDOW_NO_MATCH" or "CDP_WINDOW_NOT_UNIQUE")
+            ? ChromeTabNextStep.LIST_BROWSER_TABS : ChromeTabNextStep.NONE;
+}
 
 internal sealed record WindowInspectRequest(
     string WindowId, int MaxDepth, int MaxElements,

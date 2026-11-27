@@ -1902,8 +1902,16 @@ Check(mappingWire.Contains("\"cdp_mapping_failure\":\"FINGERPRINT_AMBIGUOUS\"",
         StringComparison.Ordinal) &&
     mappingWire.Contains("\"cdp_title_candidates\":0",StringComparison.Ordinal) &&
     mappingWire.Contains("\"cdp_fingerprint_candidates\":9",StringComparison.Ordinal) &&
+    mappingWire.Contains("\"next_step\":\"LIST_BROWSER_TABS\"",StringComparison.Ordinal) &&
     !mappingWire.Contains("targetIds",StringComparison.OrdinalIgnoreCase),
     "chrome.cdp_window_mapping_failure_typed_bounded_metadata_without_target_leak");
+Check(new WindowInspectResult(WindowInspectCode.CDP_TARGET_AMBIGUOUS, [],
+        Detail:"CDP_WINDOW_NOT_UNIQUE").NextStep == ChromeTabNextStep.LIST_BROWSER_TABS &&
+    new WindowInspectResult(WindowInspectCode.CDP_TARGET_NOT_FOUND, []).NextStep ==
+        ChromeTabNextStep.NONE &&
+    new WindowInspectResult(WindowInspectCode.CDP_CONTEXT_MISMATCH, [],
+        Detail:"TAB_URL_MISMATCH").NextStep == ChromeTabNextStep.NONE,
+    "chrome.inspect_browser_scope_guidance_only_for_native_window_mapping_failure");
 string tabMappingWire=System.Text.Json.JsonSerializer.Serialize(new ChromeTabResult(
     ChromeTabCode.TARGET_NOT_FOUND, ChromeTabAction.LIST,
     Detail:"CDP_WINDOW_NO_MATCH", CdpMappingFailure:WindowCdpMappingFailure.BOUNDS_MISMATCH,
