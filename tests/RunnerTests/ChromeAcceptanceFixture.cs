@@ -828,7 +828,16 @@ internal static class ChromeAcceptanceFixture
             }
             serverStop.Cancel();
             server.Stop();
-            try { await accepting; } catch (OperationCanceledException) { }
+            try { await accepting; }
+            catch (OperationCanceledException) { }
+            catch (IOException error) when (serverStop.IsCancellationRequested &&
+                error.InnerException is SocketException
+                { SocketErrorCode: SocketError.ConnectionReset })
+            {
+                // A test-owned Chrome process can abort its in-flight HTTP
+                // request when killed during teardown. The server's transport
+                // has no remaining acceptance effect after cancellation.
+            }
             try { Directory.Delete(root, recursive: true); }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             { /* Chrome may still be releasing test-only files. */ }
