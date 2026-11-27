@@ -346,7 +346,7 @@ internal static partial class WindowChromeCdp
         {
             response = await cdp.Call(request.Method!, parameters, sessionId);
         }
-        catch (InvalidOperationException error) when (error.Message == "CDP_COMMAND_REJECTED")
+        catch (InvalidOperationException rejected) when (rejected.Message == "CDP_COMMAND_REJECTED")
         {
             // Chrome rejected a *dispatched* request. The generic bridge cannot
             // prove whether any side effect preceded that rejection.
