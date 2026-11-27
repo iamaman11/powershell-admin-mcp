@@ -19,7 +19,7 @@ public sealed class ChromeProtocolTools
         string? expected_url = null, string? domain = null,
         int offset = 0, int page_size = 50, string? subscription_id = null,
         long after_sequence = 0, bool allow_foreground = false,
-        bool allow_browser_scope = false, bool confirm = true,
+        bool allow_browser_scope = false, bool confirm = false,
         CancellationToken cancellationToken = default)
     {
         var request = new ChromeProtocolRequest(window_id, expected_profile, action,

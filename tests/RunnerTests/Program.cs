@@ -1749,12 +1749,12 @@ var protocolProviderAck = new ChromeProtocolResult(ChromeProtocolCode.COMPLETED,
 Check(WindowChromeCdp.ValidProtocolRequest(protocolDescribe) &&
     WindowChromeCdp.ValidProtocolRequest(protocolVersion) &&
     WindowChromeCdp.ValidProtocolRequest(protocolSubscription) &&
-    !WindowChromeCdp.ValidProtocolRequest(protocolDescribe with {WindowId:"invalid"}) &&
-    !WindowChromeCdp.ValidProtocolRequest(protocolDescribe with {ExpectedProfile:" "}) &&
-    !WindowChromeCdp.ValidProtocolRequest(protocolDescribe with {PageSize:0}) &&
-    !WindowChromeCdp.ValidProtocolRequest(protocolDescribe with {PageSize:100000}) &&
-    !WindowChromeCdp.ValidProtocolRequest(protocolDescribe with {Action:(ChromeProtocolAction)999}) &&
-    !WindowChromeCdp.ValidProtocolRequest(protocolVersion with {Method:null}) &&
+    !WindowChromeCdp.ValidProtocolRequest(protocolDescribe with {WindowId="invalid"}) &&
+    !WindowChromeCdp.ValidProtocolRequest(protocolDescribe with {ExpectedProfile=" "}) &&
+    !WindowChromeCdp.ValidProtocolRequest(protocolDescribe with {PageSize=0}) &&
+    !WindowChromeCdp.ValidProtocolRequest(protocolDescribe with {PageSize=100000}) &&
+    !WindowChromeCdp.ValidProtocolRequest(protocolDescribe with {Action=(ChromeProtocolAction)999}) &&
+    !WindowChromeCdp.ValidProtocolRequest(protocolVersion with {Method=null}) &&
     new ChromeBrokerRequest(Protocol:protocolDescribe).Valid &&
     new ChromeBrokerRequest(Protocol:protocolVersion).Valid &&
     !new ChromeBrokerRequest(Protocol:protocolVersion, Action:chromeAction).Valid &&
