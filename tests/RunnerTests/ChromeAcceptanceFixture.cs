@@ -283,12 +283,12 @@ internal static class ChromeAcceptanceFixture
                 !schemaData.GetRawText().Contains("getVersion", StringComparison.Ordinal))
                 throw new InvalidOperationException($"CI_CDP_SCHEMA_DISCOVERY_{schema.Status}_" +
                     $"{schema.Detail}");
-            var targets = await Protocol(ProtocolRequest(ChromeProtocolAction.TARGETS));
-            if (targets.Status != ChromeProtocolCode.COMPLETED ||
-                targets.Data is not { } targetData ||
+            var protocolTargets = await Protocol(ProtocolRequest(ChromeProtocolAction.TARGETS));
+            if (protocolTargets.Status != ChromeProtocolCode.COMPLETED ||
+                protocolTargets.Data is not { } targetData ||
                 !targetData.GetRawText().Contains(verifiedTab.TabId, StringComparison.Ordinal))
-                throw new InvalidOperationException($"CI_CDP_PROTOCOL_TARGETS_{targets.Status}_" +
-                    $"{targets.Detail}");
+                throw new InvalidOperationException($"CI_CDP_PROTOCOL_TARGETS_{protocolTargets.Status}_" +
+                    $"{protocolTargets.Detail}");
             var browserTargets = await Protocol(ProtocolRequest(ChromeProtocolAction.TARGETS,
                 allowBrowserScope: true));
             if (browserTargets.Status != ChromeProtocolCode.COMPLETED ||
@@ -405,7 +405,7 @@ internal static class ChromeAcceptanceFixture
             { SubscriptionId = wildcard.SubscriptionId });
             if (wildcardRemoved.Status != ChromeProtocolCode.COMPLETED)
                 throw new InvalidOperationException($"CI_CDP_EVENT_WILDCARD_UNSUBSCRIBE_{wildcardRemoved.Status}");
-            if (new[] { schema, targets, version, navigationHistory }
+            if (new[] { schema, protocolTargets, version, navigationHistory }
                 .Any(r => r.SessionGeneration != generation))
                 throw new InvalidOperationException("CI_CDP_PROTOCOL_CREATED_ANOTHER_SESSION");
             Console.WriteLine("PASS chrome_ci.universal_protocol_browser_schema_targets_calls " +
