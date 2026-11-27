@@ -11,7 +11,7 @@ using ModelContextProtocol.Server;
 public sealed class ChromeProtocolTools
 {
     [McpServerTool(Name = "windows.chrome_cdp", UseStructuredContent = true),
-     Description("Full consented Chrome CDP: DESCRIBE/TARGETS/CALL/SUBSCRIBE/EVENTS/UNSUBSCRIBE. Live method schema; exact window/profile. Browser-wide and foreground actions require explicit opt-in. Never replay unknown effects.")]
+     Description("Consented CDP: DESCRIBE/TARGETS/CALL/SUBSCRIBE/EVENTS/UNSUBSCRIBE. Live schema, exact identity, explicit browser/focus opt-ins. No effect replay.")]
     public static async Task<ChromeProtocolResult> ChromeCdp(string window_id,
         string expected_profile, ChromeProtocolAction action,
         string? method = null, string? parameters_json = null, string? tab_id = null,

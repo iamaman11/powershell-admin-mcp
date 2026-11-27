@@ -103,7 +103,7 @@ internal sealed record ChromeConnectionRequest(string WindowId, string ExpectedP
 public sealed class ChromeConnectionTools
 {
     [McpServerTool(Name = "windows.chrome_connection", UseStructuredContent = true),
-     Description("LIST/REQUEST/STATUS/DISCONNECT native Chrome CDP. USER_BROWSER requires genuine Chrome consent; MANAGED_BROWSER uses a separate profile. Never activates by default; activate_window_for_consent explicitly opts into foreground. Ambiguous profiles require exact window_id. CONNECTED proves transport, not a tab; verify via chrome_tab LIST.")]
+     Description("Chrome CDP LIST/REQUEST/STATUS/DISCONNECT. USER_BROWSER needs Chrome consent; MANAGED_BROWSER has its own profile. No default foreground activation. Verify tabs separately.")]
     public static async Task<ChromeConnectionResult> Connection(ChromeConnectionAction action,
         string? window_id = null, string? expected_profile = null,
         bool activate_window_for_consent = false,
