@@ -22,6 +22,12 @@ internal static partial class WindowChromeCdp
     private static ClientWebSocket? _tabSocket;
     private static Session? _tabSession;
     private static Uri? _tabEndpoint;
+    // Retain only the exact endpoint of a live, previously approved session.
+    // A managed Chrome may reconnect to it without a new browser consent.
+    // USER_BROWSER is intentionally excluded: Chrome owns every new prompt.
+    private static Uri? _lastConnectedEndpoint;
+    private static ChromeConnectionMode _lastConnectedMode = ChromeConnectionMode.USER_BROWSER;
+    private static string? _lastConnectedManagedProfileId;
     private static ClientWebSocket? _pendingSocket;
     private static Task? _pendingConnect;
     private static CancellationTokenSource? _pendingDeadline;
@@ -55,6 +61,23 @@ internal static partial class WindowChromeCdp
                 ChromeConnectionNextAction.SHOW_CHROME_FOR_CONSENT,
             _ => ChromeConnectionNextAction.RETRY_CONNECTION
         };
+
+    internal static bool MayReconnectManagedBrowser(ChromeConnectionMode mode,
+        bool hadConnection, bool sameManagedProfile,
+        Uri? lastEndpoint, Uri? currentEndpoint) =>
+        mode == ChromeConnectionMode.MANAGED_BROWSER && hadConnection &&
+        sameManagedProfile && lastEndpoint is not null && lastEndpoint == currentEndpoint;
+
+    internal static ChromeConnectionNextAction RecoveryNextAction(ChromeConnectionState state,
+        ChromeConnectionFailureReason? reason, ChromeConnectionMode mode, bool consentWindowReady) =>
+        mode == ChromeConnectionMode.USER_BROWSER && !consentWindowReady &&
+        state is ChromeConnectionState.NOT_REQUESTED or ChromeConnectionState.CONNECTION_LOST
+            ? ChromeConnectionNextAction.SHOW_CHROME_FOR_CONSENT
+            : ConnectionNextAction(state, reason);
+
+    private static bool ConsentWindowReady(IntPtr hwnd) =>
+        hwnd != IntPtr.Zero && IsWindowVisible(hwnd) && !IsIconic(hwnd) &&
+        GetForegroundWindow() == hwnd;
 
     internal static bool CdpTransportFailure(Exception e) => e is
         WebSocketException or IOException or JsonException ||
@@ -208,6 +231,9 @@ internal static partial class WindowChromeCdp
                 _tabSession = new Session(socket);
                 _sessionGeneration = Guid.NewGuid().ToString("N");
                 _hadConnection = true;
+                _lastConnectedEndpoint = endpoint;
+                _lastConnectedMode = _sourceMode;
+                _lastConnectedManagedProfileId = _managedProfileId;
                 _lastFailure = null;
                 return ChromeConnectionState.CONNECTED;
             }
@@ -280,12 +306,20 @@ internal static partial class WindowChromeCdp
         if (request.Action == ChromeConnectionAction.STATUS)
         {
             ProbeTabConnection();
-            if (_pendingConnect is null && !TabConnected)
+            if (_pendingConnect is null && !TabConnected &&
+                !MayReconnectManagedBrowser(request.Mode, _hadConnection,
+                    _lastConnectedMode == request.Mode &&
+                    _lastConnectedManagedProfileId == request.ManagedProfileId,
+                    _lastConnectedEndpoint, _lastConnectedEndpoint))
             {
                 if (_hadConnection && _lastLossReason is null)
                     _lastLossReason = ChromeConnectionFailureReason.SOCKET_CLOSED;
-                return new(ChromeConnectionCode.OK, MissingConnectionState(_hadConnection),
-                    ConnectionNextAction(MissingConnectionState(_hadConnection), _lastFailure), profile,
+                var missing = MissingConnectionState(_hadConnection);
+                bool consentWindowReady = request.Mode != ChromeConnectionMode.USER_BROWSER ||
+                    WindowCatalog.ResolveId(request.WindowId, self.SessionId, out var window) ==
+                    WindowResolveCode.OK && ConsentWindowReady(window);
+                return new(ChromeConnectionCode.OK, missing,
+                    RecoveryNextAction(missing, _lastFailure, request.Mode, consentWindowReady), profile,
                     FailureReason: _lastFailure ?? (_hadConnection
                         ? ChromeConnectionFailureReason.SOCKET_CLOSED : null),
                     LastLossReason: _lastLossReason);
@@ -300,7 +334,14 @@ internal static partial class WindowChromeCdp
                 ManagedProfileId: request.ManagedProfileId);
         if (WindowCatalog.ResolveId(request.WindowId, self.SessionId, out var hwnd) != WindowResolveCode.OK)
             return new(ChromeConnectionCode.STALE_WINDOW, ChromeConnectionState.NOT_REQUESTED);
-        var state = ConnectionState(endpoint!, request.Action == ChromeConnectionAction.REQUEST,
+        bool autoManagedReconnect = request.Action == ChromeConnectionAction.STATUS &&
+            _pendingConnect is null && !TabConnected &&
+            MayReconnectManagedBrowser(request.Mode, _hadConnection,
+                _lastConnectedMode == request.Mode &&
+                _lastConnectedManagedProfileId == request.ManagedProfileId,
+                _lastConnectedEndpoint, endpoint);
+        var state = ConnectionState(endpoint!, request.Action == ChromeConnectionAction.REQUEST ||
+            autoManagedReconnect,
             hwnd, retry: request.Action == ChromeConnectionAction.REQUEST,
             activateWindowForConsent: request.ActivateWindowForConsent);
         var reportedState = request.Mode == ChromeConnectionMode.MANAGED_BROWSER &&

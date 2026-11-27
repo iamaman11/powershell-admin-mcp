@@ -1539,6 +1539,34 @@ Check(WindowChromeCdp.MissingConnectionState(false) == ChromeConnectionState.NOT
     System.Text.Json.JsonSerializer.Deserialize<ChromeConnectionResult>(lostWire, PipeWire.Json)?.LastLossReason ==
         ChromeConnectionFailureReason.SOCKET_CLOSED,
     "chrome.lost_approved_connection_has_typed_reason_not_not_requested");
+var approvedManagedEndpoint = new Uri("ws://127.0.0.1:46669/devtools/browser/owned");
+var replacedManagedEndpoint = new Uri("ws://127.0.0.1:46670/devtools/browser/owned");
+Check(WindowChromeCdp.MayReconnectManagedBrowser(ChromeConnectionMode.MANAGED_BROWSER,
+        true, true, approvedManagedEndpoint, approvedManagedEndpoint) &&
+    !WindowChromeCdp.MayReconnectManagedBrowser(ChromeConnectionMode.USER_BROWSER,
+        true, true, approvedManagedEndpoint, approvedManagedEndpoint) &&
+    !WindowChromeCdp.MayReconnectManagedBrowser(ChromeConnectionMode.MANAGED_BROWSER,
+        false, true, approvedManagedEndpoint, approvedManagedEndpoint) &&
+    !WindowChromeCdp.MayReconnectManagedBrowser(ChromeConnectionMode.MANAGED_BROWSER,
+        true, false, approvedManagedEndpoint, approvedManagedEndpoint) &&
+    !WindowChromeCdp.MayReconnectManagedBrowser(ChromeConnectionMode.MANAGED_BROWSER,
+        true, true, approvedManagedEndpoint, replacedManagedEndpoint) &&
+    !WindowChromeCdp.MayReconnectManagedBrowser(ChromeConnectionMode.MANAGED_BROWSER,
+        true, true, null, approvedManagedEndpoint),
+    "chrome.managed_auto_reconnect_requires_prior_identity_and_exact_endpoint");
+Check(WindowChromeCdp.RecoveryNextAction(ChromeConnectionState.CONNECTION_LOST,
+        ChromeConnectionFailureReason.SOCKET_CLOSED,
+        ChromeConnectionMode.USER_BROWSER, false) == ChromeConnectionNextAction.SHOW_CHROME_FOR_CONSENT &&
+    WindowChromeCdp.RecoveryNextAction(ChromeConnectionState.NOT_REQUESTED,
+        null, ChromeConnectionMode.USER_BROWSER, false) ==
+        ChromeConnectionNextAction.SHOW_CHROME_FOR_CONSENT &&
+    WindowChromeCdp.RecoveryNextAction(ChromeConnectionState.CONNECTION_LOST,
+        ChromeConnectionFailureReason.SOCKET_CLOSED,
+        ChromeConnectionMode.USER_BROWSER, true) == ChromeConnectionNextAction.RETRY_CONNECTION &&
+    WindowChromeCdp.RecoveryNextAction(ChromeConnectionState.CONNECTION_LOST,
+        ChromeConnectionFailureReason.SOCKET_CLOSED,
+        ChromeConnectionMode.MANAGED_BROWSER, false) == ChromeConnectionNextAction.RETRY_CONNECTION,
+    "chrome.native_user_consent_remains_explicit_while_managed_recovery_is_typed");
 Check(WindowChromeCdp.CdpTransportFailure(new IOException("CDP_SOCKET_CLOSED")) &&
     !WindowChromeCdp.CdpTransportFailure(new OperationCanceledException()) &&
     WindowChromeCdp.CdpTransportFailure(new System.Text.Json.JsonException("bad payload")) &&

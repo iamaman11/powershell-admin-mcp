@@ -36,6 +36,48 @@ internal static partial class WindowChromeCdp
             _ => throw new ArgumentOutOfRangeException(nameof(direction))
         };
 
+    private static async Task<(bool Visible, double X, double Y)> ViewportPoint(
+        Session cdp, string sessionId, int backendNodeId)
+    {
+        var box = await cdp.Call("DOM.getBoxModel", new { backendNodeId }, sessionId);
+        var metrics = await cdp.Call("Page.getLayoutMetrics", new { }, sessionId);
+        bool visible = TryPoint(box.GetProperty("model").GetProperty("content"),
+            metrics.GetProperty("cssVisualViewport"), out double x, out double y);
+        return (visible, x, y);
+    }
+
+    private static async Task<(bool Visible, double X, double Y)> PointAfterScroll(
+        Session cdp, string sessionId, int backendNodeId, CancellationToken cancellationToken)
+    {
+        // CSS scroll-behavior:smooth may settle asynchronously. Only poll the
+        // viewport; never dispatch a second scroll or click to compensate.
+        var point = await ViewportPoint(cdp, sessionId, backendNodeId);
+        for (int attempt = 0; !point.Visible && attempt < 5; attempt++)
+        {
+            await Task.Delay(60, cancellationToken);
+            point = await ViewportPoint(cdp, sessionId, backendNodeId);
+        }
+        return point;
+    }
+
+    // Scrolling can trigger lazy-rendering or replace a React control while
+    // retaining the page loader. Do not click an element whose fresh AX
+    // identity no longer equals the inspected c1 reference.
+    private static bool SameAxIdentity(JsonElement ax, string nativeWindowId,
+        string tabId, string url, string loaderId, TabElementRef element)
+    {
+        var matches = ax.GetProperty("nodes").EnumerateArray().Where(node =>
+            node.TryGetProperty("backendDOMNodeId", out var backend) &&
+            backend.ValueKind == JsonValueKind.Number &&
+            backend.GetInt32() == element.BackendId &&
+            !(node.TryGetProperty("ignored", out var ignored) && ignored.GetBoolean()) &&
+            !AxDisabled(node) &&
+            string.Equals(ElementDigest(nativeWindowId, tabId, element.BackendId,
+                loaderId, url, AxValue(node, "role"), AxValue(node, "name")),
+                element.Digest, StringComparison.OrdinalIgnoreCase)).Take(2);
+        return matches.Count() == 1;
+    }
+
     // One CDP pointer gesture, with all target/viewport/identity checks made
     // by the caller before this first effectful command. No desktop input.
     private static async Task DispatchPointer(Session cdp, string sessionId,
@@ -280,6 +322,7 @@ internal static partial class WindowChromeCdp
         WindowActionRequest request, TabElementRef target, Stopwatch clock)
     {
         bool dispatched = false;
+        bool scrollAttempted = false;
         using var timeout = new CancellationTokenSource(
             TimeSpan.FromMilliseconds(request.ObservationTimeoutMs + (TabConnected ? 5500 : 24000)));
         try
@@ -341,29 +384,30 @@ internal static partial class WindowChromeCdp
             int? selectedFileCount = null;
             if (CdpPointerAction(request.Action))
             {
-                var box = await cdp.Call("DOM.getBoxModel", new { backendNodeId = target.BackendId }, sessionId);
-                var metrics = await cdp.Call("Page.getLayoutMetrics", new { }, sessionId);
-                if (!TryPoint(box.GetProperty("model").GetProperty("content"),
-                    metrics.GetProperty("cssVisualViewport"), out double x, out double y))
-                    return Rejected(WindowActionCode.CDP_TARGET_NOT_VISIBLE);
-                var resolved = await cdp.Call("DOM.resolveNode", new { backendNodeId = target.BackendId }, sessionId);
-                string objectId = resolved.GetProperty("object").GetProperty("objectId").GetString()!;
-                var hit = await cdp.Call("Runtime.callFunctionOn", new
+                var point = await ViewportPoint(cdp, sessionId, target.BackendId);
+                if (!point.Visible)
                 {
-                    objectId,
-                    functionDeclaration = "function(x,y){const h=document.elementFromPoint(x,y);return !!h && (h===this || this.contains(h)) && !this.matches(':disabled') && !this.closest('[inert]');}",
-                    arguments = new[] { new { value = x }, new { value = y } },
-                    returnByValue = true, silent = true
-                }, sessionId);
-                if (!hit.GetProperty("result").TryGetProperty("value", out var ok) ||
-                    ok.ValueKind != JsonValueKind.True) return Rejected(WindowActionCode.TARGET_OCCLUDED);
+                    // One native CDP scroll, never a synthetic OS wheel. It is
+                    // potentially effectful (onscroll/lazy loading), so even a
+                    // later target rejection cannot be reported as NO_EFFECT.
+                    scrollAttempted = dispatched = true;
+                    await cdp.Call("DOM.scrollIntoViewIfNeeded",
+                        new { backendNodeId = target.BackendId }, sessionId);
+                    point = await PointAfterScroll(cdp, sessionId, target.BackendId,
+                        timeout.Token);
+                    if (!point.Visible)
+                        return RejectedPointer(WindowActionCode.CDP_TARGET_NOT_VISIBLE,
+                            "STILL_OUTSIDE_VIEWPORT_AFTER_SCROLL");
+                }
                 double? dropX = null, dropY = null;
+                TabElementRef? destination = null;
                 if (request.Action == WindowActionKind.DRAG)
                 {
-                    if (!TryParseTabElementRef(request.TargetElementId, out var destination) ||
+                    if (!TryParseTabElementRef(request.TargetElementId, out destination) ||
                         destination is null || destination.TargetId != target.TargetId ||
                         destination.LoaderId != target.LoaderId)
-                        return Rejected(WindowActionCode.STALE_ELEMENT, "DRAG_DESTINATION_CHANGED");
+                        return RejectedPointer(WindowActionCode.STALE_ELEMENT,
+                            "DRAG_DESTINATION_CHANGED");
                     var dropAx = ax.GetProperty("nodes").EnumerateArray().Where(node =>
                         node.TryGetProperty("backendDOMNodeId", out var backend) &&
                         backend.ValueKind == JsonValueKind.Number &&
@@ -374,35 +418,99 @@ internal static partial class WindowChromeCdp
                             destination.BackendId, loader, selected.Url,
                             AxValue(dropAx[0], "role"), AxValue(dropAx[0], "name")),
                             destination.Digest, StringComparison.OrdinalIgnoreCase))
-                        return Rejected(WindowActionCode.STALE_ELEMENT, "DRAG_DESTINATION_CHANGED");
-                    var dropBox = await cdp.Call("DOM.getBoxModel", new
-                        { backendNodeId = destination.BackendId }, sessionId);
-                    if (!TryPoint(dropBox.GetProperty("model").GetProperty("content"),
-                        metrics.GetProperty("cssVisualViewport"), out double dx, out double dy))
-                        return Rejected(WindowActionCode.CDP_TARGET_NOT_VISIBLE);
+                        return RejectedPointer(WindowActionCode.STALE_ELEMENT,
+                            "DRAG_DESTINATION_CHANGED");
+                    var dropPoint = await ViewportPoint(cdp, sessionId, destination.BackendId);
+                    if (!dropPoint.Visible)
+                    {
+                        // Never chase both endpoints with repeated scrolls.
+                        // They must ultimately share one visible viewport.
+                        if (scrollAttempted)
+                            return RejectedPointer(WindowActionCode.CDP_TARGET_NOT_VISIBLE,
+                                "DRAG_WOULD_REQUIRE_SECOND_SCROLL");
+                        scrollAttempted = dispatched = true;
+                        await cdp.Call("DOM.scrollIntoViewIfNeeded",
+                            new { backendNodeId = destination.BackendId }, sessionId);
+                        dropPoint = await PointAfterScroll(cdp, sessionId,
+                            destination.BackendId, timeout.Token);
+                        // The destination scroll may have moved the source:
+                        // never drag using stale screen coordinates.
+                        point = await ViewportPoint(cdp, sessionId, target.BackendId);
+                    }
+                    if (!dropPoint.Visible || !point.Visible)
+                        return RejectedPointer(WindowActionCode.CDP_TARGET_NOT_VISIBLE,
+                            "DRAG_ENDPOINTS_NOT_SIMULTANEOUSLY_VISIBLE");
+                    dropX = dropPoint.X; dropY = dropPoint.Y;
+                }
+                if (scrollAttempted)
+                {
+                    var latestAx = await cdp.Call("Accessibility.getFullAXTree", new { }, sessionId);
+                    if (!SameAxIdentity(latestAx, request.WindowId, selected.Id, selected.Url,
+                            loader, target) || (destination is not null &&
+                        !SameAxIdentity(latestAx, request.WindowId, selected.Id, selected.Url,
+                            loader, destination)))
+                        return RejectedPointer(WindowActionCode.STALE_ELEMENT,
+                            "IDENTITY_CHANGED_AFTER_SCROLL");
+                    if (desiredState is not null && latestAx.GetProperty("nodes").EnumerateArray()
+                        .Any(node => node.TryGetProperty("backendDOMNodeId", out var backend) &&
+                            backend.ValueKind == JsonValueKind.Number &&
+                            backend.GetInt32() == target.BackendId &&
+                            AxActionState(node, request.Action) != stateBefore))
+                        return RejectedPointer(WindowActionCode.STALE_ELEMENT,
+                            "SEMANTIC_STATE_CHANGED_AFTER_SCROLL");
+                    if (request.ExpectedName is not null)
+                    {
+                        bool currentExpected = request.ExpectedKind is WindowExpectedKind.UIA_ELEMENT or
+                            WindowExpectedKind.UIA_VALUE or WindowExpectedKind.UIA_ENABLED
+                            ? ExpectedAxState(latestAx, request)
+                            : WindowAction.ExternalStatePresent(request.ExpectedKind,
+                                request.ExpectedName);
+                        if (currentExpected == (request.ExpectedChange == WindowExpectedChange.APPEARS) &&
+                            (request.ExpectedEnabledName is null || HasAxEnabled(latestAx,
+                                request.ExpectedEnabledName, request.ExpectedEnabled)))
+                            return RejectedPointer(WindowActionCode.EXPECTED_STATE_ALREADY_TRUE,
+                                "EXPECTED_STATE_CHANGED_AFTER_SCROLL");
+                    }
+                }
+                var resolved = await cdp.Call("DOM.resolveNode", new
+                    { backendNodeId = target.BackendId }, sessionId);
+                string objectId = resolved.GetProperty("object").GetProperty("objectId").GetString()!;
+                var hit = await cdp.Call("Runtime.callFunctionOn", new
+                {
+                    objectId,
+                    functionDeclaration = "function(x,y){const h=document.elementFromPoint(x,y);return !!h && (h===this || this.contains(h)) && !this.matches(':disabled') && !this.closest('[inert]');}",
+                    arguments = new[] { new { value = point.X }, new { value = point.Y } },
+                    returnByValue = true, silent = true
+                }, sessionId);
+                if (!hit.GetProperty("result").TryGetProperty("value", out var ok) ||
+                    ok.ValueKind != JsonValueKind.True)
+                    return RejectedPointer(WindowActionCode.TARGET_OCCLUDED);
+                if (destination is not null)
+                {
                     var dropResolved = await cdp.Call("DOM.resolveNode", new
                         { backendNodeId = destination.BackendId }, sessionId);
                     var dropHit = await cdp.Call("Runtime.callFunctionOn", new
                     {
                         objectId = dropResolved.GetProperty("object").GetProperty("objectId").GetString()!,
                         functionDeclaration = "function(x,y){const h=document.elementFromPoint(x,y);return !!h && (h===this || this.contains(h)) && !this.matches(':disabled') && !this.closest('[inert]');}",
-                        arguments = new[] { new { value = dx }, new { value = dy } },
+                        arguments = new[] { new { value = dropX!.Value }, new { value = dropY!.Value } },
                         returnByValue = true, silent = true
                     }, sessionId);
                     if (!dropHit.GetProperty("result").TryGetProperty("value", out var dropOk) ||
                         dropOk.ValueKind != JsonValueKind.True)
-                        return Rejected(WindowActionCode.TARGET_OCCLUDED, "DRAG_DESTINATION_OCCLUDED");
-                    dropX = dx; dropY = dy;
+                        return RejectedPointer(WindowActionCode.TARGET_OCCLUDED,
+                            "DRAG_DESTINATION_OCCLUDED");
                 }
                 var checkpoint = await DispatchCheckpoint(cdp, sessionId, hwnd, request,
                     target.TargetId, selected.Url, selected.BrowserWindowId, target.LoaderId,
                     timeout.Token);
-                if (checkpoint.Code is not null) return Rejected(checkpoint.Code.Value,
+                if (checkpoint.Code is not null) return RejectedPointer(checkpoint.Code.Value,
                     checkpoint.Detail);
                 dispatched = true;
                 if (request.Action == WindowActionKind.DRAG)
-                    await DispatchDomDrag(cdp, sessionId, x, y, dropX!.Value, dropY!.Value);
-                else await DispatchPointer(cdp, sessionId, request, x, y);
+                    await DispatchDomDrag(cdp, sessionId, point.X, point.Y,
+                        dropX!.Value, dropY!.Value);
+                else await DispatchPointer(cdp, sessionId, request, point.X, point.Y);
             }
             else if (request.Action == WindowActionKind.SET_FILES)
             {
@@ -550,6 +658,12 @@ internal static partial class WindowChromeCdp
             TargetVerified: status == WindowActionCode.EXPECTED_STATE_ALREADY_TRUE,
             FailureStage: WindowFailureStage.CDP_TARGET, Detail: detail,
             ElapsedMs: clock.ElapsedMilliseconds);
+        WindowActionResult RejectedPointer(WindowActionCode status, string? detail = null) =>
+            scrollAttempted ? new(status, EffectUnknown: true,
+                FailureStage: WindowFailureStage.CDP_TARGET,
+                Detail: detail ?? "SCROLL_ATTEMPTED_BEFORE_POINTER",
+                ExecutionMethod: WindowExecutionMethod.CHROME_CDP,
+                ElapsedMs: clock.ElapsedMilliseconds) : Rejected(status, detail);
     }
 
     [DllImport("user32.dll")]
