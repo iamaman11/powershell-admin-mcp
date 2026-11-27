@@ -9,7 +9,7 @@ using ModelContextProtocol.Server;
 public sealed class ChromeTabTools
 {
     [McpServerTool(Name = "windows.chrome_tab", UseStructuredContent = true),
-     Description("Manage Chrome tabs using one consented CDP broker: LIST, OPEN, NAVIGATE, BACK, FORWARD, RELOAD, CLOSE. Default scope=WINDOW matches the verified native HWND/profile. If windows overlap and cannot be mapped, scope=BROWSER lists every tab of the consented browser with an exact browser_window_id; subsequent targeted actions may use that ID and a fresh tab_id without HWND geometry. BROWSER scope is explicitly browser-wide, including other profiles; it never silently claims native-window identity. In BROWSER scope OPEN creates a background tab in Chrome's chosen window and returns its actual browser_window_id; exact-window actions use the IDs from LIST. No OS mouse/keyboard input. All effects need confirm=true and postcondition readback; never retry EFFECT_UNKNOWN.")]
+     Description("Chrome tabs: LIST/OPEN/NAVIGATE/BACK/FORWARD/RELOAD/CLOSE. WINDOW validates native identity; BROWSER uses exact CDP IDs. Requires consent/confirm; no OS input or effect replay.")]
     public static async Task<ChromeTabResult> ChromeTab(string window_id, string expected_profile,
         ChromeTabAction action, string? tab_id = null, string? url = null,
         bool background = true, bool confirm = true,

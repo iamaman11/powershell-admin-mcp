@@ -975,14 +975,14 @@ var doctorStatus = new AdminStatus(StatusCode.OK, "ci", Diagnostics: doctorSnaps
 var doctorWire = System.Text.Json.JsonSerializer.Serialize(doctorStatus, PipeWire.Json);
 Check(System.Text.Json.JsonSerializer.Deserialize<AdminStatus>(doctorWire, PipeWire.Json)?.Diagnostics is
     { Status: DoctorState.DEGRADED, ReconciliationCount: 17, LocalOperationalReady: true,
-      RollbackPending: true, ToolCatalog: { ToolCount: 23, StructuredToolCount: 22,
-          NativeDtoResultCount: 21 },
+      RollbackPending: true, ToolCatalog: { ToolCount: 24, StructuredToolCount: 23,
+          NativeDtoResultCount: 22 },
       Checks: [{ Reason: DoctorReason.RECONCILIATION_REQUIRED }] } &&
     !System.Text.Json.JsonSerializer.Serialize(new AdminStatus(StatusCode.OK, "ci"), PipeWire.Json)
         .Contains("diagnostics", StringComparison.Ordinal),
     "status.optional_typed_doctor_without_changing_default_status");
 var doctorCatalog = DoctorCatalog.Observe();
-Check(DoctorCatalog.IsComplete(doctorCatalog) && doctorCatalog.ToolCount == 23 &&
+Check(DoctorCatalog.IsComplete(doctorCatalog) && doctorCatalog.ToolCount == 24 &&
     doctorCatalog.ToolNames.Contains("windows.tcp_connections") &&
     doctorCatalog.ToolNames.Contains("windows.file_acl") &&
     doctorCatalog.ToolNames.Contains("windows.process_wait_chain") &&
@@ -990,11 +990,12 @@ Check(DoctorCatalog.IsComplete(doctorCatalog) && doctorCatalog.ToolCount == 23 &
     doctorCatalog.ToolNames.Contains("windows.admin_action") &&
     doctorCatalog.ToolNames.Contains("windows.chrome_connection") &&
     doctorCatalog.ToolNames.Contains("windows.chrome_tab") &&
+    doctorCatalog.ToolNames.Contains("windows.chrome_cdp") &&
     doctorCatalog.Source == DoctorCatalogSource.SERVER_ASSEMBLY_METADATA,
     "doctor.v2_declared_typed_catalog_without_claiming_published_client_schema");
 string doctorCatalogJson=System.Text.Json.JsonSerializer.Serialize(doctorCatalog,PipeWire.Json);
-Check(doctorCatalogJson.Contains("\"tool_count\":23", StringComparison.Ordinal) &&
-    doctorCatalogJson.Contains("\"native_dto_result_count\":21", StringComparison.Ordinal) &&
+Check(doctorCatalogJson.Contains("\"tool_count\":24", StringComparison.Ordinal) &&
+    doctorCatalogJson.Contains("\"native_dto_result_count\":22", StringComparison.Ordinal) &&
     doctorWire.Contains("\"rollback_pending\":true", StringComparison.Ordinal),
     "doctor.v2_strict_catalog_and_update_trial_wire");
 string missingRollbackRoot=Path.Combine(Path.GetTempPath(), "wmcp-doctor-test-" + Guid.NewGuid().ToString("N"));
@@ -1732,6 +1733,48 @@ Check(WindowChromeBroker.ReplyMatches(new(Action: chromeAction, TraceId: trace),
         chromeAction.ObservationTimeoutMs+9000 &&
     new WindowActionResult(WindowActionCode.LOCATOR_TIMEOUT).SafeToRetry,
     "chrome.trace_identity_and_locator_only_timeout_are_typed");
+var protocolDescribe = new ChromeProtocolRequest(testWindowId, "Profile 5",
+    ChromeProtocolAction.DESCRIBE, Domain:"Page", PageSize:20);
+var protocolVersion = new ChromeProtocolRequest(testWindowId, "Profile 9",
+    ChromeProtocolAction.CALL, Method:"Browser.getVersion", ParametersJson:"{}",
+    AllowBrowserScope:true);
+var protocolSubscription = new ChromeProtocolRequest(testWindowId, "Profile 9",
+    ChromeProtocolAction.SUBSCRIBE, Domain:"Page");
+var protocolResponse = new ChromeProtocolResult(ChromeProtocolCode.COMPLETED,
+    ChromeProtocolAction.DESCRIBE);
+var protocolUnknownEffect = new ChromeProtocolResult(ChromeProtocolCode.EFFECT_UNKNOWN,
+    ChromeProtocolAction.CALL, Method:"Page.navigate");
+var protocolProviderAck = new ChromeProtocolResult(ChromeProtocolCode.COMPLETED,
+    ChromeProtocolAction.CALL, Method:"Browser.getVersion");
+Check(WindowChromeCdp.ValidProtocolRequest(protocolDescribe) &&
+    WindowChromeCdp.ValidProtocolRequest(protocolVersion) &&
+    WindowChromeCdp.ValidProtocolRequest(protocolSubscription) &&
+    !WindowChromeCdp.ValidProtocolRequest(protocolDescribe with {WindowId="invalid"}) &&
+    !WindowChromeCdp.ValidProtocolRequest(protocolDescribe with {ExpectedProfile=" "}) &&
+    !WindowChromeCdp.ValidProtocolRequest(protocolDescribe with {PageSize=0}) &&
+    !WindowChromeCdp.ValidProtocolRequest(protocolDescribe with {PageSize=100000}) &&
+    !WindowChromeCdp.ValidProtocolRequest(protocolDescribe with {Action=(ChromeProtocolAction)999}) &&
+    !WindowChromeCdp.ValidProtocolRequest(protocolVersion with {Method=null}) &&
+    new ChromeBrokerRequest(Protocol:protocolDescribe).Valid &&
+    new ChromeBrokerRequest(Protocol:protocolVersion).Valid &&
+    !new ChromeBrokerRequest(Protocol:protocolVersion, Action:chromeAction).Valid &&
+    WindowChromeBroker.ReplyMatches(new(Protocol:protocolDescribe, TraceId:trace),
+        new(Protocol:protocolResponse, TraceId:trace)) &&
+    !WindowChromeBroker.ReplyMatches(new(Protocol:protocolDescribe, TraceId:trace),
+        new(Protocol:protocolResponse, TraceId:Guid.NewGuid().ToString("N"))) &&
+    !WindowChromeBroker.ReplyMatches(new(Protocol:protocolDescribe),
+        new(Protocol:protocolResponse, Action:new(WindowActionCode.COMPLETED))) &&
+    !WindowChromeBroker.ReplyMatches(new(Protocol:protocolDescribe),
+        new(Action:new(WindowActionCode.COMPLETED))),
+    "chrome.protocol_generic_requests_typed_and_reuse_existing_broker");
+Check(!protocolUnknownEffect.SafeToRetry && protocolUnknownEffect.EffectState == "EFFECT_UNKNOWN" &&
+    protocolProviderAck.EffectState == "PROVIDER_ACK_ONLY" &&
+    !new ChromeProtocolResult(ChromeProtocolCode.COMPLETED,
+        ChromeProtocolAction.CALL).SafeToRetry &&
+    new ChromeProtocolResult(ChromeProtocolCode.METHOD_NOT_SUPPORTED,
+        ChromeProtocolAction.CALL).SafeToRetry &&
+    WindowChromeBroker.ExchangeTimeoutMs(new(Protocol:protocolVersion), false) >= 25000,
+    "chrome.protocol_unknown_effect_never_auto_replayed_and_ack_not_verified");
 using (var brokerStop = new CancellationTokenSource())
 {
     Task owner = ChromeBrokerPipe.RunOwnerAsync(brokerStop.Token);

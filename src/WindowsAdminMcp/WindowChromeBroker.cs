@@ -7,14 +7,16 @@ using System.Text.Json;
 // constructing their own broker/consent state.
 internal sealed record ChromeBrokerRequest(WindowInspectRequest? Inspect = null,
     WindowActionRequest? Action = null, ChromeConnectionRequest? Connection = null,
-    string? TraceId = null, ChromeTabRequest? TabManage = null)
+    string? TraceId = null, ChromeTabRequest? TabManage = null,
+    ChromeProtocolRequest? Protocol = null)
 {
     internal string WindowId => Inspect?.WindowId ?? Action?.WindowId ?? Connection?.WindowId ??
-        TabManage?.WindowId ?? "";
+        TabManage?.WindowId ?? Protocol?.WindowId ?? "";
     internal string? Profile => Inspect?.ExpectedProfile ?? Action?.ExpectedProfile ??
-        Connection?.ExpectedProfile ?? TabManage?.ExpectedProfile;
+        Connection?.ExpectedProfile ?? TabManage?.ExpectedProfile ?? Protocol?.ExpectedProfile;
     internal bool Valid => (Inspect is not null ? 1 : 0) + (Action is not null ? 1 : 0) +
-        (Connection is not null ? 1 : 0) + (TabManage is not null ? 1 : 0) == 1 &&
+        (Connection is not null ? 1 : 0) + (TabManage is not null ? 1 : 0) +
+        (Protocol is not null ? 1 : 0) == 1 &&
         WindowCatalog.TryParseId(WindowId, out _) &&
         (TraceId is null || Guid.TryParseExact(TraceId, "N", out _)) &&
         (Profile is { Length: >= 1 and <= 100 } && !string.IsNullOrWhiteSpace(Profile) ||
@@ -25,6 +27,7 @@ internal sealed record ChromeBrokerRequest(WindowInspectRequest? Inspect = null,
             (WindowChromeCdp.WellFormedTabElementRef(Action.ElementId) ||
              WindowInspector.WellFormedElementRef(Action.ElementId, out _))) &&
         (TabManage is null || WindowChromeCdp.ValidTabRequest(TabManage)) &&
+        (Protocol is null || WindowChromeCdp.ValidProtocolRequest(Protocol)) &&
         (Connection is null || Connection.Action is ChromeConnectionAction.REQUEST or
             ChromeConnectionAction.STATUS or ChromeConnectionAction.DISCONNECT &&
             Enum.IsDefined(Connection.Mode) &&
@@ -36,7 +39,8 @@ internal sealed record ChromeBrokerRequest(WindowInspectRequest? Inspect = null,
 
 internal sealed record ChromeBrokerReply(WindowInspectResult? Inspect = null,
     WindowActionResult? Action = null, ChromeConnectionResult? Connection = null,
-    int? OwnerPid = null, string? TraceId = null, ChromeTabResult? TabManage = null);
+    int? OwnerPid = null, string? TraceId = null, ChromeTabResult? TabManage = null,
+    ChromeProtocolResult? Protocol = null);
 
 internal static class WindowChromeBroker
 {
@@ -65,22 +69,32 @@ internal static class WindowChromeBroker
         return $"{id.ProcessId:x}:{id.StartFileTimeUtc:x}:{id.SessionId:x}";
     }
 
-    internal static bool ReplyMatches(ChromeBrokerRequest request, ChromeBrokerReply? reply) =>
-        reply is not null && (request.TraceId is null || request.TraceId == reply.TraceId) &&
-        (request.TabManage is not null
-            ? reply.TabManage is not null && reply.Action is null && reply.Inspect is null &&
-                reply.Connection is null :
-        (request.Inspect is not null
-            ? reply.Inspect is not null && reply.Action is null && reply.Connection is null &&
-                reply.TabManage is null
-            : request.Action is not null
-                ? reply.Action is not null && reply.Inspect is null && reply.Connection is null &&
-                    reply.TabManage is null
-                : request.Connection is not null && reply.Connection is not null &&
-                    reply.Inspect is null && reply.Action is null && reply.TabManage is null));
+    internal static bool ReplyMatches(ChromeBrokerRequest request, ChromeBrokerReply? reply)
+    {
+        if (reply is null || request.TraceId is not null && request.TraceId != reply.TraceId)
+            return false;
+
+        // There must be exactly one result, and it must belong to the request.
+        // In particular, never accept an older tool's response as a generic CDP ack.
+        int resultCount = (reply.Inspect is not null ? 1 : 0) +
+            (reply.Action is not null ? 1 : 0) +
+            (reply.Connection is not null ? 1 : 0) +
+            (reply.TabManage is not null ? 1 : 0) +
+            (reply.Protocol is not null ? 1 : 0);
+        return resultCount == 1 &&
+            (request.Protocol is not null && reply.Protocol is not null ||
+             request.TabManage is not null && reply.TabManage is not null ||
+             request.Inspect is not null && reply.Inspect is not null ||
+             request.Action is not null && reply.Action is not null ||
+             request.Connection is not null && reply.Connection is not null);
+    }
 
     internal static int ExchangeTimeoutMs(ChromeBrokerRequest request, bool firstExchange) =>
-        request.Connection is not null ? 10000 : request.TabManage is not null ? 26000 : firstExchange
+        request.Connection is not null ? 10000 :
+        // CDP commands have a 25s in-worker deadline; include enough transport
+        // and process-start headroom to avoid killing the authorized browser
+        // owner at the edge of that deadline.
+        request.Protocol is not null ? 45000 : request.TabManage is not null ? 26000 : firstExchange
             ? 30000 + (request.Action?.ObservationTimeoutMs ?? 0)
             : request.Action is { } action ? action.ObservationTimeoutMs + 10000 : 26000;
 
@@ -123,6 +137,21 @@ internal static class WindowChromeBroker
             ? result with { BrokerOwnerPid = reply.OwnerPid, TraceId = reply.TraceId }
             : new(request.Action == ChromeTabAction.LIST ? ChromeTabCode.CDP_UNAVAILABLE :
                 ChromeTabCode.EFFECT_UNKNOWN, request.Action, Detail: "CDP_OWNER_UNAVAILABLE");
+    }
+
+    // The universal protocol tool shares the same USER broker and consented
+    // browser socket as all existing typed Chrome tools. Unknown dispatch
+    // must never be retried blindly after a lost pipe/worker acknowledgement.
+    internal static async Task<ChromeProtocolResult> ProtocolAsync(ChromeProtocolRequest request,
+        CancellationToken cancellationToken, string traceId)
+    {
+        var reply = await RouteAsync(new(Protocol: request), cancellationToken, traceId);
+        return reply?.Protocol is { } result
+            ? result with { BrokerOwnerPid = reply.OwnerPid, TraceId = reply.TraceId }
+            : new(request.Action is ChromeProtocolAction.CALL or ChromeProtocolAction.SUBSCRIBE or
+                ChromeProtocolAction.UNSUBSCRIBE ? ChromeProtocolCode.EFFECT_UNKNOWN :
+                ChromeProtocolCode.CDP_UNAVAILABLE,
+                request.Action, Detail: "CDP_OWNER_UNAVAILABLE", TraceId: traceId);
     }
 
     private static Task<ChromeBrokerReply?> RouteAsync(ChromeBrokerRequest request,
@@ -222,7 +251,10 @@ internal static class WindowChromeBroker
                 if (reply?.Connection?.State == ChromeConnectionState.CONNECTED ||
                     reply?.Inspect?.Status == WindowInspectCode.COMPLETED ||
                     reply?.Action?.ExecutionMethod == WindowExecutionMethod.CHROME_CDP ||
-                    reply?.TabManage?.Status == ChromeTabCode.COMPLETED)
+                    reply?.TabManage?.Status == ChromeTabCode.COMPLETED ||
+                    reply?.Protocol is { Status: ChromeProtocolCode.COMPLETED,
+                        Action: ChromeProtocolAction.CALL or ChromeProtocolAction.TARGETS,
+                        SessionGeneration: not null })
                 {
                     _hadConnected = true;
                     _lastConnectedBinding = binding;
@@ -305,6 +337,8 @@ internal static class WindowChromeBroker
                             ? new(Connection: WindowChromeCdp.ConnectInWorker(connection))
                             : request.TabManage is { } tab
                             ? new(TabManage: WindowChromeCdp.ManageTabInWorker(tab))
+                            : request.Protocol is { } protocol
+                            ? new(Protocol: WindowChromeCdp.ProtocolInWorker(protocol))
                             : request.Inspect is { } inspect
                             ? new(Inspect: WindowInspector.InspectInWorker(inspect.WindowId,
                                 inspect.MaxDepth, inspect.MaxElements, inspect.StartPath,
@@ -321,6 +355,8 @@ internal static class WindowChromeBroker
                         Action = reply.Action is { } action ? action with
                             { SessionGeneration = WindowChromeCdp.CurrentGeneration } : null,
                         TabManage = reply.TabManage is { } tabResult ? tabResult with
+                            { SessionGeneration = WindowChromeCdp.CurrentGeneration } : null,
+                        Protocol = reply.Protocol is { } protocolResult ? protocolResult with
                             { SessionGeneration = WindowChromeCdp.CurrentGeneration } : null };
                 }
                 catch (Exception e) when (e is JsonException or ArgumentException or InvalidOperationException)

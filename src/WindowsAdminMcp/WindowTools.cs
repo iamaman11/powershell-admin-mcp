@@ -33,7 +33,7 @@ public sealed record WindowListResult(
 public sealed class WindowTools
 {
     [McpServerTool(Name = "windows.manage_window",UseStructuredContent = true),
-     Description("Native Win32 ACTIVATE/RESTORE/MINIMIZE/MAXIMIZE/MOVE/RESIZE/CLOSE; exact HWND/process/session identity. CLOSE posts WM_CLOSE (no forced process termination), verified only when the exact window disappears.")]
+     Description("Win32 ACTIVATE/RESTORE/MINIMIZE/MAXIMIZE/MOVE/RESIZE/CLOSE for exact window identity; CLOSE posts WM_CLOSE without killing process.")]
     public static async Task<WindowManageResult> ManageWindow(string window_id,WindowManageAction action,
         int? x=null,int? y=null,int? width=null,int? height=null,CancellationToken cancellationToken=default)
     {
@@ -143,7 +143,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name = "windows.invoke_element", UseStructuredContent = true),
-     Description("Act on a fresh UIA/Chrome element. Supply expected_name and expected_change for verified navigation. CDP_ONLY supports DRAG between fresh DOM IDs (target_element_id) and SET_FILES on an HTML file input (file_paths, 1..16 absolute paths). BACKGROUND_ONLY uses consented CDP only; native UIA and input that may steal focus are rejected before dispatch. ALLOW_FOREGROUND_INPUT opts into native UIA and pointer/keyboard input. EFFECT_UNKNOWN means inspect state, never replay; read effect_evidence, next_step and focus_behavior.")]
+     Description("Act on exact UIA/Chrome element. BACKGROUND_ONLY uses consented CDP; native UIA/input needs ALLOW_FOREGROUND_INPUT. Verify expected change; no blind replay.")]
     public static async Task<WindowActionResult> InvokeElement(string window_id, string element_id,
         WindowActionKind action, string? value = null, bool confirm = true,
         string? element_path = null, string? expected_name = null,
@@ -194,7 +194,7 @@ public sealed class WindowTools
     }
 
     [McpServerTool(Name="windows.invoke_locator",UseStructuredContent=true),
-     Description("Find one exact accessible element and act once. For navigation supply expected_name/expected_change. BACKGROUND_ONLY and CDP_ONLY never invoke a UIA provider; unsupported background actions fail before dispatch. ALLOW_FOREGROUND_INPUT permits native UIA or pointer/keyboard input. Read effect_evidence, next_step and focus_behavior; never replay EFFECT_UNKNOWN.")]
+     Description("Act once on exact UIA locator. BACKGROUND_ONLY/CDP_ONLY block native UIA; foreground requires explicit input opt-in. Verify effect; no replay.")]
     public static Task<WindowActionResult> InvokeLocator(string window_id,WindowActionKind action,
         string? automation_id=null,string? name=null,WindowRoleFilter? role=null,
         string? value=null,bool confirm=true,

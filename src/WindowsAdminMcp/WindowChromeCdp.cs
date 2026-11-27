@@ -15,8 +15,20 @@ internal static partial class WindowChromeCdp
     internal sealed class Session : IDisposable
     {
         private const int MaxPendingCalls = 32;
+        private const int MaxEventSubscriptions = 16;
+        private const int MaxEventsPerSubscription = 64;
+        private const int MaxEventParametersChars = 2048;
         private sealed record Pending(string? SessionId,
             TaskCompletionSource<JsonElement> Completion);
+
+        private sealed class EventSubscription(string method, string? sessionId, int capacity)
+        {
+            internal readonly string Method = method;
+            internal readonly string? SessionId = sessionId;
+            internal readonly int Capacity = capacity;
+            internal readonly Queue<ChromeProtocolEvent> Events = new();
+            internal long LastDroppedSequence;
+        }
 
         private readonly WebSocket _socket;
         private readonly CancellationTokenSource _stop = new();
@@ -24,6 +36,10 @@ internal static partial class WindowChromeCdp
         private readonly ConcurrentDictionary<int, Pending> _pending = new();
         private readonly ConcurrentDictionary<string, byte> _detached =
             new(StringComparer.Ordinal);
+        private readonly object _eventsGate = new();
+        private readonly Dictionary<string, EventSubscription> _subscriptions =
+            new(StringComparer.Ordinal);
+        private long _eventSequence;
         private int _nextId;
         private int _closed;
         private Exception? _failure;
@@ -36,6 +52,95 @@ internal static partial class WindowChromeCdp
         }
 
         internal void SetDeadline(CancellationToken deadline) => _deadline = deadline;
+
+        // The authorized browser socket remains the only CDP event reader.
+        // Subscriptions are bounded in count, retained events and parameter size;
+        // events are never delivered to an unregistered caller.
+        internal string Subscribe(string method, string? sessionId, int maxEvents)
+        {
+            if (string.IsNullOrWhiteSpace(method) || method.Length > 128 ||
+                maxEvents is < 1 or > MaxEventsPerSubscription)
+                throw new ArgumentException("CDP_EVENT_SUBSCRIPTION_INVALID");
+            lock (_eventsGate)
+            {
+                if (_subscriptions.Count >= MaxEventSubscriptions)
+                    throw new InvalidOperationException("CDP_SUBSCRIPTION_LIMIT");
+                string id = Guid.NewGuid().ToString("N");
+                _subscriptions.Add(id, new EventSubscription(method, sessionId, maxEvents));
+                return id;
+            }
+        }
+
+        internal (ChromeProtocolEvent[] Events, long LastSequence, bool Dropped) ReadEvents(
+            string subscriptionId, long afterSequence, int pageSize)
+        {
+            if (afterSequence < 0 || pageSize is < 1 or > MaxEventsPerSubscription)
+                throw new ArgumentException("CDP_EVENT_PAGE_INVALID");
+            lock (_eventsGate)
+            {
+                if (!_subscriptions.TryGetValue(subscriptionId, out var subscription))
+                    throw new KeyNotFoundException("CDP_SUBSCRIPTION_NOT_FOUND");
+                var page = subscription.Events.Where(x => x.Sequence > afterSequence)
+                    .Take(pageSize).ToArray();
+                return (page, page.Length == 0 ? afterSequence : page[^1].Sequence,
+                    subscription.LastDroppedSequence > afterSequence);
+            }
+        }
+
+        internal bool Unsubscribe(string subscriptionId)
+        {
+            lock (_eventsGate) return _subscriptions.Remove(subscriptionId);
+        }
+
+        private void ObserveEvent(JsonElement message, string method)
+        {
+            string? sessionId = message.TryGetProperty("sessionId", out var scope) &&
+                scope.ValueKind == JsonValueKind.String ? scope.GetString() : null;
+            JsonElement? parameters = message.TryGetProperty("params", out var observed)
+                ? observed.Clone() : null;
+            lock (_eventsGate)
+            {
+                if (_subscriptions.Count == 0) return;
+                long sequence = ++_eventSequence;
+                bool oversized = parameters is { } args &&
+                    args.GetRawText().Length > MaxEventParametersChars;
+                foreach (var subscription in _subscriptions.Values)
+                {
+                    bool matchMethod = subscription.Method == "*" ||
+                        subscription.Method == method ||
+                        (subscription.Method.EndsWith(".*", StringComparison.Ordinal) &&
+                         method.StartsWith(subscription.Method[..^1], StringComparison.Ordinal));
+                    if (subscription.SessionId != sessionId || !matchMethod) continue;
+                    if (oversized)
+                    {
+                        subscription.LastDroppedSequence = sequence;
+                        continue;
+                    }
+                    if (subscription.Events.Count >= subscription.Capacity)
+                        subscription.LastDroppedSequence = subscription.Events.Dequeue().Sequence;
+                    subscription.Events.Enqueue(new ChromeProtocolEvent(sequence, method,
+                        sessionId, parameters));
+                }
+            }
+        }
+
+        // A Chrome domain can produce multi-MiB Network/Tracing/HeapProfiler
+        // events or command replies. Drain such frames without buffering them
+        // and, crucially, without tearing down the ONE approved CDP socket.
+        // An oversized frame cannot safely be correlated to a pending call;
+        // conservatively fail all waiters and expose event loss to readers.
+        private void ObserveOversizedFrame()
+        {
+            lock (_eventsGate)
+            {
+                long sequence = ++_eventSequence;
+                foreach (var subscription in _subscriptions.Values)
+                    subscription.LastDroppedSequence = sequence;
+            }
+            foreach (var pending in _pending.Values)
+                pending.Completion.TrySetException(
+                    new InvalidOperationException("CDP_MESSAGE_TOO_LARGE"));
+        }
 
         internal async Task<JsonElement> Call(string method, object parameters, string? sessionId = null)
         {
@@ -115,17 +220,26 @@ internal static partial class WindowChromeCdp
                 while (!_stop.IsCancellationRequested)
                 {
                     stream.SetLength(0);
+                    bool oversized = false;
                     WebSocketReceiveResult part;
                     do
                     {
                         part = await _socket.ReceiveAsync(new ArraySegment<byte>(buffer), _stop.Token);
                         if (part.MessageType == WebSocketMessageType.Close)
                             throw new IOException("CDP_SOCKET_CLOSED");
-                        if (part.MessageType != WebSocketMessageType.Text ||
-                            stream.Length + part.Count > MaxMessageBytes)
+                        if (part.MessageType != WebSocketMessageType.Text)
                             throw new JsonException("CDP_MESSAGE_INVALID");
-                        stream.Write(buffer, 0, part.Count);
+                        if (!oversized && stream.Length + part.Count > MaxMessageBytes)
+                            oversized = true;
+                        if (!oversized)
+                            stream.Write(buffer, 0, part.Count);
                     } while (!part.EndOfMessage);
+
+                    if (oversized)
+                    {
+                        ObserveOversizedFrame();
+                        continue;
+                    }
 
                     using var response = JsonDocument.Parse(stream.ToArray());
                     var message = response.RootElement;
@@ -133,18 +247,22 @@ internal static partial class WindowChromeCdp
                     {
                         if (message.TryGetProperty("method", out var eventMethod) &&
                             eventMethod.ValueKind == JsonValueKind.String &&
-                            eventMethod.GetString() == "Inspector.detached" &&
-                            message.TryGetProperty("sessionId", out var eventSession) &&
-                            eventSession.ValueKind == JsonValueKind.String &&
-                            eventSession.GetString() is { } detachedSession)
+                            eventMethod.GetString() is { } method)
                         {
-                            if (_detached.Count >= 4096)
-                                throw new JsonException("CDP_DETACHED_SESSION_LIMIT");
-                            _detached.TryAdd(detachedSession, 0);
-                            foreach (var pending in _pending.Values)
-                                if (pending.SessionId == detachedSession)
-                                    pending.Completion.TrySetException(
-                                        new InvalidOperationException("CDP_TARGET_DETACHED"));
+                            if (method == "Inspector.detached" &&
+                                message.TryGetProperty("sessionId", out var eventSession) &&
+                                eventSession.ValueKind == JsonValueKind.String &&
+                                eventSession.GetString() is { } detachedSession)
+                            {
+                                if (_detached.Count >= 4096)
+                                    throw new JsonException("CDP_DETACHED_SESSION_LIMIT");
+                                _detached.TryAdd(detachedSession, 0);
+                                foreach (var pending in _pending.Values)
+                                    if (pending.SessionId == detachedSession)
+                                        pending.Completion.TrySetException(
+                                            new InvalidOperationException("CDP_TARGET_DETACHED"));
+                            }
+                            ObserveEvent(message, method);
                         }
                         continue;
                     }

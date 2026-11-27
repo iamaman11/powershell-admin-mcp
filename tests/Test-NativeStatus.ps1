@@ -65,10 +65,10 @@ try{
         Send $p 1 'tools/list' @{_meta=$meta}
         $list=Receive $p 1
         $names=@($list.tools|ForEach-Object {$_.name})
-        $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element','windows.invoke_locator','windows.manage_window','windows.chrome_connection','windows.chrome_tab','powershell_update','windows.file_query','windows.file_read_chunk','windows.file_write','windows.file_manage','windows.system_query','windows.tcp_connections','windows.file_acl','windows.process_wait_chain','windows.network_probe','windows.admin_action')
+        $required=@('powershell_status','powershell_exec','powershell_job','powershell_screenshot','windows.list_windows','windows.inspect_window','windows.capture_window','windows.invoke_element','windows.invoke_locator','windows.manage_window','windows.chrome_connection','windows.chrome_tab','windows.chrome_cdp','powershell_update','windows.file_query','windows.file_read_chunk','windows.file_write','windows.file_manage','windows.system_query','windows.tcp_connections','windows.file_acl','windows.process_wait_chain','windows.network_probe','windows.admin_action')
         Assert (@($required|Where-Object {$_ -notin $names}).Count -eq 0 -and
             $names.Count -eq $required.Count -and
-            $names.Count -eq @($names|Select-Object -Unique).Count) 'native_schema.exact_23_tool_inventory'
+            $names.Count -eq @($names|Select-Object -Unique).Count) 'native_schema.exact_24_tool_inventory'
         $structured=@($list.tools|Where-Object {$_.name -ne 'powershell_screenshot'})
         Assert (@($structured|Where-Object {
             -not $_.Contains('outputSchema') -or
@@ -80,6 +80,7 @@ try{
         $statusTool=@($list.tools|Where-Object name -eq 'powershell_status')
         $chromeTool=@($list.tools|Where-Object name -eq 'windows.chrome_connection')
         $chromeTabs=@($list.tools|Where-Object name -eq 'windows.chrome_tab')
+        $chromeProtocol=@($list.tools|Where-Object name -eq 'windows.chrome_cdp')
         $fileQuery=@($list.tools|Where-Object name -eq 'windows.file_query')
         $fileRead=@($list.tools|Where-Object name -eq 'windows.file_read_chunk')
         $fileWrite=@($list.tools|Where-Object name -eq 'windows.file_write')
@@ -117,6 +118,9 @@ try{
         Assert ($chromeTabs.Count -eq 1 -and
             @(@('window_id','expected_profile','action','tab_id','url','background','confirm','scope','browser_window_id','offset','page_size')|Where-Object {-not $chromeTabs[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
             @(@('status','action','tabs','tab','effect_state','safe_to_retry','next_step','next_offset','cdp_mapping_failure')|Where-Object {-not $chromeTabs[0].outputSchema.properties.Contains($_)}).Count -eq 0) 'chrome.typed_native_tab_lifecycle_contract'
+        Assert ($chromeProtocol.Count -eq 1 -and
+            @(@('window_id','expected_profile','action','method','parameters_json','tab_id','browser_window_id','expected_origin','expected_url','domain','offset','page_size','subscription_id','after_sequence','allow_foreground','allow_browser_scope')|Where-Object {-not $chromeProtocol[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
+            @(@('status','action','data','events','subscription_id','session_generation','effect_state','safe_to_retry')|Where-Object {-not $chromeProtocol[0].outputSchema.properties.Contains($_)}).Count -eq 0) 'chrome.typed_generic_protocol_contract'
         Assert ($inspectTool.Count -eq 1 -and $actionTool.Count -eq 1 -and
             @(@('window_id','max_depth','max_elements','start_path','start_element_id','offset','include_details','name_contains','role_filter','wait_ms','scope','tab_id','expected_profile','expected_origin','expected_url')|Where-Object {-not $inspectTool[0].inputSchema.properties.Contains($_)}).Count -eq 0 -and
             @(@('cdp_mapping_failure','cdp_title_candidates','cdp_fingerprint_candidates')|Where-Object {-not $inspectTool[0].outputSchema.properties.Contains($_)}).Count -eq 0 -and
@@ -674,9 +678,10 @@ try{
         $doctor.externalAcceptanceStatus -eq 'NOT_TESTED') 'r6.doctor_operational_ready_despite_historical_reconciliation'
     Assert (@($doctor.checks|Where-Object {$_.component -eq 'Remote' -and $_.status -eq 'NOT_TESTED'}).Count -eq 1) 'r6.doctor_no_false_remote_acceptance'
     Assert ($doctor.toolCatalog.source -eq 'SERVER_ASSEMBLY_METADATA' -and
-        $doctor.toolCatalog.tool_count -eq 23 -and $doctor.toolCatalog.structured_tool_count -eq 22 -and
-        $doctor.toolCatalog.native_dto_result_count -eq 21 -and
-        @($doctor.toolCatalog.tool_names|Where-Object {$_ -eq 'windows.tcp_connections'}).Count -eq 1) 'r6.doctor_v2_declared_native_tool_inventory'
+        $doctor.toolCatalog.tool_count -eq 24 -and $doctor.toolCatalog.structured_tool_count -eq 23 -and
+        $doctor.toolCatalog.native_dto_result_count -eq 22 -and
+        @($doctor.toolCatalog.tool_names|Where-Object {$_ -eq 'windows.tcp_connections'}).Count -eq 1 -and
+        @($doctor.toolCatalog.tool_names|Where-Object {$_ -eq 'windows.chrome_cdp'}).Count -eq 1) 'r6.doctor_v2_declared_native_tool_inventory'
     Assert (@($doctor.checks|Where-Object {$_.component -eq 'ToolCatalog' -and $_.status -eq 'OK'}).Count -eq 1 -and
         @($doctor.checks|Where-Object {$_.component -eq 'PublishedClientSchema' -and $_.status -eq 'NOT_TESTED'}).Count -eq 1 -and
         @($doctor.checks|Where-Object {$_.component -eq 'Chrome' -and $_.status -eq 'NOT_TESTED'}).Count -eq 1 -and

@@ -5,7 +5,7 @@ using ModelContextProtocol.Server;
 public sealed class SystemTools
 {
     [McpServerTool(Name="windows.system_query",UseStructuredContent=true),
-     Description("Native bounded read-only Windows process ancestry, SCM service configuration, network interfaces, TCP connections by PID, Event Log (including WER provider filter), registry and Task Scheduler queries. Exact target or paged list; no PowerShell or second service.")]
+     Description("Native read-only processes, services, interfaces, TCP, Event Log, registry and Task Scheduler. Exact target or paged list; no PowerShell.")]
     public static Task<SystemQueryResult> Query(SystemQueryKind kind,int? pid=null,
         string? service_name=null,int page_size=50,int offset=0,
         SystemEventLogKind? event_log=null,int? event_id=null,
