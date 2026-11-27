@@ -338,19 +338,37 @@ internal static class ChromeAcceptanceFixture
 
             // Two real DOM interactions in this isolated CI-owned browser.
             // Neither uses OS input or a second CDP owner.
-            async Task<string> FindOwnedElement(string name)
+            async Task<string> FindOwnedElement(string name,
+                WindowRoleFilter? roleFilter = null)
             {
-                RefreshOwnedProfile();
-                var reply = await ExchangeAsync(new(Inspect: new WindowInspectRequest(
-                    windowId!, 5, 30, null, null, 0, false, name,
-                    null, 0, WindowInspectScope.TAB,
-                    TabId: verifiedTab.TabId, ExpectedProfile: selector, ExpectedUrl: url,
-                    BrowserWindowId: verifiedTab.BrowserWindowId)));
-                var matches = reply.Inspect?.Elements.Where(e =>
-                    e.Name == name && e.ElementId.StartsWith("c1:", StringComparison.Ordinal)).ToArray();
-                if (reply.Inspect?.Status != WindowInspectCode.COMPLETED || matches?.Length != 1)
-                    throw new InvalidOperationException($"CI_CDP_ELEMENT_{name}_{reply.Inspect?.Status}");
-                return matches[0].ElementId;
+                WindowInspectResult? inspected = null;
+                WindowElement[] matches = [];
+                for (int attempt = 0; attempt < 3; attempt++)
+                {
+                    // Accessibility snapshots can lag the initial DOM update.
+                    // Repeat only the exact read-only inspection; ambiguity is
+                    // rejected immediately, and an effectful call is never retried.
+                    RefreshOwnedProfile();
+                    var reply = await ExchangeAsync(new(Inspect: new WindowInspectRequest(
+                        windowId!, 5, 50, null, null, 0, false, name,
+                        roleFilter, 0, WindowInspectScope.TAB,
+                        TabId: verifiedTab.TabId, ExpectedProfile: selector, ExpectedUrl: url,
+                        BrowserWindowId: verifiedTab.BrowserWindowId)));
+                    inspected = reply.Inspect;
+                    matches = inspected?.Elements.Where(e =>
+                        e.Name == name && e.ElementId.StartsWith("c1:", StringComparison.Ordinal))
+                        .ToArray() ?? [];
+                    if (inspected?.Status == WindowInspectCode.COMPLETED && matches.Length == 1)
+                        return matches[0].ElementId;
+                    if (matches.Length > 1 || inspected?.Status != WindowInspectCode.COMPLETED)
+                        break;
+                    if (attempt < 2) await Task.Delay(100);
+                }
+                string evidence = string.Join("|", (inspected?.Elements ?? []).Take(8)
+                    .Select(e => $"{e.Role}:{e.Name}:cdp={e.ElementId.StartsWith("c1:", StringComparison.Ordinal)}"));
+                throw new InvalidOperationException($"CI_CDP_ELEMENT_{name}_{inspected?.Status}_" +
+                    $"count={matches.Length}_all={inspected?.Elements.Length}_" +
+                    $"truncated={inspected?.Truncated}_samples={evidence}");
             }
             // Exercise a complete background React-like confirmation flow:
             // the opening click is only confirmed once the dialog appears;
@@ -464,11 +482,13 @@ internal static class ChromeAcceptanceFixture
             // A DOM rerender must invalidate the old c1 identity *before* the
             // first input dispatch. The caller may inspect again and perform
             // one new action; the stale attempt itself must have no effect.
-            string oldStaleElement = await FindOwnedElement("CI_CDP_STALE_ACTION");
-            string replaceElement = await FindOwnedElement("CI_CDP_STALE_REPLACE");
+            string oldStaleElement = await FindOwnedElement("CI_CDP_STALE_ACTION",
+                WindowRoleFilter.BUTTON);
+            string replaceElement = await FindOwnedElement("CI_CDP_STALE_REPLACE",
+                WindowRoleFilter.BUTTON);
             var replaceReply = (await ExchangeAsync(new(Action: new WindowActionRequest(
                 windowId!, replaceElement, WindowActionKind.CLICK, null,
-                ExpectedName: "CI_CDP_STALE_REPLACED",
+                ExpectedName: "CI_CDP_STALE_READY",
                 ExpectedChange: WindowExpectedChange.APPEARS,
                 ExpectedProfile: selector, ExpectedUrl: url,
                 InputMode: WindowInputMode.CDP_ONLY,
@@ -490,7 +510,8 @@ internal static class ChromeAcceptanceFixture
                 state.StaleClicks != 0)
                 throw new InvalidOperationException($"CI_CDP_STALE_REJECTION_{staleReply?.Status}_" +
                     $"effect={staleReply?.EffectState}_clicks={state.StaleClicks}");
-            string freshStaleElement = await FindOwnedElement("CI_CDP_STALE_ACTION");
+            string freshStaleElement = await FindOwnedElement("CI_CDP_STALE_ACTION",
+                WindowRoleFilter.BUTTON);
             if (freshStaleElement == oldStaleElement)
                 throw new InvalidOperationException("CI_CDP_RERENDER_REUSED_STALE_IDENTITY");
             var freshReply = (await ExchangeAsync(new(Action: new WindowActionRequest(
@@ -511,7 +532,8 @@ internal static class ChromeAcceptanceFixture
             // The button starts far below the browser viewport. The single
             // consented CDP owner must scroll it into view, verify hit testing,
             // then dispatch exactly one background click with server evidence.
-            string offscreenButton = await FindOwnedElement("CI_CDP_OFFSCREEN_BUTTON");
+            string offscreenButton = await FindOwnedElement("CI_CDP_OFFSCREEN_BUTTON",
+                WindowRoleFilter.BUTTON);
             var offscreenReply = (await ExchangeAsync(new(Action: new WindowActionRequest(
                 windowId!, offscreenButton, WindowActionKind.CLICK, null,
                 ExpectedName: "CI_CDP_OFFSCREEN_DONE",
@@ -1062,7 +1084,7 @@ internal static class ChromeAcceptanceFixture
                     "fresh.setAttribute('aria-label','CI_CDP_STALE_ACTION');" +
                     "fresh.textContent='Action';wireStale(fresh);old.replaceWith(fresh);" +
                     "const notice=document.createElement('div');notice.setAttribute('role','status');" +
-                    "notice.setAttribute('aria-label','CI_CDP_STALE_REPLACED');" +
+                    "notice.setAttribute('aria-label','CI_CDP_STALE_READY');" +
                     "notice.textContent='Replacement ready';" +
                     "document.getElementById('stale-status').replaceChildren(notice)});" +
                     "document.getElementById('offscreen').addEventListener('click',e=>{" +
