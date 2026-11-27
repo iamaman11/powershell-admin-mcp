@@ -83,7 +83,6 @@ internal static partial class WindowChromeCdp
     private const int ProtocolMaxParametersBytes = 16 * 1024;
     private const int ProtocolMaxResultBytes = 64 * 1024;
     private const int ProtocolMaxSchemaBytes = 8 * 1024 * 1024;
-    private static readonly HttpClient ProtocolHttp = new(new HttpClientHandler { UseProxy = false });
     private static string? _protocolSchemaGeneration;
     private static Uri? _protocolSchemaEndpoint;
     private static JsonElement _protocolSchema;
@@ -387,12 +386,14 @@ internal static partial class WindowChromeCdp
             "/json/protocol").Uri;
         using var probe = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         probe.CancelAfter(TimeSpan.FromSeconds(8));
-        // Discovery uses a short HTTP GET, not another CDP WebSocket. Disable
-        // keep-alive so the schema probe cannot leave a second established
-        // TCP socket alongside the one authorized long-lived CDP connection.
+        // A short-lived HTTP transport is used only to fetch the protocol
+        // schema. Disposing its entire handler after reading guarantees that
+        // neither Chrome nor .NET keeps a second established pooled socket.
+        using var httpHandler = new HttpClientHandler { UseProxy = false };
+        using var httpClient = new HttpClient(httpHandler);
         using var schemaRequest = new HttpRequestMessage(HttpMethod.Get, uri);
         schemaRequest.Headers.ConnectionClose = true;
-        using var response = await ProtocolHttp.SendAsync(schemaRequest,
+        using var response = await httpClient.SendAsync(schemaRequest,
             HttpCompletionOption.ResponseHeadersRead, probe.Token);
         if (!response.IsSuccessStatusCode || response.Content.Headers.ContentLength > ProtocolMaxSchemaBytes)
             return null;

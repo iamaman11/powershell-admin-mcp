@@ -641,7 +641,10 @@ internal static class ChromeAcceptanceFixture
                 t.RemoteAddress == "127.0.0.1") ?? 0;
             if (sockets.Status != SystemQueryCode.COMPLETED || established != 1)
                 throw new InvalidOperationException($"CI_CDP_EXPECT_ONE_SOCKET " +
-                    $"query={sockets.Status} established={established}");
+                    $"query={sockets.Status} established={established} " +
+                    $"connections={string.Join(",", sockets.TcpConnections?.Where(t =>
+                        t.RemotePort == endpoint!.Port).Select(t =>
+                            $"{t.State}/{t.LocalPort}->{t.RemoteAddress}:{t.RemotePort}") ?? [])}");
             Console.WriteLine($"PASS chrome_ci.one_shared_cdp_worker_and_websocket " +
                 $"worker_pid={children[0]} owner_pid={self.Id} socket_count={established}");
 
