@@ -15,6 +15,47 @@ internal static partial class WindowChromeCdp
 {
     private const int BoundsTolerance = 40;
 
+    // A successful HWND/title/bounds or unique tab-strip match is a proof of
+    // the Chrome window identity for this consented CDP session. Keep that
+    // proof when Chrome subsequently changes its geometry or tab-strip UI.
+    // Never learn this association from browser-wide enumeration alone.
+    private sealed record ProvenSessionWindow(int BrowserWindowId, string Generation);
+    private static readonly object SessionWindowBindingLock = new();
+    private static readonly Dictionary<string, ProvenSessionWindow> ProvenSessionWindows =
+        new(StringComparer.Ordinal);
+
+    internal static void ClearSessionWindowBindings()
+    {
+        lock (SessionWindowBindingLock) ProvenSessionWindows.Clear();
+    }
+
+    internal static void RememberSessionWindow(string nativeWindowId, string? generation,
+        int browserWindowId)
+    {
+        if (!WindowCatalog.TryParseId(nativeWindowId, out _) ||
+            string.IsNullOrWhiteSpace(generation) || browserWindowId <= 0) return;
+        lock (SessionWindowBindingLock)
+        {
+            if (ProvenSessionWindows.Count >= 64 &&
+                !ProvenSessionWindows.ContainsKey(nativeWindowId)) ProvenSessionWindows.Clear();
+            ProvenSessionWindows[nativeWindowId] = new(browserWindowId, generation);
+        }
+    }
+
+    // A cached match is usable only for the exact original HWND/PID/start,
+    // the same CDP session, and an active native title still owned by that
+    // Chrome window. A closed/moved tab, changed session or recycled HWND
+    // cannot be replaced with a guessed browser-wide window.
+    internal static int? SessionWindowFromTitle(string nativeWindowId, string? generation,
+        IEnumerable<int> activeTitleWindowIds)
+    {
+        lock (SessionWindowBindingLock)
+            return generation is not null &&
+                ProvenSessionWindows.TryGetValue(nativeWindowId, out var proof) &&
+                proof.Generation == generation && activeTitleWindowIds.Contains(proof.BrowserWindowId)
+                    ? proof.BrowserWindowId : null;
+    }
+
     [DllImport("user32.dll")]
     private static extern uint GetDpiForWindow(IntPtr hwnd);
 
@@ -255,6 +296,8 @@ internal static partial class WindowChromeCdp
         // Distinct TargetInfo contexts are allowed *within that same window*;
         // multiple CDP window IDs (even at identical bounds) are not guessed.
         var selected = UniqueWindowId(titleMatches, out int distinctCount);
+        if (selected is null)
+            selected = SessionWindowFromTitle(windowId, CurrentGeneration, titleWindowIds);
         var failure = titlePages.Length == 0 ? WindowCdpMappingFailure.TITLE_NOT_FOUND :
             distinctCount == 0 ? WindowCdpMappingFailure.BOUNDS_MISMATCH :
             WindowCdpMappingFailure.FINGERPRINT_AMBIGUOUS;
@@ -315,6 +358,8 @@ internal static partial class WindowChromeCdp
             throw new CdpWindowMappingException(distinctCount == 0 ?
                 CdpWindowMappingState.NOT_FOUND : CdpWindowMappingState.AMBIGUOUS,
                 failure, titlePages.Length, fingerprintCandidates);
+
+        RememberSessionWindow(windowId, CurrentGeneration, selected.Value);
 
         var found = new List<TabTarget>();
         foreach (var page in pages.Where(p => IsRequestedTabCandidate(p.Id, p.Url,
