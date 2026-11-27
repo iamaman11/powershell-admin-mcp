@@ -79,6 +79,15 @@ internal static partial class WindowChromeCdp
         hwnd != IntPtr.Zero && IsWindowVisible(hwnd) && !IsIconic(hwnd) &&
         GetForegroundWindow() == hwnd;
 
+    // The parent broker must answer STATUS even before a CDP child exists.
+    // A full HWND/PID/start/session resolution is required for its consent hint.
+    internal static bool NativeConsentWindowReady(string windowId)
+    {
+        using var self = Process.GetCurrentProcess();
+        return WindowCatalog.ResolveId(windowId, self.SessionId, out var hwnd) ==
+            WindowResolveCode.OK && ConsentWindowReady(hwnd);
+    }
+
     internal static bool CdpTransportFailure(Exception e) => e is
         WebSocketException or IOException or JsonException ||
         e is InvalidOperationException { Message: "CDP_SOCKET_CLOSED" };
