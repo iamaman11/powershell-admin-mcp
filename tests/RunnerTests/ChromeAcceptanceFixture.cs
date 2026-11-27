@@ -83,17 +83,26 @@ internal static class ChromeAcceptanceFixture
             // Hosted Windows runners can spend substantially longer starting
             // their first browser process under load. Wait for the browser's
             // own endpoint file without touching another Chrome process.
-            if (!await UntilAsync(() => File.Exists(ownedEndpoint), TimeSpan.FromSeconds(30)))
+            if (!await UntilAsync(() => File.Exists(ownedEndpoint), TimeSpan.FromSeconds(60)))
             {
                 int? exitCode = browser.HasExited ? browser.ExitCode : null;
                 var chromeProcesses = Process.GetProcessesByName("chrome");
                 int chromeCount = chromeProcesses.Length;
                 foreach (var process in chromeProcesses) process.Dispose();
+                int ownedTopLevelFiles;
+                try { ownedTopLevelFiles = Directory.EnumerateFiles(profileDir).Take(64).Count(); }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                { ownedTopLevelFiles = -1; }
                 Console.WriteLine($"CHROME_CI_STARTUP_DIAGNOSTIC " +
                     $"browser_exited={browser.HasExited} " +
-                    $"exit_code={exitCode} chrome_process_count={chromeCount}");
-                Blocked("CI_CHROME_DEBUG_ENDPOINT_UNAVAILABLE");
-                return;
+                    $"exit_code={exitCode} chrome_process_count={chromeCount} " +
+                    $"owned_endpoint_file={File.Exists(ownedEndpoint)} " +
+                    $"owned_local_state={File.Exists(Path.Combine(profileDir, "Local State"))} " +
+                    $"owned_profile_file_count_capped_64={ownedTopLevelFiles}");
+                // Chrome is installed and we launched an owned process. A
+                // missing DevTools endpoint is a real acceptance failure, not
+                // an external-blocker waiver that can make CI falsely green.
+                throw new InvalidOperationException("CI_CHROME_DEBUG_ENDPOINT_UNAVAILABLE");
             }
             // Chrome creates this file before its final write is necessarily
             // visible or its writer handle is released. The existence check
