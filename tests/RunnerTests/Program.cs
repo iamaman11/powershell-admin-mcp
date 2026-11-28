@@ -2013,6 +2013,18 @@ Check(WindowChromeCdp.UniqueStrongTabFingerprintWindow(new[] { 12,13 },
         maximizedSameTitlePages,
         new[] { "All workflows", "Profile Control Plane", "Other Profile Tab" }) is null,
     "chrome.maximized_windows_with_mismatched_bounds_require_two_exclusive_native_tab_titles");
+var nativeWithInternalTabs = new[]
+    { "Profile Control Plane", "Unique Web Tab", "Settings", "Extensions" };
+var cdpWithInternalTabs = new (int WindowId, string Title)[]
+{
+    (12, "Profile Control Plane"), (12, "Unique Web Tab"),
+    (12, "Settings"), (12, "Extensions"), (13, "Other Profile Tab")
+};
+Check(WindowChromeCdp.UniqueStrongTabFingerprintWindow(new[] { 12, 13 },
+        cdpWithInternalTabs, nativeWithInternalTabs) == 12 &&
+    !WindowChromeCdp.MatchesContext("chrome://settings", null, null) &&
+    !WindowChromeCdp.MatchesContext("chrome://extensions", null, null),
+    "chrome.internal_tabs_count_for_window_identity_but_never_http_action_targeting");
 string mappingWire=System.Text.Json.JsonSerializer.Serialize(new WindowInspectResult(
     WindowInspectCode.CDP_TARGET_NOT_FOUND,[],Detail:"CDP_WINDOW_NO_MATCH",
     CdpMappingFailure:WindowCdpMappingFailure.FINGERPRINT_AMBIGUOUS,
