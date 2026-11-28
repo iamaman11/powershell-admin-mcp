@@ -20,6 +20,7 @@ internal static class ChromeAcceptanceFixture
         await VerifyEventSubscriptionsAsync();
         await VerifyFrameTreeFallbackAsync();
         VerifyProtocolFallbackParameters();
+        VerifyBundledProtocolReference();
         await VerifyProtocolHttp404WebSocketFallbackAsync();
 
         string? chrome = new[]
@@ -880,6 +881,21 @@ internal static class ChromeAcceptanceFixture
             "invalid_null_array_syntax_depth_size_rejected_before_dispatch");
     }
 
+    private static void VerifyBundledProtocolReference()
+    {
+        var reference = WindowChromeCdp.BundledReferenceProtocolSchema();
+        if (reference is not { } schema || schema.ValueKind != JsonValueKind.Object ||
+            !schema.TryGetProperty("domains", out var domains) ||
+            domains.ValueKind != JsonValueKind.Array || domains.GetArrayLength() < 40 ||
+            !WindowChromeCdp.TryFindCommand(schema, "Browser.getVersion", out _) ||
+            !WindowChromeCdp.TryFindCommand(schema, "Page.getNavigationHistory", out _) ||
+            !WindowChromeCdp.TryFindCommand(schema, "Runtime.evaluate", out _) ||
+            !WindowChromeCdp.TryFindEvent(schema, "Page.frameNavigated"))
+            throw new InvalidOperationException("CI_CDP_BUNDLED_REFERENCE_INVALID");
+        Console.WriteLine("PASS chrome_ci.bundled_cdp_reference_pinned_hashes " +
+            "browser_page_runtime_commands_events_without_http_or_new_socket");
+    }
+
     private static async Task VerifyProtocolHttp404WebSocketFallbackAsync()
     {
         // Chrome can expose an approved DevTools WebSocket while returning
@@ -944,6 +960,8 @@ internal static class ChromeAcceptanceFixture
             var cached = await WindowChromeCdp.ResolveProtocolMetadataAsync(
                 endpoint, session, deadline.Token);
             if (metadata.FullSchema is not null ||
+                metadata.ReferenceSchema is not { } reference ||
+                !WindowChromeCdp.TryFindCommand(reference, "Browser.getVersion", out _) ||
                 metadata.LiveDomains is not { } live ||
                 !live.GetRawText().Contains("Browser", StringComparison.Ordinal) ||
                 !live.GetRawText().Contains("Page", StringComparison.Ordinal) ||

@@ -64,12 +64,18 @@ verifies the new target's browser window identity after creation.
 
 The generic `windows.chrome_cdp` entry point prefers the running browser's
 `/json/protocol` schema. Approval-based Chrome may return HTTP 404 for `/json/*`
-despite a fully working consented WebSocket; in that mode it discovers domains
-through `Schema.getDomains` on the **same socket**, and lets Chrome validate
-individual commands and JSON parameters. `DESCRIBE` explicitly labels the
-result `DOMAINS_ONLY` when complete method signatures are unavailable. Metadata
-is cached per broker generation; no extra CDP transport or static method
-whitelist is maintained. `DESCRIBE`, `TARGETS`, `CALL`, `SUBSCRIBE`, `EVENTS`
+despite a fully working consented WebSocket. For `DESCRIBE`, this mode uses an
+embedded, upstream-commit-pinned official CDP reference (browser and JavaScript
+domains), verified against SHA-256 digests at load time and clearly labeled
+`BUNDLED_REFERENCE_SCHEMA_NOT_RUNTIME_VERIFIED`. This reference describes
+possible commands, events and parameter types, **not the exact methods
+implemented by the connected Chrome**. `CALL` never uses the bundled reference
+as a whitelist or parameter validator: Chrome itself validates commands and
+JSON on the existing consented WebSocket. If the reference is unavailable,
+`Schema.getDomains` on the same WebSocket supplies `DOMAINS_ONLY` metadata when
+available. Runtime metadata is cached per broker generation, while the pinned
+reference is shared across generations; no additional socket or debugging
+endpoint is created. `DESCRIBE`, `TARGETS`, `CALL`, `SUBSCRIBE`, `EVENTS`
 and `UNSUBSCRIBE` remain one typed contract, and arguments are bounded JSON
 objects regardless of the metadata source. By default target selection requires a
 unique native window mapping. An explicit browser-scoped opt-in may select

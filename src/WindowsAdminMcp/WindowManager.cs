@@ -133,7 +133,11 @@ internal static class WindowManager
             // unsaved-work prompt. Message acceptance is not effect verification.
             if(!PostMessage(hwnd,WmClose,IntPtr.Zero,IntPtr.Zero))
                 return Done(WindowManageCode.NATIVE_FAILURE,before,Observe(hwnd),Marshal.GetLastPInvokeError());
-            for(int attempt=0;attempt<30;attempt++)
+            // WM_CLOSE is queued on the target UI thread. A busy but responsive
+            // WinForms/WPF message pump may process it after 750 ms; allow a
+            // bounded 3-second observation window before reporting uncertainty.
+            // Never resend WM_CLOSE if the first effect is still unknown.
+            for(int attempt=0;attempt<120;attempt++)
             {
                 var state=WindowCatalog.ResolveId(id,session,out _);
                 if(state==WindowResolveCode.STALE_WINDOW)

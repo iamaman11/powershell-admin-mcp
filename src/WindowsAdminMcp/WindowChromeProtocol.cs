@@ -1,7 +1,9 @@
 using System.Diagnostics;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
 using System.Net.WebSockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -89,7 +91,9 @@ internal static partial class WindowChromeCdp
     private static string? _protocolMetadataGeneration;
     private static Uri? _protocolMetadataEndpoint;
     private static ProtocolMetadata? _protocolMetadata;
-    internal sealed record ProtocolMetadata(JsonElement? FullSchema, JsonElement? LiveDomains)
+    private static JsonElement _referenceProtocolSchema;
+    internal sealed record ProtocolMetadata(JsonElement? FullSchema, JsonElement? LiveDomains,
+        JsonElement? ReferenceSchema = null)
     {
         internal bool HasFullSchema => FullSchema is not null;
     }
@@ -256,8 +260,16 @@ internal static partial class WindowChromeCdp
         JsonElement? schema = metadata?.FullSchema;
 
         if (request.Action == ChromeProtocolAction.DESCRIBE)
-            return schema is { } full ? DescribeProtocol(full, request) :
-                DescribeLiveDomains(metadata!.LiveDomains, request);
+        {
+            if (schema is { } full) return DescribeProtocol(full, request);
+            if (metadata!.ReferenceSchema is { } reference)
+            {
+                var described = DescribeProtocol(reference, request);
+                if (described.Status == ChromeProtocolCode.COMPLETED)
+                    return described with { Detail = "BUNDLED_REFERENCE_SCHEMA_NOT_RUNTIME_VERIFIED" };
+            }
+            return DescribeLiveDomains(metadata.LiveDomains, request);
+        }
 
         if (request.Action == ChromeProtocolAction.TARGETS)
         {
@@ -425,11 +437,67 @@ internal static partial class WindowChromeCdp
                 // In that case Chrome itself remains authoritative for CALL.
             }
         }
-        var metadata = new ProtocolMetadata(full, liveDomains);
+        var metadata = new ProtocolMetadata(full, liveDomains,
+            full is null ? BundledReferenceProtocolSchema() : null);
         _protocolMetadataGeneration = CurrentGeneration;
         _protocolMetadataEndpoint = endpoint;
         _protocolMetadata = metadata;
         return metadata;
+    }
+
+    // Official ChromeDevTools protocol JSON is pinned in protocol.lock.json.
+    // It is an OFFLINE REFERENCE for DESCRIBE, not a claim about the exact
+    // running Chrome build and never a command/argument allowlist. Only a
+    // successful /json/protocol response is authoritative for prevalidation.
+    internal static JsonElement? BundledReferenceProtocolSchema()
+    {
+        if (_referenceProtocolSchema.ValueKind == JsonValueKind.Object)
+            return _referenceProtocolSchema;
+        var files = new[]
+        {
+            (Name: "browser_protocol.json.gz",
+             Sha: "604da8bb8bc470f663ae3ca42052af8779e551018e3770c1713518cf3f3da543"),
+            (Name: "js_protocol.json.gz",
+             Sha: "cd77c2c629bd3ca2901ea6634ba8a29fdfd4fff35d0ec63d6f21904007b5a0a6")
+        };
+        var domains = new List<JsonElement>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var file in files)
+        {
+            using var stream = typeof(WindowChromeCdp).Assembly.GetManifestResourceStream(
+                "WindowsAdminMCP.ProtocolSchemas." + file.Name);
+            if (stream is null || stream.Length is < 1 or > ProtocolMaxSchemaBytes)
+                return null;
+            using var gzip = new GZipStream(stream, CompressionMode.Decompress);
+            using var buffer = new MemoryStream();
+            var chunk = new byte[32768];
+            while (true)
+            {
+                int received = gzip.Read(chunk, 0, chunk.Length);
+                if (received == 0) break;
+                if (buffer.Length + received > ProtocolMaxSchemaBytes) return null;
+                buffer.Write(chunk, 0, received);
+            }
+            byte[] contents = buffer.ToArray();
+            if (!SHA256.HashData(contents).AsSpan().SequenceEqual(Convert.FromHexString(file.Sha)))
+                return null;
+            using var parsed = JsonDocument.Parse(contents);
+            if (parsed.RootElement.ValueKind != JsonValueKind.Object ||
+                !parsed.RootElement.TryGetProperty("domains", out var source) ||
+                source.ValueKind != JsonValueKind.Array)
+                return null;
+            foreach (var domain in source.EnumerateArray())
+            {
+                string? name = StringProperty(domain, "domain");
+                if (string.IsNullOrEmpty(name) || !seen.Add(name)) return null;
+                domains.Add(domain.Clone());
+            }
+        }
+        _referenceProtocolSchema = JsonSerializer.SerializeToElement(new
+        {
+            version = new { major = "1", minor = "3" }, domains
+        });
+        return _referenceProtocolSchema;
     }
 
     // Standard remote debugging offers full metadata. Approval-based debugging

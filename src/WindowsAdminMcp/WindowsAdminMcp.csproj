@@ -24,4 +24,10 @@
   <ItemGroup>
     <InternalsVisibleTo Include="RunnerTests" />
   </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="ProtocolSchemas/browser_protocol.json.gz"
+                      LogicalName="WindowsAdminMCP.ProtocolSchemas.browser_protocol.json.gz" />
+    <EmbeddedResource Include="ProtocolSchemas/js_protocol.json.gz"
+                      LogicalName="WindowsAdminMCP.ProtocolSchemas.js_protocol.json.gz" />
+  </ItemGroup>
 </Project>

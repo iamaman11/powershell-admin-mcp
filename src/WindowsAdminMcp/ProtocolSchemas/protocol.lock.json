@@ -1,0 +1,9 @@
+{
+  "source": "https://github.com/ChromeDevTools/devtools-protocol",
+  "commit": "ce722882bee61612660eb40f513fca67585890da",
+  "files": {
+    "json/browser_protocol.json": "604da8bb8bc470f663ae3ca42052af8779e551018e3770c1713518cf3f3da543",
+    "json/js_protocol.json": "cd77c2c629bd3ca2901ea6634ba8a29fdfd4fff35d0ec63d6f21904007b5a0a6"
+  },
+  "license": "LICENSE"
+}

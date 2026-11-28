@@ -340,23 +340,23 @@ returns a typed failure instead of requesting foreground focus.
 
 | `action` | Purpose |
 | --- | --- |
-| `DESCRIBE` | Page through CDP domains. When Chrome exposes `/json/protocol`, `domain` lists commands/events and `method` returns parameter definitions; approval-based HTTP 404 yields clearly marked `DOMAINS_ONLY` information via the same WebSocket. |
+| `DESCRIBE` | Page through CDP domains. When Chrome exposes `/json/protocol`, `domain` lists commands/events and `method` returns parameter definitions from the running browser. When approval-based Chrome returns HTTP 404, a pinned official CDP reference provides signatures with `detail=BUNDLED_REFERENCE_SCHEMA_NOT_RUNTIME_VERIFIED`; these are a catalog, not verified runtime availability. If that reference cannot load, `Schema.getDomains` on the same socket can provide `DOMAINS_ONLY`. |
 | `TARGETS` | List exact target IDs and CDP window IDs for a confirmed browser/window; paginate with `offset` and `page_size`. |
 | `CALL` | Call any Chrome CDP method with a bounded JSON object in `parameters_json`, optionally scoped to exact `tab_id`, `browser_window_id`, `expected_origin` and `expected_url`. With complete HTTP metadata arguments are prevalidated; otherwise Chrome validates them during dispatch. |
-| `SUBSCRIBE` | Subscribe to a CDP event, or to a domain wildcard such as `Page.*`. With `DOMAINS_ONLY`, registration acknowledges a filter, not proof that the event is supported or emitted. |
+| `SUBSCRIBE` | Subscribe to a CDP event, or to a domain wildcard such as `Page.*`. Registration acknowledges a filter, not proof that the event is supported or emitted, even when listed in the bundled reference. |
 | `EVENTS` | Read a bounded event page using `subscription_id` and `after_sequence`; `dropped=true` warns of overflow. |
 | `UNSUBSCRIBE` | Release the subscription. |
 
-For example, `DESCRIBE` with `domain=Browser` lists its methods when complete
-HTTP metadata is available; in approval-based Chrome the result honestly
-indicates `DOMAINS_ONLY` and missing signatures. `CALL` with
+For example, `DESCRIBE` with `domain=Browser` lists its methods from the live
+HTTP schema when available, or from the bundled official reference (explicitly
+marked as not verified against the running Chrome). `CALL` with
 `method=Browser.getVersion, parameters_json={}, allow_browser_scope=true`
 reads the browser version. Any `CALL` or `SUBSCRIBE` without `tab_id` requires
 this explicit browser-wide authority, including read-only browser methods.
 `CALL` with `method=Page.getNavigationHistory, tab_id=<verified tab>,
 parameters_json={}` reads navigation history from that target session.
-Use `DESCRIBE(method=...)` to inspect the method's parameters when the full
-protocol is exposed; otherwise Chrome itself validates `CALL`. Each result embeds
+Use `DESCRIBE(method=...)` to inspect a method's known parameters; when the
+reference is used, only the running Chrome can confirm support. Each result embeds
 the CDP response in typed `data`; event records are bounded and paginated.
 
 The default is background-oriented and fail-closed: commands known to bring a
