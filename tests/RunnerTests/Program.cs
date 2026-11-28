@@ -3155,9 +3155,12 @@ if (uiaDesktop.Code == CaptureCode.COMPLETED)
         var closed=await Task.Run(() => WindowManager.Execute(realWindowId,
             WindowManageAction.CLOSE,null,null,null,null,current.SessionId))
             .WaitAsync(TimeSpan.FromSeconds(5));
+        var closedIdentity = WindowCatalog.ResolveId(realWindowId,current.SessionId,out _);
+        Console.WriteLine($"CLOSE_OWNED_WINDOW status={closed.Status} effect={closed.EffectState} " +
+            $"elapsed_ms={closed.ElapsedMs} identity={closedIdentity}");
         Check(closed is {Status:WindowManageCode.COMPLETED,
             EffectState:WindowEffectState.EFFECT_VERIFIED} &&
-            WindowCatalog.ResolveId(realWindowId,current.SessionId,out _)==WindowResolveCode.STALE_WINDOW,
+            closedIdentity==WindowResolveCode.STALE_WINDOW,
             "windows.manage_graceful_close_verified_exact_hwnd_disappears");
     }
     finally
