@@ -109,7 +109,10 @@ output is a contract regression.
    window's real tab-strip siblings must supply a page title belonging to
    exactly one candidate CDP browser window. Mixed, truncated, absent or
    contradictory evidence fails closed; no page contents or title fingerprints
-   are logged. Zero matching window IDs yield `CDP_TARGET_NOT_FOUND`; unresolved
+   are logged. Internal `chrome://` tabs participate in this **read-only
+   window-identity fingerprint**, since they appear in both Chrome's tab strip
+   and CDP target list; they remain ineligible for ordinary HTTP(S)-scoped
+   tab actions. Zero matching window IDs yield `CDP_TARGET_NOT_FOUND`; unresolved
    multiple window IDs yield `CDP_TARGET_AMBIGUOUS`. Neither condition dispatches a
    UI effect, invents a foreground/profile match, or revokes native Chrome
    consent. Just before `Input.dispatch*` or the potentially effectful

@@ -318,8 +318,14 @@ internal static partial class WindowChromeCdp
                     var titles = new List<(int WindowId, string Title)>();
                     var nativeLabels = tabTitles.ToHashSet(StringComparer.Ordinal);
                     var candidates = titleMatches.Select(x => x.WindowId).ToHashSet();
-                    var matchingPages = pages.Where(p => nativeLabels.Contains(p.Title) &&
-                        (distinctCount > 1 || MatchesContext(p.Url, null, null))).ToArray();
+                    // Browser-owned chrome:// tabs are visible in the native
+                    // tab strip, and are valid READ-ONLY identity evidence.
+                    // Excluding them made a 24-tab native window look like a
+                    // 21-tab CDP window, defeating the near-complete strong
+                    // fingerprint whenever maximized bounds differed.
+                    // HTTP(S)-only action targeting remains enforced AFTER
+                    // this exact native-window identity has been resolved.
+                    var matchingPages = pages.Where(p => nativeLabels.Contains(p.Title)).ToArray();
                     fingerprintCandidates = matchingPages.Length;
                     if (fingerprintCandidates > 64)
                         failure = WindowCdpMappingFailure.FINGERPRINT_LIMIT;
